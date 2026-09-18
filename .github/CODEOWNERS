@@ -1,0 +1,84 @@
+# ============================================================
+# INTERLOCK — CODE OWNERSHIP
+# Primary owner + required reviewer
+# ============================================================
+
+
+# ------------------------------------------------------------
+# OWNER A — RUPESH
+# Runtime / shared contracts / integration
+# Reviewer: Rohan
+# ------------------------------------------------------------
+
+/.env.example                              @rupeshhh007 @Rohanop03
+/backend/pyproject.toml                    @rupeshhh007 @Rohanop03
+
+/backend/interlock/__init__.py             @rupeshhh007 @Rohanop03
+/backend/interlock/config.py               @rupeshhh007 @Rohanop03
+
+/backend/interlock/domain/                 @rupeshhh007 @Rohanop03
+/backend/interlock/runtime/                @rupeshhh007 @Rohanop03
+/backend/interlock/adapters/               @rupeshhh007 @Rohanop03
+
+/backend/interlock/main.py                 @rupeshhh007 @Rohanop03
+/backend/interlock/metrics.py              @rupeshhh007 @Rohanop03
+
+/backend/interlock/testing/clock.py        @rupeshhh007 @Rohanop03
+/backend/interlock/testing/scenario.py     @rupeshhh007 @Rohanop03
+
+/backend/tests/                            @rupeshhh007 @Rohanop03
+
+
+# ------------------------------------------------------------
+# OWNER B — ABHINAV
+# Intelligence
+# Reviewer: Rupesh
+# ------------------------------------------------------------
+
+/backend/interlock/intelligence/           @abhinavanand1306 @rupeshhh007
+
+/backend/interlock/providers/base.py       @abhinavanand1306 @rupeshhh007
+/backend/interlock/providers/llm.py        @abhinavanand1306 @rupeshhh007
+/backend/interlock/providers/fallback.py   @abhinavanand1306 @rupeshhh007
+
+
+# ------------------------------------------------------------
+# OWNER C — AMRIT
+# Execution / tools / effects / reconciliation
+# Reviewer: Rupesh
+# ------------------------------------------------------------
+
+/backend/interlock/execution/              @amriiit @rupeshhh007
+
+/backend/interlock/providers/fake_tools.py @amriiit @rupeshhh007
+
+/backend/interlock/testing/fixtures.py     @amriiit @rupeshhh007
+/backend/interlock/testing/faults.py       @amriiit @rupeshhh007
+
+/backend/tests/fixtures/                   @amriiit @rupeshhh007
+/backend/scenarios/                        @amriiit @rupeshhh007
+
+
+# ------------------------------------------------------------
+# OWNER D — ROHAN
+# Truth / Product / Frontend
+# Reviewer: Abhinav
+# ------------------------------------------------------------
+
+/backend/interlock/truth/                  @Rohanop03 @abhinavanand1306
+/frontend/                                 @Rohanop03 @abhinavanand1306
+
+
+# ------------------------------------------------------------
+# FROZEN SHARED DOCUMENTATION
+# Contract changes require team review
+# ------------------------------------------------------------
+
+/docs/                                    @rupeshhh007 @abhinavanand1306 @amriiit @Rohanop03
+/AGENTS.md                                @rupeshhh007 @abhinavanand1306 @amriiit @Rohanop03
+/ARCHITECTURE.md                          @rupeshhh007 @abhinavanand1306 @amriiit @Rohanop03
+/README.md                                @rupeshhh007 @abhinavanand1306 @amriiit @Rohanop03
+
+
+# CODEOWNERS itself
+/.github/CODEOWNERS                       @rupeshhh007 @Rohanop03
