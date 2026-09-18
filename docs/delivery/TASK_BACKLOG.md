@@ -1,0 +1,46 @@
+# Task Backlog
+
+Every ticket has one priority and primary owner. Dependencies below are exact existing ticket IDs; `none` means immediately unblocked. File creation ownership is canonical in the blueprint. Shared DoD: implement only listed scope; honor interfaces/schemas/events; handle listed boundary/race failures; run and report the exact canonical tests; pass relevant invariant negatives; update contracts only through policy; provide integration evidence and no fabricated results.
+
+Path convention: a source code span beginning `runtime/`, `intelligence/`, `execution/`, `truth/`, `adapters/`, `providers/`, `testing/`, `main.py`, or `metrics.py` is an exact path relative to `backend/interlock/`. All test, scenario, fixture, frontend, root, and configuration paths are written from repository root. The blueprint is the canonical creation-owner manifest.
+
+| ID / priority / owner | Objective; dependencies | Exact files created or modified | Interfaces, requirements, events; tests and acceptance |
+|---|---|---|---|
+| INT-001 / P0 / A | Domain models and settings; none | create `backend/pyproject.toml`, `backend/interlock/__init__.py`, `backend/interlock/config.py`, `backend/interlock/domain/enums.py`, `backend/interlock/domain/models.py`, `backend/interlock/domain/events.py`, `.env.example` | domain/event/config contracts; FR-001, FR-007, NFR-004; T-DOM-01, T-CFG-01; all examples serialize/reject correctly (G1) |
+| RUN-001 / P0 / A | Journal, sessions, retention; INT-001 | create `runtime/journal.py`, `runtime/session.py`; tests later created by TST-003 | JournalPort; SessionStarted/all intake; FR-001, NFR-008; T-JRN-01, T-RET-01; contiguous deduped acceptance |
+| RUN-002 / P0 / A | Pure reducer and commands; RUN-001 | create `runtime/reducer.py`, `runtime/commands.py` | Reducer; consumes every event, emits commands; FR-002, NFR-003; T-RED-01, T-RPL-01, I11/I12 tests |
+| RUN-003 / P0 / A | Async dispatcher and replay suppression; RUN-002 | create `runtime/dispatcher.py` | CommandDispatcher; commands→correlated events; NFR-001, NFR-003; T-CON-01, T-RPL-01; no replay effects (G2) |
+| INTEL-001 / P0 / B | Semantic control, model provider, fallback; INT-001 | create `intelligence/control.py`, `providers/base.py`, `providers/llm.py`, `providers/fallback.py` | ControlInterpreter/LLM; UserInputObserved→ControlIntentInterpreted; FR-003, NFR-004, NFR-006; T-CTL-01, T-LLM-01, T-SEC-01 |
+| INTEL-002 / P0 / B | Intent graph and selective invalidation; INT-001 | create `intelligence/intent_graph.py` | IntentGraph; intent events/bindings; FR-004, FR-005; T-INT-01, T-INT-02, T-CON-02 |
+| EXE-001 / P0 / C | Descriptor registry; INT-001 | create `execution/descriptors.py` | ToolRegistry/ToolDescriptor; FR-008; T-TOL-01; unknown capabilities conservative |
+| EXE-002 / P0 / C | Operations and idempotency; EXE-001, INTEL-002 | create `execution/operations.py`, `execution/idempotency.py` | OperationRecord; OperationCreated/result events; FR-007, FR-010; T-IDM-01, T-UNK-01 |
+| EXE-003 / P0 / C | SAFEPOINT policy; EXE-002 | create `execution/safepoint.py` | SafePointPolicy; safe-point/cancel/dispatch events; FR-007, FR-009; T-SAF-01, T-SAF-02 (G3) |
+| EXE-004 / P0 / C | Generic ToolRuntime only; EXE-001, EXE-003, RUN-003 | create `execution/tools.py`; does not create `providers/fake_tools.py` | ToolExecutor; dispatch/cancel/result/timeout; FR-008, FR-010; T-TOL-01, T-IDM-01, T-UNK-01, T-SEC-01 |
+| TRU-001 / P0 / D | Immutable evidence store; INT-001 | create `truth/evidence.py` | EvidenceStore; EvidenceRecorded; FR-013, NFR-008; T-EVD-01 and I8 cases |
+| EXE-005 / P0 / C | World Effect Ledger; EXE-004, TRU-001 | create `execution/effects.py` | EffectInterpreter; ToolResultObserved→WorldEffectObserved; FR-011; T-WLD-01 and I4/I9 cases |
+| TRU-002 / P0 / D | ClaimGraph; EXE-005, TRU-001 | create `truth/claims.py` | ClaimEvaluator; claim events/states; FR-014; T-CLM-01 and I9 cases |
+| TRU-003 / P0 / D | TRUTHLOCK; TRU-002 | create `truth/truthlock.py` | Truthlock; SpeechActProposed→approved/blocked; FR-015; T-TRU-01 and I6 cases |
+| TRU-004 / P0 / D | Speech/output lifecycle; TRU-003, RUN-003 | create `truth/speech.py` | OutputPort; speech lifecycle/correction events; FR-016; T-SPK-01 (G4) |
+| RUN-004 / P0 / A | Composition root and base metrics; RUN-003, INTEL-001, INTEL-002, EXE-004, EXE-005, TRU-004 | create `main.py`, `metrics.py` | all backend interfaces; NFR-002, NFR-005, NFR-006, NFR-007; T-MET-01, T-ARC-01, T-OFF-01 |
+| API-001 / P0 / A | HTTP commands; RUN-004 | create `adapters/http.py` | HTTP/JournalPort; SessionStarted/UserInput/authorization/speech/fault events; FR-018; T-API-01 |
+| API-002 / P0 / A | WebSocket projection/resync; RUN-004 | create `adapters/websocket.py` | ProjectionHub; snapshots/deltas; FR-018; T-WS-01 |
+| API-003 / P0 / A | Generic/Samsung-shaped adapters; API-001, EXE-001 | create `adapters/protocol.py`, `adapters/samsung.py` | adapter/tool contracts; FR-020; T-ADP-01 |
+| PRV-001 / P0 / C | Fake provider and fixtures; EXE-004, API-003 | create `backend/interlock/providers/fake_tools.py`, `backend/interlock/testing/fixtures.py`, `backend/tests/fixtures/demo.json`, `backend/tests/fixtures/manifests.json` | ToolExecutor adapter; canonical simulated booking results; NFR-006; T-OFF-01, T-ADP-01 |
+| TST-001 / P0 / A | Virtual clock and DSL; RUN-003 | create `testing/clock.py`, `testing/scenario.py` | Clock/ScenarioDefinition; FR-019; T-SCN-01 |
+| TST-002 / P0 / C | Fault engine and five scenario files; PRV-001, TST-001 | create `backend/interlock/testing/faults.py`, `backend/scenarios/normal.yaml`, `backend/scenarios/correction_before.yaml`, `backend/scenarios/late_reconcile.yaml`, `backend/scenarios/unknown.yaml`, `backend/scenarios/compensation_failure.yaml` | FaultActivated; FR-019; T-FLT-01, T-UNK-01 |
+| TST-003 / P0 / A | Complete P0 backend suite; RUN-004, API-003, PRV-001, TST-002 | create the 26 P0 test paths enumerated in the TST-003 blueprint rows; those rows are the exact file manifest and owning component reviews each relevant test | the 33 functional and 24 invariant IDs assigned to TST-003 in the canonical registries; zero missing IDs; G5 offline golden passes |
+| UI-001 / P0 / D | Frontend shell and base styles; INT-001 | create `frontend/package.json`, `frontend/vite.config.ts`, `frontend/tailwind.config.ts`, `frontend/src/main.tsx`, `frontend/src/App.tsx`, `frontend/src/styles/index.css` | frontend architecture; FR-018; T-UI-01 |
+| UI-002 / P0 / D | HTTP/WS clients and projection store; API-001, API-002, UI-001 | create frontend api/state files | HTTP/WS contracts; FR-018, NFR-007; T-UI-02, T-UI-03 |
+| UI-003 / P0 / D | Core conversation/intent/operation/world/claim/truth/divergence/trace views; UI-002 | create the 11 exact UI-003 component/page paths enumerated in the blueprint | projection mappings; FR-015, FR-018; T-UI-01, T-UI-04; divergence visible without P1 repair |
+| UI-004 / P0 / D | Core frontend tests; UI-003 | create `frontend/src/test/setup.ts`, `frontend/src/test/projections.test.ts`, `frontend/src/test/components.test.tsx`, `frontend/src/test/reconnect.test.ts` | T-UI-01 through T-UI-04; P0 UI suite green with accessibility assertions |
+| INTEL-003 / P1 / B | Temporal references; INTEL-002, TRU-001 | create `intelligence/references.py` | reference resolver/EvidenceRecord; FR-017; T-REF-01 |
+| INTEL-004 / P1 / B | BranchCache; INTEL-002, EXE-001, EXE-003 | create `intelligence/branch_cache.py` | BranchPlanner; branch events; FR-006; T-BRC-01 |
+| EXE-006 / P1 / C | Automatic reconciliation; EXE-005 | create `execution/reconciliation.py` | Reconciler; divergence/plan/step events; FR-012 P1; T-REC-01, T-REC-02, T-REC-03 |
+| TST-004 / P1 / A | Demo-critical P1 backend tests; INTEL-003, INTEL-004, EXE-006, TST-003 | create `backend/tests/unit/test_references.py`, `backend/tests/unit/test_branch_cache.py`, `backend/tests/unit/test_reconciliation.py`; modify `backend/tests/scenarios/test_golden.py` | T-REF-01, T-BRC-01, T-REC-01, T-REC-02, T-REC-03, T-E2E-02, T-INV-I2-P, T-INV-I2-N, T-INV-I10-P, T-INV-I10-N; G-04 checkpoints pass (G6) |
+| UI-005 / P1 / D | Branch, reconciliation, and metrics panels; UI-003, INTEL-004, EXE-006, RUN-004 | create `frontend/src/components/ReconciliationStepper.tsx`, `frontend/src/components/MetricsPanel.tsx`, `frontend/src/components/BranchCachePanel.tsx`; modify `frontend/src/pages/CopilotPage.tsx`, `frontend/src/pages/TracePage.tsx`, `frontend/src/test/components.test.tsx` | FR-006, FR-012, NFR-002; T-UI-05; full demo visible (G7) |
+
+## Dependency-ordered sequence
+
+P0 layers: `INT-001` → parallel (`RUN-001`, `INTEL-001`, `INTEL-002`, `EXE-001`, `TRU-001`, `UI-001`) → runtime/execution/truth chains → `RUN-004` → APIs/provider/harness/UI integration → `TST-003` and `UI-004`. P1 after P0 contracts: `INTEL-003`, `INTEL-004`, `EXE-006` → `TST-004`, `UI-005`. The graph is acyclic and no P0 ticket depends on P1/P2.
+
+First tickets: Owner A `INT-001`; after G1 Owner B `INTEL-001` or `INTEL-002`, Owner C `EXE-001`, Owner D `TRU-001` or `UI-001`.
