@@ -219,7 +219,7 @@ def _fallback_context(request: InterpretationRequest) -> FallbackContext:
     context = request.context
     return FallbackContext(
         active_intent_id=request.active_intent_id,
-        candidate_target_ids=tuple(request.candidate_target_ids),
+        candidate_target_ids=_trusted_target_ids(request),
         correction_field=_optional_string(context.get("correction_field")),
         value_aliases=_mapping(context.get("value_aliases")),
         goal_additions=_dict_mapping(context.get("goal_additions")),
@@ -234,7 +234,7 @@ def _control_provider_request(request: InterpretationRequest) -> ProviderRequest
         payload={
             "text": request.text,
             "final": request.final,
-            "candidate_ids": request.candidate_target_ids,
+            "candidate_ids": list(_trusted_target_ids(request)),
             "active_intent_id": request.active_intent_id,
             "context": request.context,
         },
@@ -254,6 +254,15 @@ def _enforce_policy(
             or "Please clarify the consequential change you want me to make."
         )
 
+    if (
+        proposal.consequential
+        and proposal.intent_delta is not None
+        and proposal.intent_delta.confidence < CONTROL_CONSEQUENTIAL_THRESHOLD
+    ):
+        return _safe_clarification(
+            "I could not confidently represent that change. Please clarify."
+        )
+
     if proposal.kind in _DELTA_CONTROL_KINDS and proposal.intent_delta is None:
         return _safe_clarification(
             "I could not safely represent that change. Please clarify."
@@ -263,7 +272,14 @@ def _enforce_policy(
         if len(proposal.target_refs) != 1:
             return _safe_clarification("Which specific item or operation do you mean?")
 
-    if any(target not in request.candidate_target_ids for target in proposal.target_refs):
+    trusted_targets = _trusted_target_ids(request)
+    if (
+        proposal.intent_delta is not None
+        and proposal.intent_delta.target_intent_id not in trusted_targets
+    ):
+        return _safe_clarification("I could not match that change to the supplied context.")
+
+    if any(target not in trusted_targets for target in proposal.target_refs):
         return _safe_clarification("I could not match that reference to the supplied context.")
 
     return proposal
@@ -274,6 +290,15 @@ def _normalize_consequential(
 ) -> FallbackInterpretation:
     """Prevent a model from downgrading canonical state-affecting controls."""
 
+    if proposal.kind == ControlKind.REFER and proposal.consequential:
+        return FallbackInterpretation(
+            kind=proposal.kind,
+            confidence=proposal.confidence,
+            consequential=False,
+            target_refs=proposal.target_refs,
+            clarification=proposal.clarification,
+            intent_delta=proposal.intent_delta,
+        )
     if proposal.kind not in _CANONICALLY_CONSEQUENTIAL or proposal.consequential:
         return proposal
     return FallbackInterpretation(
@@ -284,6 +309,18 @@ def _normalize_consequential(
         clarification=proposal.clarification,
         intent_delta=proposal.intent_delta,
     )
+
+
+def _trusted_target_ids(request: InterpretationRequest) -> tuple[str, ...]:
+    """Return caller-supplied targets plus the active intent, ordered and unique."""
+
+    trusted: List[str] = []
+    for target in request.candidate_target_ids:
+        if target not in trusted:
+            trusted.append(target)
+    if request.active_intent_id is not None and request.active_intent_id not in trusted:
+        trusted.append(request.active_intent_id)
+    return tuple(trusted)
 
 
 def _safe_clarification(message: str) -> FallbackInterpretation:

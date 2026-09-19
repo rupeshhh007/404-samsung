@@ -103,7 +103,7 @@ class DeterministicFallbackProvider:
                 return _result(
                     ControlKind.REFER,
                     0.92,
-                    True,
+                    False,
                     targets=context.candidate_target_ids,
                 )
             return _clarify("Which earlier item do you mean?")
