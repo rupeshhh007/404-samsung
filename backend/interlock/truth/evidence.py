@@ -15,9 +15,9 @@ conflicting insertions with the same evidence_id fail closed.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 
-from interlock.domain.enums import EvidenceAuthority, EvidenceSource
+from interlock.domain.enums import EvidenceSource
 from interlock.domain.models import EvidenceRecord
 
 
@@ -187,17 +187,5 @@ class EvidenceStore:
 
     @staticmethod
     def _is_identical(a: EvidenceRecord, b: EvidenceRecord) -> bool:
-        """Compare two EvidenceRecord instances for strict equality across all canonical fields."""
-        return (
-            a.evidence_id == b.evidence_id
-            and a.source == b.source
-            and a.kind == b.kind
-            and a.captured_at == b.captured_at
-            and a.content_ref == b.content_ref
-            and a.content_hash == b.content_hash
-            and a.authority == b.authority
-            and a.provenance == b.provenance
-            and a.expires_at == b.expires_at
-            and a.derived_from == b.derived_from
-            and a.schema_version == b.schema_version
-        )
+        """Compare two EvidenceRecord instances for full canonical model equality."""
+        return a.model_dump() == b.model_dump()
