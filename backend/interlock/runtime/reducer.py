@@ -293,7 +293,9 @@ def _handle_user_input(
         authority=EvidenceAuthority.AUTHORITATIVE,
         provenance={"event_id": env.event_id, "sequence": env.sequence},
     )
-    new_evidence = {**state.evidence, evidence_id: ev}
+    new_evidence, violation = _insert_immutable_evidence(state, ev)
+    if violation is not None:
+        return state, [violation]
     new_state = state.model_copy(
         update={
             "evidence": new_evidence,
@@ -338,7 +340,9 @@ def _handle_transcript_hypothesis(
         else EvidenceAuthority.NON_AUTHORITATIVE,
         provenance={"event_id": env.event_id, "sequence": env.sequence, "final": final},
     )
-    new_evidence = {**state.evidence, evidence_id: ev}
+    new_evidence, violation = _insert_immutable_evidence(state, ev)
+    if violation is not None:
+        return state, [violation]
     new_state = state.model_copy(
         update={
             "evidence": new_evidence,
@@ -1229,26 +1233,9 @@ def _handle_evidence_recorded(
         else EvidenceRecord.model_validate(ev_data)
     )
 
-    # Invariant I8: EvidenceRecord is immutable
-    if ev.evidence_id in state.evidence:
-        existing = state.evidence[ev.evidence_id]
-        if (
-            existing.content_hash != ev.content_hash
-            or existing.content_ref != ev.content_ref
-        ):
-            return (
-                state,
-                [
-                    RecordProtocolViolation(
-                        session_id=state.session_id,
-                        boundary="reducer",
-                        code="IMMUTABLE_EVIDENCE_VIOLATION",
-                        digest=f"Evidence '{ev.evidence_id}' already exists with different content",
-                    )
-                ],
-            )
-
-    new_evidence = {**state.evidence, ev.evidence_id: ev}
+    new_evidence, violation = _insert_immutable_evidence(state, ev)
+    if violation is not None:
+        return state, [violation]
     new_state = state.model_copy(
         update={
             "evidence": new_evidence,
@@ -1262,6 +1249,31 @@ def _handle_evidence_recorded(
         PublishProjection(session_id=state.session_id, sequence=env.sequence)
     ]
     return new_state, cmds
+
+
+def _insert_immutable_evidence(
+    state: SessionState,
+    evidence: EvidenceRecord,
+) -> Tuple[Optional[Dict[str, EvidenceRecord]], Optional[RecordProtocolViolation]]:
+    """Return an immutable evidence map or a deterministic I8 violation."""
+
+    existing = state.evidence.get(evidence.evidence_id)
+    if existing is None:
+        return {
+            **state.evidence,
+            evidence.evidence_id: evidence.model_copy(deep=True),
+        }, None
+    if existing.model_dump(mode="json") == evidence.model_dump(mode="json"):
+        return state.evidence, None
+    return (
+        None,
+        RecordProtocolViolation(
+            session_id=state.session_id,
+            boundary="reducer",
+            code="IMMUTABLE_EVIDENCE_VIOLATION",
+            digest=f"Evidence '{evidence.evidence_id}' conflicts with its immutable record",
+        ),
+    )
 
 
 def _handle_claim_proposed(
