@@ -1259,7 +1259,10 @@ def _insert_immutable_evidence(
 
     existing = state.evidence.get(evidence.evidence_id)
     if existing is None:
-        return {**state.evidence, evidence.evidence_id: evidence}, None
+        return {
+            **state.evidence,
+            evidence.evidence_id: evidence.model_copy(deep=True),
+        }, None
     if existing.model_dump(mode="json") == evidence.model_dump(mode="json"):
         return state.evidence, None
     return (
