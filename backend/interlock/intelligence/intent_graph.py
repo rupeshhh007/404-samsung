@@ -27,11 +27,6 @@ class IntentGraphError(ValueError):
 
 
 _GOAL_REQUIRED_FIELDS = frozenset({"intent_id", "goal_type", "values"})
-_GOAL_RESERVED_METADATA = (
-    frozenset(IntentNode.model_fields)
-    | frozenset(IntentRevision.model_fields)
-    | {"goal_id"}
-) - _GOAL_REQUIRED_FIELDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +58,7 @@ class IntentGraphProposal:
     target_intent_id: str
     parent_revision_id: str
     _revision_json: str
+    bindings: tuple[DependencySnapshot, ...]
     added_goals: tuple[GoalAddition, ...]
     retracted_intent_ids: tuple[str, ...]
     changed_paths: tuple[str, ...]
@@ -250,12 +246,9 @@ class IntentGraph:
         added_ids: set[str] = set()
         for raw_goal in delta.add_goals:
             goal = _json_object(raw_goal, "delta.add_goals entry")
-            if not _GOAL_REQUIRED_FIELDS.issubset(goal):
-                raise IntentGraphError("added goal requires intent_id, goal_type, values")
-            conflicts = _GOAL_RESERVED_METADATA.intersection(goal)
-            if conflicts:
+            if set(goal) != _GOAL_REQUIRED_FIELDS:
                 raise IntentGraphError(
-                    f"added goal contains reserved metadata: {', '.join(sorted(conflicts))}"
+                    "added goal must contain only intent_id, goal_type, values"
                 )
             intent_id = _nonempty_id(goal["intent_id"], "added intent_id")
             goal_type = _nonempty_id(goal["goal_type"], "goal_type")
@@ -285,6 +278,7 @@ class IntentGraph:
             all_paths,
             evidence_ids_by_path=evidence_ids_by_path,
         )
+        binding_fingerprint = dependency_fingerprint(bindings)
         revision = IntentRevision(
             revision_id=revision_id,
             intent_id=delta.target_intent_id,
@@ -293,12 +287,13 @@ class IntentGraph:
             maturity=IntentMaturity.PROVISIONAL,
             authorization=Authorization.NOT_REQUESTED,
             created_by_event_id=created_by_event_id,
-            dependency_fingerprint=dependency_fingerprint(bindings),
+            dependency_fingerprint=binding_fingerprint,
         )
         return IntentGraphProposal(
             target_intent_id=delta.target_intent_id,
             parent_revision_id=parent.revision_id,
             _revision_json=_canonical_json(revision.model_dump(mode="python")),
+            bindings=bindings,
             added_goals=tuple(additions),
             retracted_intent_ids=tuple(retractions),
             changed_paths=tuple(sorted(changed)),
@@ -338,7 +333,7 @@ def bind_dependencies(
         bindings.append(
             DependencySnapshot(
                 path=path,
-                value_hash=_hash_json(value),
+                value_hash=_hash_dependency_value(value),
                 evidence_ids=normalized_ids,
             )
         )
@@ -542,6 +537,22 @@ def _canonical_json(value: Any) -> str:
 
 def _hash_json(value: Any) -> str:
     return f"sha256:{sha256(_canonical_json(value).encode('utf-8')).hexdigest()}"
+
+
+def _hash_dependency_value(value: Any) -> str:
+    """Hash unordered dependency arrays without changing stored JSON payloads."""
+
+    normalized = _normalize_arrays_for_hash(_strict_json(value, "dependency value", set()))
+    return _hash_json(normalized)
+
+
+def _normalize_arrays_for_hash(value: Any) -> Any:
+    if isinstance(value, list):
+        elements = [_normalize_arrays_for_hash(item) for item in value]
+        return sorted(elements, key=_canonical_json)
+    if isinstance(value, dict):
+        return {key: _normalize_arrays_for_hash(item) for key, item in value.items()}
+    return value
 
 
 def _resolve_optional(values: Mapping[str, Any], path: str) -> Any:
