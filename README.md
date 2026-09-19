@@ -4,18 +4,114 @@
 
 INTERLOCK is a consistency runtime for interruptible, real-time, multimodal AI agents. It keeps evolving user intent, concurrent execution, external side effects, evidence, and user-visible claims aligned when an interruption arrives at the worst possible moment.
 
-Its three pillars are **ANTICIPATE** (BranchCache safely prepares likely read-only work), **ADAPT** (SAFEPOINT applies explicit cancellation and commit rules), and **VERIFY** (ClaimGraph plus TRUTHLOCK permits only evidence-supported consequential language).
+Its three pillars are:
 
-The system is a modular monolith: a Python 3.11/FastAPI backend and React/Vite/Tailwind frontend. Async interpretation and tools run concurrently, but every authoritative in-memory state change passes through one serialized event journal and reducer. The primary deterministic demonstration is a simulated Samsung Device/Service Copilot whose obsolete 11:00 booking commits late, is recorded as reality, and is reconciled to the user's corrected 12:00 intent.
+- **ANTICIPATE** — BranchCache safely prepares likely read-only work.
+- **ADAPT** — SAFEPOINT applies explicit cancellation, commit, and reconciliation rules.
+- **VERIFY** — ClaimGraph + TRUTHLOCK ensures consequential language never exceeds available evidence.
 
-**CURRENT PHASE: DOCUMENTATION / DESIGN.**
+The system is designed as a modular monolith with a **Python 3.11 / FastAPI backend** and a **React / Vite / Tailwind frontend**.
 
-**APPLICATION IMPLEMENTATION: NOT STARTED.** No setup or run claims in this repository have been verified yet.
+Async interpretation and tool execution may run concurrently, but every authoritative runtime state transition flows through a serialized event journal and pure reducer.
 
-## Start here
+The primary deterministic demonstration is a simulated **Samsung Device / Service Copilot** where an obsolete 11:00 booking commits late after the user changes their request to 12:00. INTERLOCK records the late commit as external reality, detects the divergence from current intent, reconciles it safely, and prevents the agent from claiming success until reality is verified.
 
-1. Read the [documentation index](docs/INDEX.md) and [source-of-truth policy](docs/SOURCE_OF_TRUTH.md).
-2. Read [requirements](docs/product/REQUIREMENTS.md), [domain model](docs/architecture/DOMAIN_MODEL.md), [event model](docs/architecture/EVENT_MODEL.md), [state machines](docs/architecture/STATE_MACHINES.md), and [interfaces](docs/contracts/INTERFACES.md).
-3. Select the first dependency-unblocked ticket from the [backlog](docs/delivery/TASK_BACKLOG.md) and follow the [agent operating manual](docs/agents/OPERATING_MANUAL.md).
+---
 
-The concise architecture overview is [ARCHITECTURE.md](ARCHITECTURE.md); detailed specifications live under `docs/`.
+## Current Status
+
+**CURRENT PHASE: ACTIVE IMPLEMENTATION**
+
+The core runtime foundation is now under development and several P0 components are implemented.
+
+### Implemented
+
+- **RUN-001 — Event Journal / Session Runtime**
+  - Serialized event acceptance
+  - Per-session sequencing
+  - Session lifecycle and retention
+
+- **RUN-002 — Pure Reducer + Command Contracts**
+  - Deterministic state transitions
+  - Typed command boundary
+  - Replay-safe command suppression
+  - Single authoritative state-writer model
+
+- **RUN-003 — Async Command Dispatcher**
+  - Explicit asynchronous command routing
+  - Replay / disabled-dispatch suppression
+  - Journal-only fact ingress
+  - Ordered submission with concurrent worker execution
+  - Correlation / causation propagation
+  - Cross-session protection
+  - Defensive command isolation
+  - Fail-closed handler boundaries
+
+- **INTEL-001 — Semantic Control Boundary**
+  - Model/provider abstraction
+  - Conservative control classification
+  - Consequential-action confidence gating
+  - Clarification fallback
+
+- **EXE-001 — Tool Descriptor Registry**
+  - Tool capability manifests
+  - Conservative execution defaults
+  - Cancellation policy metadata
+  - Idempotency / retry / compensation descriptors
+  - Stable capability hashing
+
+### In Progress / Upcoming
+
+- Runtime orchestration and composition
+- BranchCache
+- Operation lifecycle
+- SAFEPOINT
+- Tool execution and cancellation
+- World-effect verification
+- Reconciliation
+- ClaimGraph
+- TRUTHLOCK
+- API / WebSocket integration
+- Frontend integration
+- End-to-end deterministic demo
+- Adversarial and invariant testing
+
+---
+
+## Architecture
+
+```text
+User / Multimodal Input
+        │
+        ▼
+Semantic Interpreter
+        │
+        ▼
+   Event Journal
+        │
+        ▼
+     Reducer
+        │
+        ├──► Intent / BranchCache
+        │
+        ├──► Operation / SAFEPOINT
+        │
+        └──► Commands
+                │
+                ▼
+        Command Dispatcher
+                │
+                ▼
+        Tool / Runtime Workers
+                │
+                ▼
+           Event Journal
+                │
+                ▼
+        Evidence / ClaimGraph
+                │
+                ▼
+            TRUTHLOCK
+                │
+                ▼
+          User-visible Output
