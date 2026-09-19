@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: interlock
+Version: 0.1.0
+Summary: INTERLOCK consistency runtime for interruptible real-time agents
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: pydantic-settings>=2.2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
