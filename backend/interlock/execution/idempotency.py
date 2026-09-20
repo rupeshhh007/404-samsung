@@ -62,7 +62,7 @@ class CallbackDecision:
     """Pure callback classification without interpreting external truth."""
 
     status: CallbackStatus
-    correlation_id: str
+    callback_dedupe_key: str
     observation_digest: str
     requires_verification: bool
 
@@ -157,30 +157,26 @@ def derive_idempotency_key(
     *,
     session_id: str,
     logical_action_id: str,
-    contract_version: str | int,
+    manifest_version: int,
 ) -> str:
-    """Derive a stable session- and contract-scoped idempotency key."""
+    """Derive a stable key scoped by the trusted tool manifest version."""
 
     session = _nonempty_string(session_id, "session_id")
     logical_action = _nonempty_string(logical_action_id, "logical_action_id")
-    if isinstance(contract_version, bool) or not isinstance(
-        contract_version, (str, int)
+    if (
+        isinstance(manifest_version, bool)
+        or not isinstance(manifest_version, int)
+        or manifest_version < 1
     ):
         raise IdempotencyError(
             IdempotencyErrorCode.INVALID_IDENTITY_INPUT,
-            "contract_version must be a non-empty string or integer",
+            "manifest_version must be a positive integer",
         )
-    if isinstance(contract_version, str):
-        version: str | int = _nonempty_string(
-            contract_version, "contract_version"
-        )
-    else:
-        version = contract_version
     return _digest(
         {
             "session_id": session,
             "logical_action_id": logical_action,
-            "contract_version": version,
+            "manifest_version": manifest_version,
         }
     )
 
@@ -217,19 +213,6 @@ def classify_idempotency(
     return IdempotencyDecision(IdempotencyStatus.DUPLICATE, key, digest)
 
 
-def callback_correlation_id(observation: ToolResultObserved) -> str:
-    """Derive provider correlation identity without arrival-time data."""
-
-    callback = _require_callback(observation)
-    return _digest(
-        {
-            "operation_id": callback.operation_id,
-            "provider_request_id": callback.provider_request_id,
-            "provider_effect_id": callback.provider_effect_id,
-        }
-    )
-
-
 def callback_observation_digest(observation: ToolResultObserved) -> str:
     """Digest one complete canonical callback observation."""
 
@@ -248,6 +231,7 @@ def callback_observation_digest(observation: ToolResultObserved) -> str:
 def classify_callback(
     observation: ToolResultObserved,
     *,
+    callback_dedupe_key: str,
     known_observation_digests: Mapping[str, str],
 ) -> CallbackDecision:
     """Classify a callback as new, duplicate, or conflicting.
@@ -262,13 +246,13 @@ def classify_callback(
             IdempotencyErrorCode.INVALID_CALLBACK,
             "known_observation_digests must be a mapping",
         )
-    correlation_id = callback_correlation_id(observation)
+    dedupe_key = _nonempty_string(callback_dedupe_key, "callback_dedupe_key")
     observation_digest = callback_observation_digest(observation)
-    existing = known_observation_digests.get(correlation_id)
+    existing = known_observation_digests.get(dedupe_key)
     if existing is None:
         return CallbackDecision(
             CallbackStatus.NEW,
-            correlation_id,
+            dedupe_key,
             observation_digest,
             False,
         )
@@ -276,13 +260,13 @@ def classify_callback(
     if existing == observation_digest:
         return CallbackDecision(
             CallbackStatus.DUPLICATE,
-            correlation_id,
+            dedupe_key,
             observation_digest,
             False,
         )
     return CallbackDecision(
         CallbackStatus.CONFLICT,
-        correlation_id,
+        dedupe_key,
         observation_digest,
         True,
     )

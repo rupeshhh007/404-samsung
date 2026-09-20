@@ -31,6 +31,7 @@ from interlock.execution.idempotency import (
     CallbackDecision,
     IdempotencyError,
     IdempotencyErrorCode,
+    IdempotencyStatus,
     classify_callback,
     classify_idempotency,
     derive_idempotency_key,
@@ -56,6 +57,7 @@ class OperationErrorCode(str, Enum):
     SPECULATION_FORBIDDEN = "SPECULATION_FORBIDDEN"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     CALLBACK_CORRELATION_CONFLICT = "CALLBACK_CORRELATION_CONFLICT"
+    DUPLICATE_LOGICAL_ACTION = "DUPLICATE_LOGICAL_ACTION"
     INVALID_OPERATION_INPUT = "INVALID_OPERATION_INPUT"
 
 
@@ -85,7 +87,6 @@ class OperationManager:
         bindings: Sequence[DependencyBinding | DependencySnapshot],
         tool_name: str,
         arguments: Mapping[str, Any],
-        contract_version: str | int,
         speculative: bool = False,
         existing_operation_ids: Collection[str] = (),
         known_idempotency_digests: Mapping[str, str] | None = None,
@@ -168,7 +169,7 @@ class OperationManager:
             idempotency_key = derive_idempotency_key(
                 session_id=session,
                 logical_action_id=logical_action_id,
-                contract_version=contract_version,
+                manifest_version=descriptor.manifest_version,
             )
         except IdempotencyError as exc:
             raise OperationError(
@@ -188,7 +189,7 @@ class OperationManager:
 
         _validate_arguments(final_arguments, descriptor.argument_schema)
         try:
-            classify_idempotency(
+            idempotency_decision = classify_idempotency(
                 idempotency_key=idempotency_key,
                 consequential_arguments=consequential_arguments,
                 known_argument_digests=(
@@ -204,6 +205,11 @@ class OperationManager:
                 else OperationErrorCode.INVALID_OPERATION_INPUT
             )
             raise OperationError(code, "idempotency snapshot rejected the operation") from exc
+        if idempotency_decision.status == IdempotencyStatus.DUPLICATE:
+            raise OperationError(
+                OperationErrorCode.DUPLICATE_LOGICAL_ACTION,
+                "logical action already has a local operation",
+            )
 
         return OperationRecord(
             operation_id=op_id,
@@ -235,6 +241,7 @@ class OperationManager:
         operation: OperationRecord,
         observation: ToolResultObserved,
         *,
+        callback_dedupe_key: str,
         known_observation_digests: Mapping[str, str],
     ) -> CallbackDecision:
         """Validate correlation, then apply pure duplicate/conflict policy.
@@ -265,6 +272,7 @@ class OperationManager:
         try:
             return classify_callback(
                 observation,
+                callback_dedupe_key=callback_dedupe_key,
                 known_observation_digests=known_observation_digests,
             )
         except IdempotencyError as exc:
@@ -615,12 +623,19 @@ def _schema_number(value: Any, path: str) -> int | float:
 
 
 def _validate_datetime(value: str, path: str) -> None:
+    if _RFC3339_PATTERN.fullmatch(value) is None:
+        raise _invalid_argument(path, "is not an RFC 3339 date-time")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise _invalid_argument(path, "is not an RFC 3339 date-time") from exc
     if parsed.tzinfo is None:
         raise _invalid_argument(path, "date-time must include an offset")
+
+
+_RFC3339_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+)
 
 
 def _invalid_argument(path: str, reason: str) -> OperationError:
