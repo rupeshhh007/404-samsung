@@ -2,13 +2,14 @@
 
 The caller supplies one coherent reducer snapshot and the current dependency
 evidence projection. A decision is valid at this check only; ToolRuntime must
-still enforce the creation-time capability identity before I/O. No events or
-commands are emitted here.
+still enforce the creation-time capability identity before I/O. The result may
+carry an existing domain-event payload intent for the caller to journal, but
+this policy never creates an envelope, appends an event, or returns a command.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import re
 from typing import Mapping, Sequence
@@ -17,8 +18,11 @@ from pydantic import ValidationError
 
 from interlock.domain.enums import (
     ActionType, Authorization, CancellationPolicy, CancellationState,
-    EffectClassification, EffectState, IntentMaturity, OperationState,
-    SafePointDecision, SafePointName,
+    EffectClassification, EffectState, IntentMaturity,
+    OperationState, SafePointDecision, SafePointName,
+)
+from interlock.domain.events import (
+    CancellationRequested, ToolDispatchRequested,
 )
 from interlock.domain.models import IntentRevision, OperationRecord, SessionState
 from interlock.execution.descriptors import ToolRegistry
@@ -60,6 +64,32 @@ class SafePointResult:
     current_fingerprint: str | None = None
     stored_capability_hash: str | None = None
     current_capability_hash: str | None = None
+    _follow_up_event_type: str | None = field(default=None, repr=False)
+    _follow_up_event_payload: tuple[tuple[str, str], ...] = field(
+        default=(), repr=False
+    )
+
+    @property
+    def follow_up_event(
+        self,
+    ) -> (
+        ToolDispatchRequested
+        | CancellationRequested
+        | None
+    ):
+        """Return a detached existing event payload for journal submission.
+
+        A fresh model is returned on every access so caller mutation cannot
+        alter this immutable decision. The caller remains responsible for
+        submitting the payload through the EventJournal.
+        """
+
+        payload = dict(self._follow_up_event_payload)
+        if self._follow_up_event_type == "ToolDispatchRequested":
+            return ToolDispatchRequested.model_validate(payload)
+        if self._follow_up_event_type == "CancellationRequested":
+            return CancellationRequested.model_validate(payload)
+        return None
 
 
 class SafePointPolicy:
@@ -86,6 +116,10 @@ class SafePointPolicy:
         evidence_ids_by_path must explicitly cover exactly the bound paths, with
         an empty list/tuple for a path with no evidence. Historical evidence is
         never silently reused as the current evidence projection.
+
+        ``CONTINUE`` never authorizes direct provider invocation. The caller
+        must submit ``result.follow_up_event`` through the EventJournal so the
+        reducer can perform the authoritative transition and emit commands.
         """
         if not isinstance(registry, ToolRegistry):
             raise SafePointError("registry must be a trusted ToolRegistry")
@@ -116,9 +150,24 @@ class SafePointPolicy:
 
         def result(decision: SafePointDecision, reason: SafePointReason,
                    paths: tuple[str, ...] = ()) -> SafePointResult:
+            follow_up = _follow_up_event(op, decision, reason)
             return SafePointResult(
-                decision, reason, paths, op.fingerprint, current_fingerprint,
-                stored_hash, current_hash,
+                decision=decision,
+                reason=reason,
+                affected_paths=paths,
+                expected_fingerprint=op.fingerprint,
+                current_fingerprint=current_fingerprint,
+                stored_capability_hash=stored_hash,
+                current_capability_hash=current_hash,
+                _follow_up_event_type=(
+                    None if follow_up is None else type(follow_up).__name__
+                ),
+                _follow_up_event_payload=() if follow_up is None else tuple(
+                    sorted(
+                        (key, str(value))
+                        for key, value in follow_up.model_dump(mode="json").items()
+                    )
+                ),
             )
 
         # This gate cannot decide post-dispatch cancellation or world outcomes.
@@ -190,3 +239,29 @@ class SafePointPolicy:
 
 def _is_hash(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def _follow_up_event(
+    operation: OperationRecord,
+    decision: SafePointDecision,
+    reason: SafePointReason,
+) -> ToolDispatchRequested | CancellationRequested | None:
+    """Map a pure decision to an existing event payload, never a command.
+
+    ``REQUESTED`` proves that ``CancellationRequested`` was already accepted.
+    No new event is needed for that cancellation path. ToolRuntime/EXE-004
+    owns the eventual LOCAL_TASK acknowledgement, and may produce it only
+    after establishing that the local task was actually cancelled. Pure policy
+    cannot establish that fact.
+    """
+
+    if decision == SafePointDecision.CONTINUE:
+        return ToolDispatchRequested(operation_id=operation.operation_id)
+    if decision != SafePointDecision.CANCEL:
+        return None
+    if operation.cancellation_state == CancellationState.NONE:
+        return CancellationRequested(
+            operation_id=operation.operation_id,
+            reason=reason.value,
+        )
+    return None
