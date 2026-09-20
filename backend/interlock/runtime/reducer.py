@@ -378,12 +378,20 @@ def _handle_control_intent(
                 clarification=control.clarification,
             )
         )
+
+    paused = state.paused
+    if control.kind == ControlKind.PAUSE:
+        paused = True
+    elif control.kind == ControlKind.RESUME:
+        paused = False
+
     cmds.append(
         PublishProjection(session_id=state.session_id, sequence=env.sequence)
     )
 
     new_state = state.model_copy(
         update={
+            "paused": paused,
             "last_sequence": env.sequence,
             "metrics": state.metrics.model_copy(
                 update={"through_sequence": env.sequence}

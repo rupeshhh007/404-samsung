@@ -398,6 +398,7 @@ class SessionState(DomainBaseModel):
     session_id: str = Field(..., min_length=1)
     last_sequence: int = Field(default=0, ge=0)
     mode: RuntimeMode = RuntimeMode.DEMO
+    paused: bool = False
     intents: Dict[str, IntentNode] = Field(default_factory=dict)
     active_intent_id: Optional[str] = None
     branches: Dict[str, BranchRecord] = Field(default_factory=dict)
