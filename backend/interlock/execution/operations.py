@@ -87,9 +87,9 @@ class OperationManager:
         bindings: Sequence[DependencyBinding | DependencySnapshot],
         tool_name: str,
         arguments: Mapping[str, Any],
+        existing_operation_ids: Collection[str],
+        known_idempotency_digests: Mapping[str, str],
         speculative: bool = False,
-        existing_operation_ids: Collection[str] = (),
-        known_idempotency_digests: Mapping[str, str] | None = None,
     ) -> OperationRecord:
         """Validate and construct one canonical operation in CREATED state."""
 
@@ -192,11 +192,7 @@ class OperationManager:
             idempotency_decision = classify_idempotency(
                 idempotency_key=idempotency_key,
                 consequential_arguments=consequential_arguments,
-                known_argument_digests=(
-                    {}
-                    if known_idempotency_digests is None
-                    else known_idempotency_digests
-                ),
+                known_argument_digests=known_idempotency_digests,
             )
         except IdempotencyError as exc:
             code = (
