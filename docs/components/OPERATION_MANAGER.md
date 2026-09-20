@@ -1,6 +1,6 @@
 # Operation Manager
 
-The manager creates an `OperationRecord` from a validated descriptor, arguments, committed/provisional scope, exact bindings, logical action ID, and stable idempotency key. It schedules preparation, processes results, and emits commands through reducer decisions.
+The manager creates an `OperationRecord` from a validated descriptor, arguments, committed/provisional scope, exact bindings, logical action ID, and stable idempotency key. Newly created operations snapshot `ToolRegistry.capability_hash(tool_name)` into `OperationRecord.descriptor_capability_hash`; this is creation-time provenance and must never be rewritten to a later descriptor value. It schedules preparation, processes results, and emits commands through reducer decisions.
 
 Operation state describes local workflow; cancellation state describes requests; effect state describes world knowledge. Supersession never deletes an operation or effect. Before dispatch, READY operations are revalidated for active fingerprint and authorization. Cancellation is requested according to policy and never interpreted as success merely because a local task stopped. Identical result callbacks are no-ops; conflicting callbacks cause unknown outcome and verification. A post-dispatch timeout sets effect unknown and prohibits blind write retry unless provider idempotency makes retry safe. Tests: `T-SAF-01`, `T-SAF-02`, `T-IDM-01`, `T-UNK-01`.
 
