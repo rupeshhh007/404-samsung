@@ -20,13 +20,17 @@ Pre-dispatch stale/unauthorized work is cancelled without effect. After crossing
 
 | Condition at `BEFORE_PROVIDER_DISPATCH` | Decision | State/event consequence |
 |---|---|---|
-| descriptor changed/unknown | HOLD | no dispatch; protocol/configuration error |
+| current descriptor missing/unknown | HOLD | no dispatch; protocol/configuration error |
+| operation creation-time descriptor capability hash unavailable (`None`) | HOLD | no dispatch; capability provenance unavailable |
+| stored creation-time descriptor capability hash differs from current registry hash | HOLD | no dispatch; descriptor changed |
 | speculative and not READ_ONLY/NONE | CANCEL | operation CANCELLED; I2 violation metric |
 | fingerprint stale or intent superseded | CANCEL | cancellation requested/operation SUPERSEDED; no call |
 | consequential and not COMMITTED+AUTHORIZED | HOLD | request clarification/authorization; no call |
 | session paused | HOLD | remain READY until resume/revalidation |
 | cancellation REQUESTED and policy IMMEDIATE/AT_SAFEPOINT | CANCEL | acknowledge local pre-dispatch cancellation |
 | current and permitted | CONTINUE | journal `ToolDispatchRequested`; operation DISPATCHED |
+
+A matching stored and current capability hash passes only the descriptor-consistency check; it never implies dispatch authorization. SAFEPOINT must still evaluate revision and fingerprint freshness, authorization, pause state, cancellation policy/state, speculative restrictions, operation state, and every other applicable condition. The stored creation-time hash is also the expected capability identity for ToolRuntime's existing pre-I/O capability check, closing a descriptor-change race between SAFEPOINT evaluation and provider dispatch.
 
 After `ToolDispatchRequested`, the commit boundary is considered crossed for safety even if `ToolDispatchAccepted` has not arrived; a timeout is not proof of absence. Cancellation commands may still be sent, but results remain admissible. `NONCANCELLABLE` records `REQUESTED` and continues observation. Duplicate cancellation is idempotent. Conflicting acknowledgements become protocol violations/unknown outcome.
 

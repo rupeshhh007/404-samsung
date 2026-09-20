@@ -206,6 +206,7 @@ class OperationRecord(DomainBaseModel):
     speculative: bool
     logical_action_id: str = Field(..., min_length=1)
     idempotency_key: str = Field(..., min_length=1)
+    descriptor_capability_hash: Optional[str] = None
     schema_version: Literal[1] = 1
     provider_request_id: Optional[str] = None
     error: Optional[ErrorRecord] = None
