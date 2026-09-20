@@ -134,6 +134,7 @@ class OperationManager:
             )
 
         descriptor = self._descriptor(tool)
+        descriptor_capability_hash = self._registry.capability_hash(descriptor.tool_name)
         self._validate_speculation(descriptor, speculative)
         domain_bindings = _validated_bindings(revision, bindings)
         fingerprint = dependency_fingerprint(domain_bindings)
@@ -222,6 +223,7 @@ class OperationManager:
             speculative=speculative,
             logical_action_id=logical_action_id,
             idempotency_key=idempotency_key,
+            descriptor_capability_hash=descriptor_capability_hash,
         )
 
     @staticmethod
