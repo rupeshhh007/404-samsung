@@ -23,7 +23,7 @@ All IDs are opaque strings (UUIDv7 in live mode; stable names in scenarios), tim
 | Entity | Required fields | Purpose, validation, lifecycle |
 |---|---|---|
 | `EventEnvelope` | `event_id: ID, session_id: ID, sequence: int, event_type: string, source: EventSource, occurred_at: datetime, logical_time: int, schema_version: int, payload: object`; optional `correlation_id: ID, causation_id: ID, dedupe_key: string` | Immutable accepted fact. Sequence > 0; logical time ≥ 0; payload validates by event type. |
-| `SessionState` | `session_id, last_sequence, mode, intents, active_intent_id, branches, operations, effects, evidence, claims, divergences, plans, speech, metrics` | Reducer-owned aggregate; maps keyed by IDs. |
+| `SessionState` | `session_id, last_sequence, mode, paused, intents, active_intent_id, branches, operations, effects, evidence, claims, divergences, plans, speech, metrics` | Reducer-owned aggregate; maps keyed by IDs. `paused` is the reducer-owned reversible runtime pause snapshot and defaults to `false`; it is distinct from fatal session halt metadata. |
 | `ControlIntent` | `control_id, kind, confidence, consequential, target_refs, raw_evidence_id`; optional `clarification` | Model proposal; confidence 0..1; reducer applies deterministic policy. |
 | `IntentNode` | `intent_id, goal_type, revisions, active_revision_id` | Stable goal identity and revision chain. |
 | `IntentRevision` | `revision_id, intent_id, parent_revision_id, values, maturity, authorization, created_by_event_id, dependency_fingerprint` | Immutable revision; one active revision per active goal. |
