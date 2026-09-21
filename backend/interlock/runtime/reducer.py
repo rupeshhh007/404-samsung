@@ -1326,17 +1326,17 @@ def _handle_tool_dispatch_accepted(
 
     if op.state == OperationState.DISPATCHED:
         new_op_state = OperationState.WAITING
-        new_effect_state = EffectState.IN_FLIGHT
     else:
         new_op_state = op.state
-        if op.effect_state in (
-            EffectState.COMMITTED,
-            EffectState.FAILED,
-            EffectState.OUTCOME_UNKNOWN,
-        ):
-            new_effect_state = op.effect_state
-        else:
-            new_effect_state = EffectState.IN_FLIGHT
+    if op.effect_state in (
+        EffectState.COMMITTED,
+        EffectState.FAILED,
+        EffectState.OUTCOME_UNKNOWN,
+        EffectState.COMPENSATED,
+    ):
+        new_effect_state = op.effect_state
+    else:
+        new_effect_state = EffectState.IN_FLIGHT
 
     new_ops = dict(state.operations)
     new_ops[op_id] = op.model_copy(
@@ -1768,29 +1768,51 @@ def _handle_tool_result_observed(
             )
 
     outcome = ToolOutcome(env.payload["outcome"])
+    current_effect_state = EffectState(op.effect_state)
+
+    contradictory_outcome = (
+        current_effect_state in (EffectState.COMMITTED, EffectState.COMPENSATED)
+        and outcome in (ToolOutcome.FAILED, ToolOutcome.UNKNOWN)
+    ) or (
+        current_effect_state == EffectState.FAILED
+        and outcome in (ToolOutcome.SUCCEEDED, ToolOutcome.UNKNOWN)
+    )
+    if contradictory_outcome:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_OPERATION_TRANSITION",
+                    digest=(
+                        f"Tool result outcome '{outcome.value}' contradicts established "
+                        f"effect state '{current_effect_state.value}' for operation '{op_id}'"
+                    ),
+                )
+            ],
+        )
+
     new_ops = dict(state.operations)
     upd: Dict[str, Any] = {}
 
     if op.provider_request_id is None and incoming_provider_id:
         upd["provider_request_id"] = incoming_provider_id
 
-    # Stale results can update effect dimension, not reactivate operation
+    # Stale results can update effect dimension, not reactivate operation.
+    if current_effect_state != EffectState.COMPENSATED:
+        if outcome == ToolOutcome.SUCCEEDED:
+            upd["effect_state"] = EffectState.COMMITTED
+        elif outcome == ToolOutcome.FAILED:
+            upd["effect_state"] = EffectState.FAILED
+        elif outcome == ToolOutcome.UNKNOWN:
+            upd["effect_state"] = EffectState.OUTCOME_UNKNOWN
+
     if op.state in (OperationState.DISPATCHED, OperationState.WAITING):
         if outcome == ToolOutcome.SUCCEEDED:
             upd["state"] = OperationState.SUCCEEDED
-            upd["effect_state"] = EffectState.COMMITTED
         elif outcome == ToolOutcome.FAILED:
             upd["state"] = OperationState.FAILED
-            upd["effect_state"] = EffectState.FAILED
-        elif outcome == ToolOutcome.UNKNOWN:
-            upd["effect_state"] = EffectState.OUTCOME_UNKNOWN
-    elif op.state in (OperationState.CANCELLED, OperationState.SUPERSEDED):
-        if outcome == ToolOutcome.SUCCEEDED:
-            upd["effect_state"] = EffectState.COMMITTED
-        elif outcome == ToolOutcome.FAILED:
-            upd["effect_state"] = EffectState.FAILED
-        elif outcome == ToolOutcome.UNKNOWN:
-            upd["effect_state"] = EffectState.OUTCOME_UNKNOWN
 
     new_ops[op_id] = op.model_copy(update=upd)
     new_state = state.model_copy(
