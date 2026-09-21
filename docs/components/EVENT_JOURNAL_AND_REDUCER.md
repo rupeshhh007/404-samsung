@@ -4,13 +4,13 @@
 
 Workers return facts through the journal. The reducer performs no network, filesystem, clock sleep, model, or tool call. Replay starts from empty state (or future versioned snapshot), applies stored envelopes in sequence, compares hashes in tests, and discards commands. Duplicate identical callbacks are audited/metriced without reduction; conflicting duplicates become protocol violations.
 
-Key commands: `InterpretInput`, `PrepareBranch`, `PrepareOperation`, `DispatchTool`, `RequestToolCancellation`, `VerifyOutcome`, `BuildReconciliationPlan`, `ValidateSpeech`, `QueueOutput`, `EmitOutput`, `PublishProjection`. Dispatcher acceptance of preparation/output commands returns `BranchPreparationStarted`, `OperationPreparationStarted`, or `SpeechQueued`. Tests: T-JRN-01, T-RED-01, T-RPL-01, T-CON-01. Ownership: Runtime; contracts: JournalPort/Reducer.
+Key commands: `InterpretInput`, `PrepareBranch`, `PrepareOperation`, `DispatchTool`, `RequestToolCancellation`, `VerifyOutcome`, `BuildReconciliationPlan`, `ValidateSpeech`, `QueueOutput`, `EmitOutput`, `PublishProjection`. Builtin dispatcher acceptance of preparation/output commands returns `BranchPreparationStarted`, `OperationPreparationStarted`, or `SpeechQueued`. For `PrepareOperation`, `CommandDispatcher.register(..., replace_builtin=True)` allows EXE-004/RUN-004 composition to replace the default acceptance handler with the real ToolRuntime preparation worker that emits `OperationPreparationStarted` followed by `OperationPrepared`. Tests: T-JRN-01, T-RED-01, T-RPL-01, T-CON-01. Ownership: Runtime; contracts: JournalPort/Reducer.
 
 ## Implementation contract
 
 - Purpose/responsibilities: linearize accepted facts, dedupe, reduce legal transitions, emit commands/projections, replay without effects.
 - Non-responsibilities: interpretation, provider I/O, wall-clock waiting, tool cancellation, speech rendering, or persistence across process restart.
-- State owned: entire `SessionState`, journal entries, last accepted/reduced sequence, session halt flag. Workers own no state.
+- State owned: entire `SessionState` (including authoritative `IntentRevision` snapshots in `revisions`), journal entries, last accepted/reduced sequence, session halt flag. Workers own no state.
 - Inputs/outputs: `JournalPort.append` and `Reducer.reduce` exactly as defined in `INTERFACES.md`; payloads are from `EVENT_MODEL.md`.
 - Events consumed: every canonical event. Produced through commands: result events are produced by their designated worker; journal itself assigns envelopes but invents no domain fact.
 

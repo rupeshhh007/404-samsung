@@ -54,7 +54,7 @@ All interfaces are session-scoped. Cancellation is cooperative according to desc
 
 ### `ToolExecutor.invoke(invocation)`
 
-`invocation` contains `operation_id`, descriptor capability hash, validated arguments, logical action ID, idempotency key, deadline, speculative flag, and cancellation token. It emits `ToolDispatchAccepted`, zero or more acknowledgement `ToolResultObserved` events, and one terminal result/timeout event. It must not emit `WorldEffectObserved`; effect interpretation is reducer policy. Cancellation behavior comes only from the descriptor. Reusing a write idempotency key with different normalized arguments is `IDEMPOTENCY_CONFLICT` and no provider call.
+`invocation` contains `operation_id`, dispatch authorization token (`dispatch_requested_event_id`), descriptor capability hash, validated arguments, logical action ID, idempotency key, deadline, speculative flag, and cancellation token. It emits `ToolDispatchAccepted`, zero or more acknowledgement `ToolResultObserved` events, and one terminal result/timeout event. It must not emit `WorldEffectObserved`; effect interpretation is reducer policy. Cancellation behavior comes only from the descriptor. Reusing a write idempotency key with different normalized arguments is `IDEMPOTENCY_CONFLICT` and no provider call.
 
 ### `Reconciler.plan(snapshot)`
 

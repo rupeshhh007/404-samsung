@@ -258,11 +258,12 @@ class OperationManager:
                 "callback operation_id does not match the intended operation",
             )
         if operation.provider_request_id is None:
-            raise OperationError(
-                OperationErrorCode.CALLBACK_CORRELATION_CONFLICT,
-                "operation has no established provider_request_id",
-            )
-        if observation.provider_request_id != operation.provider_request_id:
+            if operation.dispatch_requested_event_id is None:
+                raise OperationError(
+                    OperationErrorCode.CALLBACK_CORRELATION_CONFLICT,
+                    "operation has no established provider_request_id and no dispatch token",
+                )
+        elif observation.provider_request_id != operation.provider_request_id:
             raise OperationError(
                 OperationErrorCode.CALLBACK_CORRELATION_CONFLICT,
                 "callback provider_request_id does not match the operation",

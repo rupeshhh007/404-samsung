@@ -6,12 +6,12 @@ Invalid transitions do not mutate the entity; they yield a `ProtocolViolationObs
 
 | Machine | Legal transitions (event / guard) | Terminal/recovery |
 |---|---|---|
-| Intent maturity | `PROVISIONAL→COMMITTED` (`IntentRevisionCommitted`, semantically complete and stable); either → `SUPERSEDED` (new active revision) | commitment does not grant action authorization; superseded revision stays immutable |
-| Authorization | `NOT_REQUESTED→REQUIRED→AUTHORIZED|DENIED`; `AUTHORIZED→EXPIRED` when bound values change | new evidence may authorize new revision, never old changed args |
+| Intent maturity | `PROVISIONAL→COMMITTED` (`IntentRevisionCommitted`, semantically complete and stable); when a new child revision commits, previous active revision maturity transitions to `SUPERSEDED`. Stored revisions remain inspectable. Commitment does not grant action authorization (begins `NOT_REQUESTED`); authorization of a `SUPERSEDED` revision is invalid. | commitment does not grant action authorization; superseded revision stays immutable |
+| Authorization | `NOT_REQUESTED→REQUIRED|AUTHORIZED|DENIED`; `REQUIRED→AUTHORIZED|DENIED`; `AUTHORIZED→EXPIRED` when bound values change. Direct transition from `NOT_REQUESTED` to `AUTHORIZED` or `DENIED` requires the explicit `IntentAuthorizationChanged` user/policy fact (e.g. from user decision via `/authorizations` endpoint). Intent commitment alone never grants authorization. | new evidence may authorize new revision, never old changed args |
 | Branch | `PREDICTED→PREPARING` (`BranchPreparationStarted`); `PREPARING→READY` (`BranchPreparationCompleted`); `READY→PROMOTED` (`BranchPromoted`); nonterminal → `EXPIRED|EVICTED|INVALIDATED|FAILED` | terminal; cache miss creates normal work |
-| Operation | `CREATED→PREPARING` (`OperationPreparationStarted`); `PREPARING→READY` (`OperationPrepared`); `READY→DISPATCHED` (`ToolDispatchRequested`, fingerprint/auth valid); `DISPATCHED→WAITING` (`ToolDispatchAccepted`); `DISPATCHED|WAITING→SUCCEEDED|FAILED|TIMED_OUT` (result/timeout); pre-dispatch active → `CANCELLED`; any nonterminal → `SUPERSEDED` | stale results can update effect dimension, not reactivate operation; an accepted late result may leave operation SUPERSEDED while effect changes |
-| Cancellation | `NONE→REQUESTED→ACKNOWLEDGED|REJECTED|TOO_LATE` | ACKNOWLEDGED is not proof of no commit |
-| Effect | `NOT_STARTED→IN_FLIGHT` (`ToolDispatchAccepted`); `IN_FLIGHT→COMMITTED|FAILED|OUTCOME_UNKNOWN`; after `ToolDispatchRequested`, authoritative result/timeout may move `NOT_STARTED→COMMITTED|FAILED|OUTCOME_UNKNOWN` if provider acceptance arrives out of order; `OUTCOME_UNKNOWN→COMMITTED|FAILED` after verify; `COMMITTED→COMPENSATED` with authoritative compensation | ledger history retained; arrival order does not override authority |
+| Operation | `CREATED→PREPARING` (`OperationPreparationStarted`); `PREPARING→READY` (`OperationPrepared`); `READY→DISPATCHED` (`ToolDispatchRequested`, fingerprint/auth valid, matching sequence pin `validated_through_sequence == last_sequence`); `DISPATCHED→WAITING` (`ToolDispatchAccepted`); `DISPATCHED|WAITING→SUCCEEDED|FAILED|TIMED_OUT` (result/timeout); pre-dispatch active → `CANCELLED`; any nonterminal → `SUPERSEDED` | stale results can update effect dimension, not reactivate operation; an accepted late result may leave operation SUPERSEDED while effect changes |
+| Cancellation | `NONE→REQUESTED→ACKNOWLEDGED|REJECTED|TOO_LATE`; `ACKNOWLEDGED→REJECTED|TOO_LATE` permitted for multi-stage cancellations (e.g. `LOCAL_TASK` ack before provider outcome), provided `PROVIDER_CANCEL_ACCEPTED` is not in `cancellation_ack_scopes`. If `PROVIDER_CANCEL_ACCEPTED` has been observed, subsequent `REJECTED` or `TOO_LATE` contradicts an established fact and yields `RecordProtocolViolation`. Duplicate acknowledgements are idempotent. | ACKNOWLEDGED is not proof of no commit; REJECTED and TOO_LATE preserve operation and effect states and do not imply effect absence or commit |
+| Effect | `NOT_STARTED→IN_FLIGHT` (`ToolDispatchAccepted`); `IN_FLIGHT→COMMITTED|FAILED|OUTCOME_UNKNOWN`; after `ToolDispatchRequested`, authoritative result/timeout may move `NOT_STARTED→COMMITTED|FAILED|OUTCOME_UNKNOWN` if provider acceptance arrives out of order; `OUTCOME_UNKNOWN→COMMITTED|FAILED` after verify; `COMMITTED→COMPENSATED` with authoritative compensation | ledger history retained; arrival order does not override authority; late ToolDispatchAccepted does not downgrade terminal effect state |
 | Claim | `PROPOSED→PENDING→CONFIRMED|CONTRADICTED|UNCERTAIN`; current → `STALE|SUPERSEDED`; `UNCERTAIN→CONFIRMED|CONTRADICTED` | revalidation makes a new change event |
 | Speech | `PROPOSED→APPROVED|BLOCKED` (`SpeechActApproved` or `SpeechActBlocked`); `APPROVED→QUEUED` (`SpeechQueued`); `QUEUED→EMITTING` (`SpeechEmissionStarted`); `EMITTING→EMITTED` (`SpeechEmissionFinished`); pre-emission active → `CANCELLED`; `EMITTED→CORRECTION_REQUIRED` after a supporting claim is contradicted | correction is a new SpeechAct |
 | Divergence | `OPEN→PLANNED→RECONCILING→RESOLVED|ESCALATED`; `OPEN|PLANNED→ESCALATED` on manual-only policy, denied repair, or terminal failure; RECONCILING→RESOLVED only after the active plan’s `VERIFY_FINAL` evidence | new intent supersedes the plan and redetects/replans the case from current facts |
@@ -46,6 +46,18 @@ stateDiagram-v2
   OUTCOME_UNKNOWN --> COMMITTED: verify found effect
   OUTCOME_UNKNOWN --> FAILED: verify proved absence
   COMMITTED --> COMPENSATED: compensation confirmed
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> NONE
+  NONE --> REQUESTED: CancellationRequested
+  REQUESTED --> ACKNOWLEDGED: CancellationAcknowledged
+  ACKNOWLEDGED --> ACKNOWLEDGED: CancellationAcknowledged(scoped idempotent)
+  ACKNOWLEDGED --> REJECTED: CancellationRejected (no PROVIDER_CANCEL_ACCEPTED)
+  ACKNOWLEDGED --> TOO_LATE: CancellationTooLate (no PROVIDER_CANCEL_ACCEPTED)
+  REQUESTED --> REJECTED: CancellationRejected
+  REQUESTED --> TOO_LATE: CancellationTooLate
 ```
 
 Guards never perform I/O. Resulting external work is emitted as a command. A failed reconciliation ends `ESCALATED`; UI and speech state uncertainty and manual verification. Shutdown leaves dispatched writes `OUTCOME_UNKNOWN` in the final in-memory trace, though the state is lost on process exit.

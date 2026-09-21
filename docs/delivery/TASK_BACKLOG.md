@@ -15,7 +15,7 @@ Path convention: a source code span beginning `runtime/`, `intelligence/`, `exec
 | EXE-001 / P0 / C | Descriptor registry; INT-001 | create `execution/descriptors.py` | ToolRegistry/ToolDescriptor; FR-008; T-TOL-01; unknown capabilities conservative |
 | EXE-002 / P0 / C | Operations and idempotency; EXE-001, INTEL-002 | create `execution/operations.py`, `execution/idempotency.py` | OperationRecord; OperationCreated/result events; FR-007, FR-010; T-IDM-01, T-UNK-01 |
 | EXE-003 / P0 / C | SAFEPOINT policy; EXE-002 | create `execution/safepoint.py` | SafePointPolicy; safe-point/cancel/dispatch events; FR-007, FR-009; T-SAF-01, T-SAF-02 (G3) |
-| EXE-004 / P0 / C | Generic ToolRuntime only; EXE-001, EXE-003, RUN-003 | create `execution/tools.py`; does not create `providers/fake_tools.py` | ToolExecutor; dispatch/cancel/result/timeout; FR-008, FR-010; T-TOL-01, T-IDM-01, T-UNK-01, T-SEC-01 |
+| EXE-004 / P0 / C | Generic ToolRuntime only; EXE-001, EXE-003, RUN-003 | create `execution/tools.py` with ToolRuntime and private inward provider transport Protocol; does not depend on or create `adapters/protocol.py` or `providers/fake_tools.py` | ToolExecutor; dispatch/cancel/result/timeout; FR-008, FR-010; T-TOL-01, T-IDM-01, T-UNK-01, T-SEC-01 |
 | TRU-001 / P0 / D | Immutable evidence store; INT-001 | create `truth/evidence.py` | EvidenceStore; EvidenceRecorded; FR-013, NFR-008; T-EVD-01 and I8 cases |
 | EXE-005 / P0 / C | World Effect Ledger; EXE-004, TRU-001 | create `execution/effects.py` | EffectInterpreter; ToolResultObserved→WorldEffectObserved; FR-011; T-WLD-01 and I4/I9 cases |
 | TRU-002 / P0 / D | ClaimGraph; EXE-005, TRU-001 | create `truth/claims.py` | ClaimEvaluator; claim events/states; FR-014; T-CLM-01 and I9 cases |
