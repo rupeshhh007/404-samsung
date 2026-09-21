@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import re
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from pydantic import ValidationError
 
@@ -65,7 +65,7 @@ class SafePointResult:
     stored_capability_hash: str | None = None
     current_capability_hash: str | None = None
     _follow_up_event_type: str | None = field(default=None, repr=False)
-    _follow_up_event_payload: tuple[tuple[str, str], ...] = field(
+    _follow_up_event_payload: tuple[tuple[str, Any], ...] = field(
         default=(), repr=False
     )
 
@@ -130,8 +130,8 @@ class SafePointPolicy:
         if type(session_state.paused) is not bool or type(operation.speculative) is not bool:
             raise SafePointError("pause and speculation flags must be booleans")
         try:
-            op = OperationRecord.model_validate(strict_json_copy(operation.model_dump()))
-            revision = IntentRevision.model_validate(strict_json_copy(current_revision.model_dump()))
+            op = OperationRecord.model_validate(strict_json_copy(operation.model_dump(mode="json")))
+            revision = IntentRevision.model_validate(strict_json_copy(current_revision.model_dump(mode="json")))
             session = SessionState.model_validate(strict_json_copy(session_state.model_dump(mode="json")))
         except (ValidationError, IdempotencyError, ValueError, TypeError) as exc:
             raise SafePointError("invalid operation, intent or session snapshot") from exc
@@ -150,7 +150,9 @@ class SafePointPolicy:
 
         def result(decision: SafePointDecision, reason: SafePointReason,
                    paths: tuple[str, ...] = ()) -> SafePointResult:
-            follow_up = _follow_up_event(op, decision, reason)
+            follow_up = _follow_up_event(
+                op, decision, reason, validated_through_sequence=session.last_sequence
+            )
             return SafePointResult(
                 decision=decision,
                 reason=reason,
@@ -164,11 +166,16 @@ class SafePointPolicy:
                 ),
                 _follow_up_event_payload=() if follow_up is None else tuple(
                     sorted(
-                        (key, str(value))
+                        (key, value)
                         for key, value in follow_up.model_dump(mode="json").items()
                     )
                 ),
             )
+
+        # Require matching authoritative revision in session.revisions (Blocker 1 E)
+        authoritative_rev = session.revisions.get(revision.revision_id)
+        if authoritative_rev is None or authoritative_rev != revision:
+            return result(SafePointDecision.HOLD, SafePointReason.INVALID_OPERATION_SNAPSHOT)
 
         # This gate cannot decide post-dispatch cancellation or world outcomes.
         if (op.state != OperationState.READY or op.effect_state != EffectState.NOT_STARTED
@@ -245,6 +252,7 @@ def _follow_up_event(
     operation: OperationRecord,
     decision: SafePointDecision,
     reason: SafePointReason,
+    validated_through_sequence: int | None = None,
 ) -> ToolDispatchRequested | CancellationRequested | None:
     """Map a pure decision to an existing event payload, never a command.
 
@@ -256,7 +264,10 @@ def _follow_up_event(
     """
 
     if decision == SafePointDecision.CONTINUE:
-        return ToolDispatchRequested(operation_id=operation.operation_id)
+        return ToolDispatchRequested(
+            operation_id=operation.operation_id,
+            validated_through_sequence=validated_through_sequence,
+        )
     if decision != SafePointDecision.CANCEL:
         return None
     if operation.cancellation_state == CancellationState.NONE:

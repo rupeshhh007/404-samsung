@@ -13,8 +13,11 @@ import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
 from interlock.domain.enums import (
+    ActionType,
     Authorization,
     BranchState,
+    CancellationAckScope,
+    CancellationPolicy,
     CancellationState,
     ClaimState,
     ControlKind,
@@ -22,6 +25,7 @@ from interlock.domain.enums import (
     EffectState,
     EvidenceAuthority,
     EvidenceSource,
+    IntentMaturity,
     OperationState,
     PlanState,
     PlanStepState,
@@ -162,6 +166,7 @@ class Reducer:
                 last_sequence=1,
                 mode=state_mode,
                 intents={},
+                revisions={},
                 active_intent_id=None,
                 branches={},
                 operations={},
@@ -428,15 +433,100 @@ def _handle_intent_revision_committed(
         else IntentRevision.model_validate(rev_data)
     )
 
-    node = state.intents.get(rev.intent_id)
-    if node is not None:
-        new_revs = list(node.revisions)
-        if rev.revision_id not in new_revs:
-            new_revs.append(rev.revision_id)
-        new_node = node.model_copy(
-            update={"revisions": new_revs, "active_revision_id": rev.revision_id}
+    existing_rev = state.revisions.get(rev.revision_id)
+    if existing_rev is not None:
+        immutable_match = (
+            existing_rev.revision_id == rev.revision_id
+            and existing_rev.intent_id == rev.intent_id
+            and existing_rev.parent_revision_id == rev.parent_revision_id
+            and existing_rev.values == rev.values
+            and existing_rev.created_by_event_id == rev.created_by_event_id
+            and existing_rev.dependency_fingerprint == rev.dependency_fingerprint
         )
-    else:
+        if not immutable_match:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="IMMUTABLE_REVISION_VIOLATION",
+                        digest=f"Revision '{rev.revision_id}' conflicts with its immutable record",
+                    )
+                ],
+            )
+
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
+    rev_maturity = rev.maturity.value if hasattr(rev.maturity, "value") else rev.maturity
+    if rev_maturity == IntentMaturity.SUPERSEDED.value:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_REVISION_MATURITY",
+                    digest=f"Incoming revision '{rev.revision_id}' has invalid initial maturity SUPERSEDED",
+                )
+            ],
+        )
+    if rev_maturity not in (
+        IntentMaturity.PROVISIONAL.value,
+        IntentMaturity.COMMITTED.value,
+    ):
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_REVISION_MATURITY",
+                    digest=f"Incoming revision '{rev.revision_id}' has invalid initial maturity '{rev_maturity}'",
+                )
+            ],
+        )
+
+    rev_auth = rev.authorization.value if hasattr(rev.authorization, "value") else rev.authorization
+    if rev_auth != Authorization.NOT_REQUESTED.value:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_REVISION_AUTHORIZATION",
+                    digest=f"Incoming revision '{rev.revision_id}' must begin with authorization NOT_REQUESTED, got {rev_auth}",
+                )
+            ],
+        )
+
+    node = state.intents.get(rev.intent_id)
+    new_revisions = dict(state.revisions)
+    if node is None:
+        if rev.parent_revision_id is not None:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_REVISION_PARENT",
+                        digest=f"Root revision '{rev.revision_id}' for intent '{rev.intent_id}' must have parent_revision_id None, got '{rev.parent_revision_id}'",
+                    )
+                ],
+            )
         goal_type = str(rev.values.get("goal_type", "default"))
         new_node = IntentNode(
             intent_id=rev.intent_id,
@@ -444,11 +534,59 @@ def _handle_intent_revision_committed(
             revisions=[rev.revision_id],
             active_revision_id=rev.revision_id,
         )
+    else:
+        if not node.active_revision_id or rev.parent_revision_id != node.active_revision_id:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_REVISION_PARENT",
+                        digest=f"Revision '{rev.revision_id}' parent '{rev.parent_revision_id}' does not match active revision '{node.active_revision_id}' of intent '{rev.intent_id}'",
+                    )
+                ],
+            )
 
+        parent_rev = state.revisions.get(rev.parent_revision_id)
+        if parent_rev is None or parent_rev.intent_id != rev.intent_id:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_REVISION_PARENT",
+                        digest=f"Revision '{rev.revision_id}' parent '{rev.parent_revision_id}' not found in revisions or belongs to different intent",
+                    )
+                ],
+            )
+
+        superseded_parent = parent_rev.model_copy(
+            update={"maturity": IntentMaturity.SUPERSEDED}
+        )
+        new_revisions[parent_rev.revision_id] = superseded_parent
+
+        new_revs = list(node.revisions)
+        if rev.revision_id not in new_revs:
+            new_revs.append(rev.revision_id)
+        new_node = node.model_copy(
+            update={"revisions": new_revs, "active_revision_id": rev.revision_id}
+        )
+
+    committed_rev = rev.model_copy(
+        update={
+            "maturity": IntentMaturity.COMMITTED,
+            "authorization": Authorization.NOT_REQUESTED,
+        },
+        deep=True,
+    )
+    new_revisions[rev.revision_id] = committed_rev
     new_intents = {**state.intents, rev.intent_id: new_node}
     new_state = state.model_copy(
         update={
             "intents": new_intents,
+            "revisions": new_revisions,
             "active_intent_id": rev.intent_id,
             "last_sequence": env.sequence,
             "metrics": state.metrics.model_copy(
@@ -466,9 +604,7 @@ def _handle_intent_authorization_changed(
     state: SessionState, env: EventEnvelope
 ) -> Tuple[SessionState, List[Command]]:
     rev_id = env.payload["revision_id"]
-    # Check that revision exists in one of the intent nodes
-    found = any(rev_id in node.revisions for node in state.intents.values())
-    if not found:
+    if rev_id not in state.revisions:
         return (
             state,
             [
@@ -476,13 +612,63 @@ def _handle_intent_authorization_changed(
                     session_id=state.session_id,
                     boundary="reducer",
                     code="UNKNOWN_REVISION",
-                    digest=f"Revision '{rev_id}' not found in any intent",
+                    digest=f"Revision '{rev_id}' not found",
                 )
             ],
         )
 
+    current_rev = state.revisions[rev_id]
+    current_maturity = current_rev.maturity.value if hasattr(current_rev.maturity, "value") else current_rev.maturity
+    if current_maturity == IntentMaturity.SUPERSEDED.value:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_AUTHORIZATION_TRANSITION",
+                    digest=f"Cannot change authorization for SUPERSEDED revision '{rev_id}'",
+                )
+            ],
+        )
+
+    target_auth = Authorization(env.payload["authorization"])
+    current_auth = Authorization(current_rev.authorization)
+
+    legal_auth_transitions: Dict[Authorization, set[Authorization]] = {
+        Authorization.NOT_REQUESTED: {
+            Authorization.REQUIRED,
+            Authorization.AUTHORIZED,
+            Authorization.DENIED,
+        },
+        Authorization.REQUIRED: {Authorization.AUTHORIZED, Authorization.DENIED},
+        Authorization.AUTHORIZED: {Authorization.EXPIRED},
+        Authorization.DENIED: set(),
+        Authorization.EXPIRED: set(),
+    }
+
+    if target_auth not in legal_auth_transitions.get(current_auth, set()):
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_AUTHORIZATION_TRANSITION",
+                    digest=f"Cannot transition authorization for revision '{rev_id}' from {current_auth} to {target_auth}",
+                )
+            ],
+        )
+
+    updated_rev = current_rev.model_copy(
+        update={"authorization": target_auth}, deep=True
+    )
+    new_revisions = dict(state.revisions)
+    new_revisions[rev_id] = updated_rev
+
     new_state = state.model_copy(
         update={
+            "revisions": new_revisions,
             "last_sequence": env.sequence,
             "metrics": state.metrics.model_copy(
                 update={"through_sequence": env.sequence}
@@ -724,6 +910,52 @@ def _handle_operation_created(
         if isinstance(op_data, OperationRecord)
         else OperationRecord.model_validate(op_data)
     )
+
+    if op.operation_id in state.operations:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="DUPLICATE_OPERATION_ID",
+                    digest=f"Operation '{op.operation_id}' already exists",
+                )
+            ],
+        )
+
+    op_state = op.state.value if hasattr(op.state, "value") else op.state
+    op_cancel = (
+        op.cancellation_state.value
+        if hasattr(op.cancellation_state, "value")
+        else op.cancellation_state
+    )
+    op_effect = (
+        op.effect_state.value
+        if hasattr(op.effect_state, "value")
+        else op.effect_state
+    )
+
+    if (
+        op_state != OperationState.CREATED.value
+        or op_cancel != CancellationState.NONE.value
+        or op_effect != EffectState.NOT_STARTED.value
+        or op.provider_request_id is not None
+        or op.dispatch_requested_event_id is not None
+        or len(op.cancellation_ack_scopes) != 0
+    ):
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_OPERATION_CREATION",
+                    digest=f"Operation '{op.operation_id}' has invalid initial creation state (state={op_state}, cancel={op_cancel}, effect={op_effect}, provider_req={op.provider_request_id}, token={op.dispatch_requested_event_id}, scopes={op.cancellation_ack_scopes})",
+                )
+            ],
+        )
+
     new_ops = {**state.operations, op.operation_id: op}
     new_state = state.model_copy(
         update={
@@ -852,7 +1084,53 @@ def _handle_tool_dispatch_requested(
             ],
         )
     op = state.operations[op_id]
-    if op.state != OperationState.READY:
+
+    validated_seq = env.payload.get("validated_through_sequence")
+    if validated_seq is None:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="MISSING_SAFEPOINT_PIN",
+                    digest="Dispatch requires validated_through_sequence pin, got None",
+                )
+            ],
+        )
+    if validated_seq < state.last_sequence:
+        # Expected stale concurrency race: snapshot was taken at an earlier sequence.
+        # Preserve the ENTIRE CURRENT operation exactly as-is, whatever its current state is.
+        # Advance last_sequence and metrics, emit PublishProjection in live execution.
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
+    if validated_seq > state.last_sequence:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="FUTURE_SAFEPOINT_PIN",
+                    digest=f"Dispatch pin '{validated_seq}' is ahead of session sequence '{state.last_sequence}'",
+                )
+            ],
+        )
+
+    # validated_seq == state.last_sequence:
+    op_state = op.state.value if hasattr(op.state, "value") else op.state
+    if op_state != OperationState.READY.value:
         return (
             state,
             [
@@ -865,8 +1143,127 @@ def _handle_tool_dispatch_requested(
             ],
         )
 
+    # If operation somehow already contains a token before this transition, fail closed
+    if op.dispatch_requested_event_id is not None:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_OPERATION_STATE",
+                    digest=f"Operation '{op_id}' already contains dispatch token before dispatch request",
+                )
+            ],
+        )
+
+    # Authoritative revision and session guards
+    if state.paused:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="STALE_SAFEPOINT_DECISION",
+                    digest="Session is paused; dispatch prohibited",
+                )
+            ],
+        )
+
+    rev = state.revisions.get(op.intent_revision_id)
+    if rev is None:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="STALE_SAFEPOINT_DECISION",
+                    digest=f"Operation '{op_id}' revision '{op.intent_revision_id}' not found in authoritative revisions",
+                )
+            ],
+        )
+
+    node = state.intents.get(rev.intent_id)
+    if node is None or node.active_revision_id != rev.revision_id:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="STALE_SAFEPOINT_DECISION",
+                    digest=f"Operation '{op_id}' revision '{rev.revision_id}' is not active for intent '{rev.intent_id}'",
+                )
+            ],
+        )
+
+    if state.active_intent_id != rev.intent_id:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="STALE_SAFEPOINT_DECISION",
+                    digest=f"Active intent '{state.active_intent_id}' does not match revision intent '{rev.intent_id}'",
+                )
+            ],
+        )
+
+    rev_maturity = rev.maturity.value if hasattr(rev.maturity, "value") else rev.maturity
+    if rev_maturity == IntentMaturity.SUPERSEDED.value:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="STALE_SAFEPOINT_DECISION",
+                    digest=f"Revision '{rev.revision_id}' is SUPERSEDED",
+                )
+            ],
+        )
+
+    op_action_type = op.action_type.value if hasattr(op.action_type, "value") else op.action_type
+    if op_action_type != ActionType.READ_ONLY.value:
+        rev_auth = rev.authorization.value if hasattr(rev.authorization, "value") else rev.authorization
+        if rev_maturity != IntentMaturity.COMMITTED.value or rev_auth != Authorization.AUTHORIZED.value:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="STALE_SAFEPOINT_DECISION",
+                        digest=f"Consequential operation '{op_id}' requires COMMITTED + AUTHORIZED revision (maturity={rev_maturity}, auth={rev_auth})",
+                    )
+                ],
+            )
+
+    op_cancel_state = op.cancellation_state.value if hasattr(op.cancellation_state, "value") else op.cancellation_state
+    op_cancel_policy = op.cancellation_policy.value if hasattr(op.cancellation_policy, "value") else op.cancellation_policy
+    if op_cancel_state == CancellationState.REQUESTED.value and op_cancel_policy == CancellationPolicy.IMMEDIATE.value:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="STALE_SAFEPOINT_DECISION",
+                    digest=f"Cancellation is REQUESTED for operation '{op_id}' with policy IMMEDIATE",
+                )
+            ],
+        )
+
     new_ops = dict(state.operations)
-    new_ops[op_id] = op.model_copy(update={"state": OperationState.DISPATCHED})
+    new_ops[op_id] = op.model_copy(
+        update={
+            "state": OperationState.DISPATCHED,
+            "dispatch_requested_event_id": env.event_id,
+        }
+    )
     new_state = state.model_copy(
         update={
             "operations": new_ops,
@@ -900,26 +1297,53 @@ def _handle_tool_dispatch_accepted(
             ],
         )
     op = state.operations[op_id]
-    if op.state != OperationState.DISPATCHED:
+    if op.dispatch_requested_event_id is None:
         return (
             state,
             [
                 RecordProtocolViolation(
                     session_id=state.session_id,
                     boundary="reducer",
-                    code="INVALID_OPERATION_TRANSITION",
-                    digest=f"Operation '{op_id}' is in state '{op.state}', expected DISPATCHED",
+                    code="UNAUTHORIZED_DISPATCH",
+                    digest=f"Operation '{op_id}' has no dispatch token",
                 )
             ],
         )
 
     provider_req_id = env.payload["provider_request_id"]
+    if op.provider_request_id is not None and op.provider_request_id != provider_req_id:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="PROVIDER_REQUEST_ID_MISMATCH",
+                    digest=f"Incoming provider_request_id '{provider_req_id}' conflicts with established '{op.provider_request_id}'",
+                )
+            ],
+        )
+
+    if op.state == OperationState.DISPATCHED:
+        new_op_state = OperationState.WAITING
+        new_effect_state = EffectState.IN_FLIGHT
+    else:
+        new_op_state = op.state
+        if op.effect_state in (
+            EffectState.COMMITTED,
+            EffectState.FAILED,
+            EffectState.OUTCOME_UNKNOWN,
+        ):
+            new_effect_state = op.effect_state
+        else:
+            new_effect_state = EffectState.IN_FLIGHT
+
     new_ops = dict(state.operations)
     new_ops[op_id] = op.model_copy(
         update={
-            "state": OperationState.WAITING,
+            "state": new_op_state,
             "provider_request_id": provider_req_id,
-            "effect_state": EffectState.IN_FLIGHT,
+            "effect_state": new_effect_state,
         }
     )
     new_state = state.model_copy(
@@ -1024,7 +1448,15 @@ def _handle_cancellation_acknowledged(
             ],
         )
     op = state.operations[op_id]
-    if op.cancellation_state != CancellationState.REQUESTED:
+    op_cancel_state = (
+        op.cancellation_state.value
+        if hasattr(op.cancellation_state, "value")
+        else op.cancellation_state
+    )
+    if op_cancel_state not in (
+        CancellationState.REQUESTED.value,
+        CancellationState.ACKNOWLEDGED.value,
+    ):
         return (
             state,
             [
@@ -1032,22 +1464,216 @@ def _handle_cancellation_acknowledged(
                     session_id=state.session_id,
                     boundary="reducer",
                     code="INVALID_CANCELLATION_TRANSITION",
-                    digest=f"Cancellation must be REQUESTED before ACKNOWLEDGED, got {op.cancellation_state}",
+                    digest=f"Cancellation must be REQUESTED or ACKNOWLEDGED before ACKNOWLEDGED, got {op.cancellation_state}",
+                )
+            ],
+        )
+
+    raw_scope = env.payload.get("scope")
+    if not raw_scope:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_CANCELLATION_TRANSITION",
+                    digest="CancellationAcknowledged requires 'scope' in payload",
+                )
+            ],
+        )
+    try:
+        scope_enum = (
+            raw_scope
+            if isinstance(raw_scope, CancellationAckScope)
+            else CancellationAckScope(raw_scope)
+        )
+    except Exception:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_CANCELLATION_TRANSITION",
+                    digest=f"Invalid cancellation scope: {raw_scope}",
+                )
+            ],
+        )
+
+    scope_val = scope_enum.value
+    existing_scope_vals = [
+        s.value if hasattr(s, "value") else s for s in op.cancellation_ack_scopes
+    ]
+    new_scopes = list(op.cancellation_ack_scopes)
+    if scope_val not in existing_scope_vals:
+        new_scopes.append(scope_enum)
+
+    new_ops = dict(state.operations)
+    upd: Dict[str, Any] = {
+        "cancellation_state": CancellationState.ACKNOWLEDGED,
+        "cancellation_ack_scopes": new_scopes,
+    }
+    op_curr_state = op.state.value if hasattr(op.state, "value") else op.state
+    if op_curr_state in (
+        OperationState.CREATED.value,
+        OperationState.PREPARING.value,
+        OperationState.READY.value,
+        OperationState.DISPATCHED.value,
+        OperationState.WAITING.value,
+    ):
+        upd["state"] = OperationState.CANCELLED
+    new_ops[op_id] = op.model_copy(update=upd)
+    new_state = state.model_copy(
+        update={
+            "operations": new_ops,
+            "last_sequence": env.sequence,
+            "metrics": state.metrics.model_copy(
+                update={"through_sequence": env.sequence}
+            ),
+        }
+    )
+    cmds: List[Command] = [
+        PublishProjection(session_id=state.session_id, sequence=env.sequence)
+    ]
+    return new_state, cmds
+
+
+def _handle_cancellation_rejected(
+    state: SessionState, env: EventEnvelope
+) -> Tuple[SessionState, List[Command]]:
+    op_id = env.payload["operation_id"]
+    if op_id not in state.operations:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="UNKNOWN_OPERATION",
+                    digest=f"Operation '{op_id}' not found",
+                )
+            ],
+        )
+    op = state.operations[op_id]
+    op_cancel_state = (
+        op.cancellation_state.value
+        if hasattr(op.cancellation_state, "value")
+        else op.cancellation_state
+    )
+    if op_cancel_state not in (
+        CancellationState.REQUESTED.value,
+        CancellationState.ACKNOWLEDGED.value,
+    ):
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_CANCELLATION_TRANSITION",
+                    digest=f"Cancellation must be REQUESTED or ACKNOWLEDGED before REJECTED, got {op.cancellation_state}",
+                )
+            ],
+        )
+
+    provider_cancel_accepted_val = CancellationAckScope.PROVIDER_CANCEL_ACCEPTED.value
+    has_provider_cancel_accepted = any(
+        (s.value if hasattr(s, "value") else s) == provider_cancel_accepted_val
+        for s in op.cancellation_ack_scopes
+    )
+    if has_provider_cancel_accepted:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_CANCELLATION_TRANSITION",
+                    digest=f"Cannot reject cancellation after PROVIDER_CANCEL_ACCEPTED has been observed for operation '{op_id}'",
                 )
             ],
         )
 
     new_ops = dict(state.operations)
-    upd: Dict[str, Any] = {"cancellation_state": CancellationState.ACKNOWLEDGED}
-    if op.state in (
-        OperationState.CREATED,
-        OperationState.PREPARING,
-        OperationState.READY,
-        OperationState.DISPATCHED,
-        OperationState.WAITING,
+    new_ops[op_id] = op.model_copy(
+        update={"cancellation_state": CancellationState.REJECTED}
+    )
+    new_state = state.model_copy(
+        update={
+            "operations": new_ops,
+            "last_sequence": env.sequence,
+            "metrics": state.metrics.model_copy(
+                update={"through_sequence": env.sequence}
+            ),
+        }
+    )
+    cmds: List[Command] = [
+        PublishProjection(session_id=state.session_id, sequence=env.sequence)
+    ]
+    return new_state, cmds
+
+
+def _handle_cancellation_too_late(
+    state: SessionState, env: EventEnvelope
+) -> Tuple[SessionState, List[Command]]:
+    op_id = env.payload["operation_id"]
+    if op_id not in state.operations:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="UNKNOWN_OPERATION",
+                    digest=f"Operation '{op_id}' not found",
+                )
+            ],
+        )
+    op = state.operations[op_id]
+    op_cancel_state = (
+        op.cancellation_state.value
+        if hasattr(op.cancellation_state, "value")
+        else op.cancellation_state
+    )
+    if op_cancel_state not in (
+        CancellationState.REQUESTED.value,
+        CancellationState.ACKNOWLEDGED.value,
     ):
-        upd["state"] = OperationState.CANCELLED
-    new_ops[op_id] = op.model_copy(update=upd)
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_CANCELLATION_TRANSITION",
+                    digest=f"Cancellation must be REQUESTED or ACKNOWLEDGED before TOO_LATE, got {op.cancellation_state}",
+                )
+            ],
+        )
+
+    provider_cancel_accepted_val = CancellationAckScope.PROVIDER_CANCEL_ACCEPTED.value
+    has_provider_cancel_accepted = any(
+        (s.value if hasattr(s, "value") else s) == provider_cancel_accepted_val
+        for s in op.cancellation_ack_scopes
+    )
+    if has_provider_cancel_accepted:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_CANCELLATION_TRANSITION",
+                    digest=f"Cannot mark cancellation TOO_LATE after PROVIDER_CANCEL_ACCEPTED has been observed for operation '{op_id}'",
+                )
+            ],
+        )
+
+    new_ops = dict(state.operations)
+    new_ops[op_id] = op.model_copy(
+        update={"cancellation_state": CancellationState.TOO_LATE}
+    )
     new_state = state.model_copy(
         update={
             "operations": new_ops,
@@ -1111,10 +1737,42 @@ def _handle_tool_result_observed(
             ],
         )
 
+    op = state.operations[op_id]
+    incoming_provider_id = env.payload.get("provider_request_id")
+
+    if op.provider_request_id is not None:
+        if incoming_provider_id != op.provider_request_id:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="PROVIDER_REQUEST_ID_MISMATCH",
+                        digest=f"Incoming provider_request_id '{incoming_provider_id}' conflicts with established '{op.provider_request_id}'",
+                    )
+                ],
+            )
+    else:
+        if op.dispatch_requested_event_id is None:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="UNAUTHORIZED_DISPATCH",
+                        digest=f"Operation '{op_id}' has no dispatch token to accept result",
+                    )
+                ],
+            )
+
     outcome = ToolOutcome(env.payload["outcome"])
     new_ops = dict(state.operations)
-    op = new_ops[op_id]
     upd: Dict[str, Any] = {}
+
+    if op.provider_request_id is None and incoming_provider_id:
+        upd["provider_request_id"] = incoming_provider_id
 
     # Stale results can update effect dimension, not reactivate operation
     if op.state in (OperationState.DISPATCHED, OperationState.WAITING):
@@ -1129,9 +1787,10 @@ def _handle_tool_result_observed(
     elif op.state in (OperationState.CANCELLED, OperationState.SUPERSEDED):
         if outcome == ToolOutcome.SUCCEEDED:
             upd["effect_state"] = EffectState.COMMITTED
-
-    if env.payload.get("provider_request_id"):
-        upd["provider_request_id"] = env.payload["provider_request_id"]
+        elif outcome == ToolOutcome.FAILED:
+            upd["effect_state"] = EffectState.FAILED
+        elif outcome == ToolOutcome.UNKNOWN:
+            upd["effect_state"] = EffectState.OUTCOME_UNKNOWN
 
     new_ops[op_id] = op.model_copy(update=upd)
     new_state = state.model_copy(
@@ -2111,6 +2770,8 @@ _HANDLERS = {
     "ToolDispatchAccepted": _handle_tool_dispatch_accepted,
     "CancellationRequested": _handle_cancellation_requested,
     "CancellationAcknowledged": _handle_cancellation_acknowledged,
+    "CancellationRejected": _handle_cancellation_rejected,
+    "CancellationTooLate": _handle_cancellation_too_late,
     "SafePointReached": _handle_safepoint_reached,
     "ToolResultObserved": _handle_tool_result_observed,
     "ToolTimedOut": _handle_tool_timed_out,

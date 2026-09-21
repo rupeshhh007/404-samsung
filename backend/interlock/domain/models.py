@@ -202,6 +202,7 @@ class OperationRecord(DomainBaseModel):
     cancellation_policy: CancellationPolicy
     state: OperationState
     cancellation_state: CancellationState
+    cancellation_ack_scopes: List[CancellationAckScope] = Field(default_factory=list)
     effect_state: EffectState
     speculative: bool
     logical_action_id: str = Field(..., min_length=1)
@@ -209,6 +210,10 @@ class OperationRecord(DomainBaseModel):
     descriptor_capability_hash: Optional[str] = None
     schema_version: Literal[1] = 1
     provider_request_id: Optional[str] = None
+    dispatch_requested_event_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+    )
     error: Optional[ErrorRecord] = None
 
     @model_validator(mode="after")
@@ -400,6 +405,7 @@ class SessionState(DomainBaseModel):
     mode: RuntimeMode = RuntimeMode.DEMO
     paused: bool = False
     intents: Dict[str, IntentNode] = Field(default_factory=dict)
+    revisions: Dict[str, IntentRevision] = Field(default_factory=dict)
     active_intent_id: Optional[str] = None
     branches: Dict[str, BranchRecord] = Field(default_factory=dict)
     operations: Dict[str, OperationRecord] = Field(default_factory=dict)

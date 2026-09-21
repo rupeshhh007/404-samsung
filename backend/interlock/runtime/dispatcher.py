@@ -208,6 +208,7 @@ class CommandDispatcher:
         self._journal = journal
         self._dispatch_enabled = dispatch_enabled
         self._handlers: dict[str, CommandHandler] = {}
+        self._builtin_handlers: set[str] = set()
         self._tasks: set[asyncio.Task[DispatchResult]] = set()
         self._task_identity: dict[
             asyncio.Task[DispatchResult], tuple[str, str, str | None]
@@ -236,16 +237,26 @@ class CommandDispatcher:
         self,
         command_type: type[BaseCommand],
         handler: CommandHandler,
+        *,
+        replace_builtin: bool = False,
     ) -> None:
         """Register exactly one handler for a canonical command type."""
 
         command_name = _command_name(command_type)
         if command_name not in _KNOWN_COMMAND_NAMES:
             raise ValueError(f"Unsupported command type: {command_name}")
-        if command_name in self._handlers:
-            raise ValueError(f"Handler already registered for {command_name}")
         if not callable(handler):
             raise TypeError("handler must be callable")
+        if command_name in self._handlers:
+            if not replace_builtin:
+                raise ValueError(f"Handler already registered for {command_name}")
+            if command_name not in self._builtin_handlers:
+                raise ValueError(
+                    f"Cannot replace non-builtin handler for {command_name}"
+                )
+            self._builtin_handlers.remove(command_name)
+        elif replace_builtin:
+            raise ValueError(f"{command_name} is not a builtin handler")
         self._handlers[command_name] = handler
 
     async def submit(
@@ -495,6 +506,7 @@ class CommandDispatcher:
             "PrepareOperation": _accept_prepare_operation,
             "QueueOutput": _accept_queue_output,
         }
+        self._builtin_handlers = set(self._handlers.keys())
 
 
 class _DispatcherBoundaryError(ValueError):

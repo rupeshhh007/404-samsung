@@ -16,7 +16,7 @@ These paths are planned; none exists in Phase 0. “Creation ticket” is unique
 | `backend/interlock/execution/descriptors.py` | manifest normalization/registry | EXE-001 / C | T-TOL-01 |
 | `backend/interlock/execution/operations.py`; `backend/interlock/execution/idempotency.py` | operation lifecycle and logical-action dedupe | EXE-002 / C | T-IDM-01, T-UNK-01 |
 | `backend/interlock/execution/safepoint.py` | dispatch revalidation and cancellation decisions | EXE-003 / C | T-SAF-01, T-SAF-02 |
-| `backend/interlock/execution/tools.py` | generic ToolRuntime; no fake-provider implementation | EXE-004 / C | T-IDM-01, T-SEC-01, T-UNK-01 |
+| `backend/interlock/execution/tools.py` | generic ToolRuntime and private inward provider transport Protocol; no fake-provider or external adapter implementation | EXE-004 / C | T-IDM-01, T-SEC-01, T-UNK-01 |
 | `backend/interlock/execution/effects.py` | append-only world ledger/projection | EXE-005 / C | T-WLD-01 |
 | `backend/interlock/execution/reconciliation.py` | divergence and repair plans | EXE-006 / C | T-REC-01, T-REC-02, T-REC-03 |
 | `backend/interlock/truth/evidence.py` | immutable evidence/provenance | TRU-001 / D | T-EVD-01 |

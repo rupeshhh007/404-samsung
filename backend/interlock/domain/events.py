@@ -141,6 +141,7 @@ class ToolDispatchRequested(DomainBaseModel):
     """Event: ToolDispatchRequested. Ingress: reducer policy -> reducer."""
 
     operation_id: str = Field(..., min_length=1)
+    validated_through_sequence: Optional[int] = Field(default=None, ge=1)
 
 
 class ToolDispatchAccepted(DomainBaseModel):
@@ -162,6 +163,20 @@ class CancellationAcknowledged(DomainBaseModel):
 
     operation_id: str = Field(..., min_length=1)
     scope: CancellationAckScope
+
+
+class CancellationRejected(DomainBaseModel):
+    """Event: CancellationRejected. Ingress: executor/provider -> reducer."""
+
+    operation_id: str = Field(..., min_length=1)
+    reason: str = Field(..., min_length=1)
+
+
+class CancellationTooLate(DomainBaseModel):
+    """Event: CancellationTooLate. Ingress: executor/provider -> reducer."""
+
+    operation_id: str = Field(..., min_length=1)
+    reason: str = Field(..., min_length=1)
 
 
 class SafePointReached(DomainBaseModel):
@@ -342,6 +357,8 @@ EVENT_PAYLOAD_REGISTRY: Dict[str, type[DomainBaseModel]] = {
     "ToolDispatchAccepted": ToolDispatchAccepted,
     "CancellationRequested": CancellationRequested,
     "CancellationAcknowledged": CancellationAcknowledged,
+    "CancellationRejected": CancellationRejected,
+    "CancellationTooLate": CancellationTooLate,
     "SafePointReached": SafePointReached,
     "ToolResultObserved": ToolResultObserved,
     "ToolTimedOut": ToolTimedOut,
