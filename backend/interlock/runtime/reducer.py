@@ -254,7 +254,30 @@ class Reducer:
                     ],
                 )
 
-            return handler(state, envelope)
+            next_state, commands = handler(state, envelope)
+            if next_state is state and any(
+                isinstance(command, RecordProtocolViolation)
+                for command in commands
+            ):
+                consumed_state = state.model_copy(
+                    update={
+                        "last_sequence": envelope.sequence,
+                        "metrics": state.metrics.model_copy(
+                            update={"through_sequence": envelope.sequence}
+                        ),
+                    }
+                )
+                return (
+                    consumed_state,
+                    [
+                        *commands,
+                        PublishProjection(
+                            session_id=state.session_id,
+                            sequence=envelope.sequence,
+                        ),
+                    ],
+                )
+            return next_state, commands
 
         except Exception as e:
             return (
