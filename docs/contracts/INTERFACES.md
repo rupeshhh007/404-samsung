@@ -49,7 +49,7 @@ All interfaces are session-scoped. Cancellation is cooperative according to desc
 
 - Preconditions: envelope session matches state and sequence is exactly `last_sequence + 1` (except `SessionStarted` creating state).
 - Output: a fully new state value, ordered command list, and sanitized projection delta pinned to the sequence.
-- Errors: invalid transition returns unchanged state plus `RecordProtocolViolation`; an unexpected reducer defect halts the session rather than partially committing.
+- Errors: an invalid transition preserves business/entity state, consumes the already accepted envelope by advancing reducer cursor/metrics, and returns `RecordProtocolViolation`; an unexpected reducer defect leaves state uncommitted and halts the session.
 - Replay: `mode=REPLAY` computes state/projection but the loop discards every command.
 
 ### `ToolExecutor.invoke(invocation)`

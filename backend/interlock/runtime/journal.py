@@ -129,12 +129,12 @@ class EventJournal:
         after_sequence: int = 0,
         limit: Optional[int] = None,
     ) -> List[EventEnvelope]:
-        """Read accepted events in strictly monotonic sequence order."""
+        """Read detached accepted events in strictly monotonic sequence order."""
         events = self._events.get(session_id, [])
         filtered = [e for e in events if e.sequence > after_sequence]
         if limit is not None and limit > 0:
-            return filtered[:limit]
-        return filtered
+            filtered = filtered[:limit]
+        return [e.model_copy(deep=True) for e in filtered]
 
     async def clear_session(self, session_id: str) -> None:
         """Reclaim journal event data and secondary indexes for a session under the per-session lock.
@@ -188,6 +188,8 @@ class EventJournal:
         - Stores immutable envelope and wakes reducer via queue.
         - Enforces bounded retention across events and secondary indexes.
         """
+        candidate = candidate.model_copy(deep=True)
+
         # 1. Pure Candidate Validation (No side effects on session or journal)
         if candidate.schema_version != 1:
             raise UnsupportedVersionError(candidate.schema_version)
@@ -231,7 +233,7 @@ class EventJournal:
                                 existing.event_type == candidate.event_type
                                 and existing.payload == normalized_payload
                             ):
-                                return existing
+                                return existing.model_copy(deep=True)
                             else:
                                 raise DedupeConflictError(candidate.dedupe_key)
                     # Non-deduped SessionStarted on an active session is an error
@@ -268,7 +270,7 @@ class EventJournal:
                         existing.event_type == candidate.event_type
                         and existing.payload == normalized_payload
                     ):
-                        return existing
+                        return existing.model_copy(deep=True)
                     else:
                         raise DedupeConflictError(candidate.dedupe_key)
 
@@ -327,6 +329,6 @@ class EventJournal:
 
             # 8. Enqueue for Reducer
             queue = self._get_queue(candidate.session_id)
-            await queue.put(envelope)
+            await queue.put(envelope.model_copy(deep=True))
 
-            return envelope
+            return envelope.model_copy(deep=True)
