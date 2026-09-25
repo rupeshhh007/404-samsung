@@ -275,6 +275,7 @@ class _InvocationState:
     boundary_crossed: bool = False
     provider_request_id: str | None = None
     local_cancelled: bool = False
+    cancel_requested: bool = False
     active_task: asyncio.Task[Any] | None = None
     terminal_local: bool = False
     callback_digests: OrderedDict[str, str] = field(default_factory=OrderedDict)
@@ -376,6 +377,7 @@ class ToolRuntime:
         descriptor, capability_hash = self._dispatch_gates(operation)
         arguments = self._validated_arguments(operation, descriptor)
         state = await self._state(command.session_id, operation.operation_id)
+        execution_identity = _execution_identity(operation, arguments)
 
         async with state.lock:
             if state.local_cancelled:
@@ -401,9 +403,36 @@ class ToolRuntime:
             )
 
         for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                # Let already queued cancellation work run before resolving again.
+                await asyncio.sleep(0)
             # No await may separate this final trusted capability check from
             # construction of the provider call below.  Retries recheck too.
             try:
+                operation = self._resolve(command.session_id, command.operation_id)
+                if _execution_identity(operation, operation.args) != execution_identity:
+                    raise ToolRuntimeError(
+                        ToolRuntimeErrorCode.IDEMPOTENCY_CONFLICT,
+                        "immutable execution identity changed during invocation",
+                    )
+                cancellation_interrupts = (
+                    operation.cancellation_state == CancellationState.REQUESTED
+                    and operation.cancellation_policy != CancellationPolicy.NONCANCELLABLE
+                )
+                if (
+                    operation.state != OperationState.DISPATCHED
+                    or cancellation_interrupts
+                    or state.cancel_requested
+                ):
+                    async with state.lock:
+                        state.cancel_requested |= cancellation_interrupts
+                        if state.cancel_requested and not state.boundary_crossed:
+                            state.local_cancelled = (
+                                state.provider_request_id is None
+                                and operation.provider_request_id is None
+                            )
+                        await self._finish_attempt_locked(state)
+                    return tuple(candidates)
                 descriptor, capability_hash = self._dispatch_gates(operation)
                 arguments = self._validated_arguments(operation, descriptor)
                 invocation = ToolInvocation(
@@ -496,6 +525,7 @@ class ToolRuntime:
             except asyncio.CancelledError:
                 async with state.lock:
                     crossed = state.provider_call_started
+                    state.boundary_crossed |= crossed
                     state.provider_ready.set()
                 await self._finish_attempt(state)
                 if crossed:
@@ -527,9 +557,13 @@ class ToolRuntime:
             provider_id = response.provider_request_id
             async with state.lock:
                 state.boundary_crossed = True
-                if (
-                    established_provider_id is not None
-                    and established_provider_id != provider_id
+                if any(
+                    established is not None and established != provider_id
+                    for established in (
+                        established_provider_id,
+                        state.provider_request_id,
+                        operation.provider_request_id,
+                    )
                 ):
                     state.provider_ready.set()
                     await self._finish_attempt_locked(state)
@@ -577,6 +611,8 @@ class ToolRuntime:
             )
             if (
                 response.observation.outcome == ToolOutcome.FAILED
+                and result_candidate is not None
+                and result_candidate.event_type == "ToolResultObserved"
                 and response.observation.retry_category is not None
                 and self._may_retry_observation(
                     operation,
@@ -649,6 +685,7 @@ class ToolRuntime:
             state = await self._state(command.session_id, operation.operation_id)
 
         async with state.lock:
+            state.cancel_requested = True
             provider_id = operation.provider_request_id or state.provider_request_id
             if provider_id is None and (
                 state.local_cancelled or (
@@ -674,6 +711,17 @@ class ToolRuntime:
             await state.provider_ready.wait()
             async with state.lock:
                 provider_id = state.provider_request_id or operation.provider_request_id
+                if provider_id is None and state.local_cancelled:
+                    return self._cancellation_candidate(
+                        command,
+                        context,
+                        event_type="CancellationAcknowledged",
+                        payload={
+                            "operation_id": operation.operation_id,
+                            "scope": CancellationAckScope.LOCAL_TASK.value,
+                        },
+                        identity="local-task",
+                    )
         if provider_id is None:
             # The provider has not supplied enough evidence to claim rejection,
             # lateness, or acceptance.  Preserve REQUESTED without a new fact.
@@ -952,12 +1000,20 @@ class ToolRuntime:
             expected_provider_id = (
                 state.provider_request_id or operation.provider_request_id
             )
-            if expected_provider_id is None:
+            if expected_provider_id is None and (
+                not operation.dispatch_requested_event_id
+                or operation.state in (
+                    OperationState.CREATED, OperationState.PREPARING, OperationState.READY
+                )
+            ):
                 raise ToolRuntimeError(
                     ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
-                    "callback has no established provider request identity",
+                    "first callback has no accepted dispatch authority",
                 )
-            if observation.provider_request_id != expected_provider_id:
+            if any(
+                established is not None and observation.provider_request_id != established
+                for established in (state.provider_request_id, operation.provider_request_id)
+            ):
                 raise ToolRuntimeError(
                     ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
                     "provider request identity conflicts with invocation",
@@ -1009,6 +1065,17 @@ class ToolRuntime:
                 identity=f"callback-conflict:{_safe_identity(observation.callback_dedupe_key)}",
             )
         async with state.lock:
+            # Another callback may have established correlation while we waited.
+            if (
+                state.provider_request_id is not None
+                and state.provider_request_id != observation.provider_request_id
+            ):
+                return self._timeout_candidate(
+                    command, context, operation.operation_id, after_dispatch=True,
+                    identity=f"callback-protocol:{_safe_identity(observation.callback_dedupe_key)}",
+                )
+            if state.provider_request_id is None:
+                state.provider_request_id = observation.provider_request_id
             state.callback_digests[decision.callback_dedupe_key] = (
                 decision.observation_digest
             )
@@ -1083,7 +1150,8 @@ class ToolRuntime:
                     state.boundary_crossed = True
                 else:
                     state.provider_request_id = error.provider_request_id
-            state.provider_ready.set()
+            if state.boundary_crossed or state.provider_request_id is not None:
+                state.provider_ready.set()
 
     async def _finish_attempt(self, state: _InvocationState) -> None:
         async with state.lock:
@@ -1218,13 +1286,44 @@ def _validate_confirmation_semantics(
         expected = semantics.acknowledgement
     elif outcome == ToolOutcome.SUCCEEDED:
         expected = semantics.commit
+        if expected is None and not (
+            descriptor.action_type == ActionType.READ_ONLY
+            and descriptor.effect_classification == EffectClassification.NONE
+        ):
+            raise ToolRuntimeError(
+                ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
+                "consequential success requires a commit confirmation semantic",
+            )
     elif outcome == ToolOutcome.UNKNOWN:
         expected = semantics.unknown
+    elif (
+        outcome == ToolOutcome.FAILED
+        and semantics.commit is not None
+        and result.get("status") == semantics.commit
+    ):
+        raise ToolRuntimeError(
+            ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
+            "failed outcome contradicts commit confirmation",
+        )
     if expected is not None and result.get("status") != expected:
         raise ToolRuntimeError(
             ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
             "provider result conflicts with confirmation semantics",
         )
+
+
+def _execution_identity(operation: OperationRecord, arguments: Mapping[str, Any]) -> str:
+    """Pin the execution identity independently of mutable lifecycle state."""
+
+    return canonical_json({
+        "operation_id": operation.operation_id,
+        "tool_name": operation.tool_name,
+        "logical_action_id": operation.logical_action_id,
+        "idempotency_key": operation.idempotency_key,
+        "arguments": arguments,
+        "dispatch_requested_event_id": operation.dispatch_requested_event_id,
+        "descriptor_capability_hash": operation.descriptor_capability_hash,
+    })
 
 
 def _digest(value: Any) -> str:
