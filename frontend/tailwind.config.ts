@@ -1,6 +1,7 @@
 import type { Config } from 'tailwindcss';
 
 const config: Config = {
+  darkMode: 'class',
   content: [
     './index.html',
     './src/**/*.{js,ts,jsx,tsx}',
@@ -9,7 +10,7 @@ const config: Config = {
     extend: {
       colors: {
         // Semantic roles from docs/demo/UI_SPECIFICATION.md:
-        // - Neutral / slate: unknown / uninitialized
+        // - Neutral / warm-neutral: unknown / uninitialized
         // - Blue: active / read
         // - Violet: speculative (ANTICIPATE)
         // - Amber: cancellation / pending
@@ -17,15 +18,22 @@ const config: Config = {
         // - Teal: reconciliation (ADAPT)
         // - Green: authoritative confirmation (VERIFY)
         interlock: {
-          dark: '#090d16',
-          panel: '#0f172a',
-          card: '#1e293b',
-          border: '#334155',
-          muted: '#64748b',
-          text: '#e2e8f0',
-          highlight: '#f8fafc',
-          // Pillar & semantic colors
-          unknown: '#64748b',       // Slate
+          // Warm foundation surfaces
+          bgLight: '#faf8f5',
+          bgDark: '#12100e',
+          surfaceLight: '#ffffff',
+          surfaceDark: '#1c1917',
+          cardLight: '#f5f3ef',
+          cardDark: '#292524',
+          borderLight: '#e7e5e4',
+          borderDark: '#38332e',
+          textLight: '#1c1917',
+          textDark: '#f5f5f4',
+          textMutedLight: '#78716c',
+          textMutedDark: '#a8a29e',
+
+          // Preserved canonical semantic colors
+          unknown: '#78716c',       // Warm stone neutral
           active: '#3b82f6',        // Blue
           speculative: '#a855f7',   // Violet (ANTICIPATE)
           pending: '#f59e0b',       // Amber
