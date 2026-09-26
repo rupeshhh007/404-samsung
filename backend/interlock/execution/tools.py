@@ -829,12 +829,24 @@ class ToolRuntime:
                 "callback must be a ProviderObservation",
             )
         operation = self._resolve(session_id, operation_id)
-        descriptor, _ = self._trusted_descriptor(operation)
-        state = await self._state(session_id, operation_id)
         callback_command = DispatchTool(
             session_id=session_id,
             operation_id=operation_id,
         )
+        try:
+            descriptor, _ = self._trusted_descriptor(operation)
+            self._snapshot_descriptor_gates(operation, descriptor)
+        except ToolRuntimeError:
+            # A late observation cannot be interpreted under a changed or
+            # unavailable authorized capability; retain post-dispatch uncertainty.
+            return self._timeout_candidate(
+                callback_command,
+                context or DispatchContext(),
+                operation_id,
+                after_dispatch=True,
+                identity=f"callback-capability:{_safe_identity(observation.callback_dedupe_key)}",
+            )
+        state = await self._state(session_id, operation_id)
         return await self._normalize_observation(
             command=callback_command,
             context=context or DispatchContext(),
@@ -1298,12 +1310,16 @@ def _validate_confirmation_semantics(
         expected = semantics.unknown
     elif (
         outcome == ToolOutcome.FAILED
-        and semantics.commit is not None
-        and result.get("status") == semantics.commit
+        and any(
+            token is not None and result.get("status") == token
+            for token in (
+                semantics.acknowledgement, semantics.commit, semantics.unknown
+            )
+        )
     ):
         raise ToolRuntimeError(
             ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
-            "failed outcome contradicts commit confirmation",
+            "failed outcome contradicts non-failure confirmation semantics",
         )
     if expected is not None and result.get("status") != expected:
         raise ToolRuntimeError(
