@@ -997,27 +997,6 @@ class ToolRuntime:
         state: _InvocationState,
     ) -> EventCandidate | None:
         try:
-            expected_provider_id = (
-                state.provider_request_id or operation.provider_request_id
-            )
-            if expected_provider_id is None and (
-                not operation.dispatch_requested_event_id
-                or operation.state in (
-                    OperationState.CREATED, OperationState.PREPARING, OperationState.READY
-                )
-            ):
-                raise ToolRuntimeError(
-                    ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
-                    "first callback has no accepted dispatch authority",
-                )
-            if any(
-                established is not None and observation.provider_request_id != established
-                for established in (state.provider_request_id, operation.provider_request_id)
-            ):
-                raise ToolRuntimeError(
-                    ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
-                    "provider request identity conflicts with invocation",
-                )
             result = strict_json_copy(observation.result, field="provider_result")
             if type(result) is not dict:
                 raise TypeError("provider result must be an object")
@@ -1039,12 +1018,53 @@ class ToolRuntime:
                 result=result,
                 provider_effect_id=observation.provider_effect_id,
             )
-            decision = OperationManager.classify_result(
-                operation,
-                payload,
-                callback_dedupe_key=observation.callback_dedupe_key,
-                known_observation_digests=dict(state.callback_digests),
-            )
+            async with state.lock:
+                # Correlation, classification and reservation share one atomic
+                # per-operation snapshot. General result validation stays above.
+                expected_provider_id = (
+                    state.provider_request_id or operation.provider_request_id
+                )
+                if expected_provider_id is None and (
+                    not operation.dispatch_requested_event_id
+                    or operation.state in (
+                        OperationState.CREATED, OperationState.PREPARING,
+                        OperationState.READY,
+                    )
+                ):
+                    raise ToolRuntimeError(
+                        ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
+                        "first callback has no accepted dispatch authority",
+                    )
+                if any(
+                    established is not None
+                    and observation.provider_request_id != established
+                    for established in (
+                        state.provider_request_id, operation.provider_request_id
+                    )
+                ):
+                    raise ToolRuntimeError(
+                        ToolRuntimeErrorCode.PROVIDER_PROTOCOL_ERROR,
+                        "provider request identity conflicts with invocation",
+                    )
+                decision = OperationManager.classify_result(
+                    operation,
+                    payload,
+                    callback_dedupe_key=observation.callback_dedupe_key,
+                    known_observation_digests=dict(state.callback_digests),
+                )
+                if decision.status == CallbackStatus.NEW:
+                    # Bind only after classification succeeds, so malformed or
+                    # conflicting callback identities cannot reserve correlation.
+                    if state.provider_request_id is None:
+                        state.provider_request_id = observation.provider_request_id
+                    state.callback_digests[decision.callback_dedupe_key] = (
+                        decision.observation_digest
+                    )
+                    state.callback_digests.move_to_end(decision.callback_dedupe_key)
+                    while len(state.callback_digests) > self._callback_dedupe_limit:
+                        state.callback_digests.popitem(last=False)
+                    state.boundary_crossed = True
+                    state.provider_ready.set()
         except (IdempotencyError, OperationError, ToolRuntimeError, TypeError, ValueError):
             return self._timeout_candidate(
                 command,
@@ -1064,26 +1084,6 @@ class ToolRuntime:
                 after_dispatch=True,
                 identity=f"callback-conflict:{_safe_identity(observation.callback_dedupe_key)}",
             )
-        async with state.lock:
-            # Another callback may have established correlation while we waited.
-            if (
-                state.provider_request_id is not None
-                and state.provider_request_id != observation.provider_request_id
-            ):
-                return self._timeout_candidate(
-                    command, context, operation.operation_id, after_dispatch=True,
-                    identity=f"callback-protocol:{_safe_identity(observation.callback_dedupe_key)}",
-                )
-            if state.provider_request_id is None:
-                state.provider_request_id = observation.provider_request_id
-            state.callback_digests[decision.callback_dedupe_key] = (
-                decision.observation_digest
-            )
-            state.callback_digests.move_to_end(decision.callback_dedupe_key)
-            while len(state.callback_digests) > self._callback_dedupe_limit:
-                state.callback_digests.popitem(last=False)
-            state.boundary_crossed = True
-            state.provider_ready.set()
         return self._candidate(
             command,
             context,
