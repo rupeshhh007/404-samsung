@@ -1870,7 +1870,33 @@ def _handle_tool_timed_out(
             ],
         )
     op = state.operations[op_id]
-    if op.state not in (OperationState.DISPATCHED, OperationState.WAITING):
+    after_dispatch = bool(env.payload.get("after_dispatch", False))
+    active_states = (OperationState.DISPATCHED, OperationState.WAITING)
+    late_ambiguity_states = (
+        OperationState.TIMED_OUT,
+        OperationState.CANCELLED,
+        OperationState.SUPERSEDED,
+    )
+
+    if after_dispatch and op.dispatch_requested_event_id is None:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="UNAUTHORIZED_DISPATCH",
+                    digest=f"Operation '{op_id}' has no dispatch token to accept post-dispatch timeout",
+                )
+            ],
+        )
+
+    allowed_states = (
+        active_states + late_ambiguity_states
+        if after_dispatch
+        else active_states
+    )
+    if op.state not in allowed_states:
         return (
             state,
             [
@@ -1878,15 +1904,35 @@ def _handle_tool_timed_out(
                     session_id=state.session_id,
                     boundary="reducer",
                     code="INVALID_OPERATION_TRANSITION",
-                    digest=f"Operation '{op_id}' is in state '{op.state}', expected DISPATCHED or WAITING for timeout",
+                    digest=(
+                        f"Operation '{op_id}' is in state '{op.state}', expected "
+                        f"DISPATCHED or WAITING"
+                        + (
+                            ", or previously-dispatched TIMED_OUT, CANCELLED, or SUPERSEDED"
+                            if after_dispatch
+                            else ""
+                        )
+                        + " for timeout"
+                    ),
                 )
             ],
         )
 
-    after_dispatch = bool(env.payload.get("after_dispatch", False))
     new_ops = dict(state.operations)
-    upd: Dict[str, Any] = {"state": OperationState.TIMED_OUT}
-    if after_dispatch:
+    upd: Dict[str, Any] = {}
+    if op.state in active_states:
+        upd["state"] = OperationState.TIMED_OUT
+
+    current_effect_state = EffectState(op.effect_state)
+    unresolved_effect_states = (
+        EffectState.NOT_STARTED,
+        EffectState.IN_FLIGHT,
+        EffectState.OUTCOME_UNKNOWN,
+    )
+    requires_verification = (
+        after_dispatch and current_effect_state in unresolved_effect_states
+    )
+    if requires_verification:
         upd["effect_state"] = EffectState.OUTCOME_UNKNOWN
     new_ops[op_id] = op.model_copy(update=upd)
 
@@ -1900,7 +1946,7 @@ def _handle_tool_timed_out(
         }
     )
     cmds: List[Command] = []
-    if after_dispatch:
+    if requires_verification:
         cmds.append(
             VerifyOutcome(session_id=state.session_id, operation_id=op_id)
         )
