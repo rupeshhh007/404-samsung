@@ -15,3 +15,7 @@
 | 11 | Inspect trace | causal timeline and metric values | projection is read-only | relevant event chain visible |
 
 If the LLM is unavailable, deterministic phrase rules handle scripted inputs and the UI labels fallback mode. If compensation fails, the journey ends with an unresolved divergence and instructions to verify manually—never a fabricated confirmation.
+
+## Updated voice/benchmark journey (planned)
+
+The user speaks through LiveKit. Partial hypotheses may prepare interpretation but cannot authorize a consequential write. The agent gives a meaningful safe acknowledgement within the measured few-hundred-millisecond target while model/perception/tool work proceeds asynchronously. A mid-utterance correction or barge-in cancels stale speech promptly, updates only affected intent dependencies, and prevents stale or duplicate writes at SAFEPOINT. A tool receipt permits progress wording only; authoritative confirmation or verified absence determines final wording. The same generic path must handle FDB-v3 chained tools and self-corrections with a fresh session per benchmark scenario. No current runnable adapter verifies this journey.

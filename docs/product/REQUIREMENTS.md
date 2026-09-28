@@ -24,6 +24,9 @@ Acceptance tests are canonical in [Test Strategy](../testing/TEST_STRATEGY.md).
 | FR-018 | Provide HTTP commands, ordered WebSocket projections, snapshots, and sequence-based resync. | P0 | FR-001 | Runtime | reconnect catches gap; T-WS-01 |
 | FR-019 | Deterministically simulate latency, failures, ignored cancel, late/duplicate callbacks, races, unknown outcome, and compensation. | P0 | FR-007 | Runtime | golden scenarios repeat identically; T-SCN-01 |
 | FR-020 | Provide a complete local Samsung-shaped adapter and never label it official. | P0 | FR-008 | Runtime | no credentials required; T-ADP-01 |
+| FR-021 | Run as a voice-native LiveKit Agents session: ingest partial/final transcripts and interruptions, cancel speech independently, and emit safe meaningful progress while reasoning/tools continue asynchronously. | P0 | FR-003, FR-015, FR-016 | Runtime/Truth | T-VOICE-01; no partial instruction can dispatch a write or produce a false completion |
+| FR-022 | Expose FDB-v3's generic tool-call protocol through a fresh INTERLOCK session per scenario without scenario-specific rules or cross-scenario state. | P0 | FR-021, FR-010 | Execution/Runtime | T-FDB-01, T-ISO-01; selection/arguments/chains remain generic and valid |
+| FR-023 | Demonstrate one additional working end-to-end extension use case beyond FDB-v3; simulated Samsung booking may qualify only when actually executable and honestly labeled. | P0 | FR-021, FR-011, FR-015 | All | T-EXT-01; recorded demo proves interruption, world truth, and safe speech |
 | NFR-001 | Preserve single-writer safety under concurrent async work. | P0 | FR-002 | Runtime | stress/property suite; T-CON-01 |
 | NFR-002 | Measure interruption recovery, safe-point, cache, reconciliation, and truth-gate metrics without invented results. | P1 | FR-019 | Truth | formula/event audit; T-MET-01 |
 | NFR-003 | Replay is deterministic and dispatches no external command. | P0 | FR-001 | Runtime | replay equality/no call; T-RPL-01 |
@@ -32,5 +35,7 @@ Acceptance tests are canonical in [Test Strategy](../testing/TEST_STRATEGY.md).
 | NFR-006 | Operate without LLM or Samsung credentials using deterministic interpreters and fake provider. | P0 | FR-019, FR-020 | All | offline demo; T-OFF-01 |
 | NFR-007 | Expose causal traceability from user input through event, operation, effect, evidence, claim, and output. | P0 | FR-001 | All | trace correlation audit; T-OBS-01 |
 | NFR-008 | Use in-memory retention with explicit process-loss limitations and privacy-safe logs. | P0 | — | Runtime | restart limitation/UI notice; T-RET-01 |
+| NFR-009 | Provide a one-command FDB-v3 reproduction path that validates prerequisites, pins dependency/config versions and seeds, fails nonzero on missing data/credentials/empty results, and records result/log provenance without hardcoded answers. | P0 | FR-022 | Runtime/Delivery | T-FDB-02; clean-machine rerun instructions and generated artifacts |
+| NFR-010 | Measure voice acknowledgement, interruption-to-cancellation, tool-selection/argument accuracy, strict pass rate, and latency from real traces; never invent values. | P0 | FR-021, FR-022 | Runtime/Delivery | T-VOICE-01, T-FDB-02; report denominators and absent measurements explicitly |
 
 Provisional engineering target: p95 reducer processing below 20 ms on the demo machine, measured from journal acceptance to command publication. It is not a competition requirement and excludes model/tool latency.

@@ -58,6 +58,16 @@ All backend tests use pytest; race/scenario tests use the virtual clock. Planned
 | T-UI-04 — Core workflow accessibility | FR-015, FR-018; Frontend; `frontend/src/test/components.test.tsx` | P0 booking/divergence projections | exact controlled text, keyboard/focus/live-region and non-color status assertions |
 | T-UI-05 — P1 demo panels | FR-006, FR-012, NFR-002; Frontend; `frontend/src/test/components.test.tsx` | branch/reconciliation/metrics projections | ANTICIPATE, stepper, and measured/not-measured metrics render accurately |
 
+## Updated Theme 05 acceptance (planned; not currently passing)
+
+| ID — name | Coverage; module; planned file | Initial conditions and input | Expected events/state/output; pass criteria |
+|---|---|---|---|
+| T-VOICE-01 — LiveKit interruption and progress | FR-021, NFR-010; `backend/tests/contract/test_livekit.py` | partial/final speech with filler, false start, barge-in during speech and slow tool | safe spoken progress begins before tool completion; partial text never authorizes write; speech cancels independently; final correction updates active arguments; measured timings reported, not assumed |
+| T-FDB-01 — Generic FDB-v3 mapping | FR-022; `backend/tests/contract/test_fdb_v3.py` | tool descriptions, chained calls, self-correction and malformed arguments without benchmark answer fixtures | names/arguments map through validated descriptors, stale calls fail safely, no duplicate write or scenario-specific logic |
+| T-ISO-01 — Fresh benchmark scenario | FR-022; `backend/tests/contract/test_fdb_isolation.py` | run two conversations with overlapping IDs | second has no first-session operations, callbacks, idempotency, branches, model context, evidence or effects |
+| T-FDB-02 — Reproduction fails loudly | NFR-009, NFR-010; `backend/tests/contract/test_fdb_reproduction.py` | missing data/key, empty input, and valid configured subset | invalid prerequisites/nonempty-output checks fail nonzero; valid run invokes official inference and evaluation with recorded versions/seeds/logs; no score asserted without execution |
+| T-EXT-01 — Working voice extension | FR-023; existing scenario/golden suite and live demo | spoken booking corrected during tool work | extension runs end to end, retains late physical effect, blocks false done claim, and shows authoritative final/uncertain state |
+
 ## Suite execution policy
 
 Ticket ownership is exact:
@@ -66,5 +76,6 @@ Ticket ownership is exact:
 - `TST-004`: `T-REF-01`, `T-BRC-01`, `T-REC-01`, `T-REC-02`, `T-REC-03`, and `T-E2E-02`.
 - `UI-004`: `T-UI-01`, `T-UI-02`, `T-UI-03`, and `T-UI-04`.
 - `UI-005`: `T-UI-05`.
+- `VCE-001`: `T-VOICE-01`; `FDB-001`: `T-FDB-01`, `T-ISO-01`; `FDB-002`: `T-FDB-02`; `EXT-001`: `T-EXT-01`. These are planned acceptance cases, not current test results.
 
 Invariant ticket ownership is exact in `INVARIANT_TESTS.md`: `TST-004` owns `T-INV-I2-P`, `T-INV-I2-N`, `T-INV-I10-P`, and `T-INV-I10-N`; `TST-003` owns the other 24 named invariant cases. These are ticket assignments, not alternative test IDs.
