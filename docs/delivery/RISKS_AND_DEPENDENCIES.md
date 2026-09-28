@@ -14,5 +14,9 @@
 | R-10 | Privacy: media/transcripts in logs | Medium/High | refs/hashes/redaction/retention | A/B; NFR-004, NFR-008 |
 | R-11 | Delivery scope overload | High/Medium | gates/cut P2/degraded P1 behavior | all; scope |
 | R-12 | Manifest misclassification | Medium/High | trusted allowlist/conservative defaults / disable tool | C; FR-008 |
+| R-13 | Updated Theme 05 requires runnable LiveKit voice agent and FDB-v3 benchmark, both absent | High/High | VCE-001/FDB-001/FDB-002 gates; reserve external credentials/data verification time; never substitute the deterministic demo score | A/C/D; FR-021, FR-022, NFR-009 |
+| R-14 | Benchmark reproduction silently skips empty data or leaks state across scenarios | High/High | prerequisite and nonempty-output checks, pinned versions/seeds, T-FDB-02 and T-ISO-01; no cross-scenario cache | A/C; FR-022, NFR-009 |
+| R-15 | Voice latency or false completion despite internal safety checks | High/High | instrument actual spoken-feedback and interruption timings; safe progress speech before slow work, TRUTHLOCK for consequential claims; fail honest when unmeasured | A/D; FR-021, NFR-010 |
+| R-16 | Effect conflict semantics not yet consumed by EXE-005 projection/verifier | High/High | Implement the accepted CCR-001 projection and targeted verification tests before automatic repair | A/C/D; FR-011, FR-014 |
 
 Unavailable external prerequisites: official Samsung protocol/API/manifests, credentials, error-code meanings, service-center/availability/warranty data, and booking/cancellation/idempotency guarantees. They are not blockers for the local demo; `SAMSUNG_ADAPTER.md`, mock manifests, and simulated fixtures isolate them. A real integration requires supplied specs, credentials, privacy/security review, and contract tests.

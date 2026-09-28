@@ -19,7 +19,9 @@
 | `INTERLOCK_EVENT_RETENTION` | int `10000`, 100..100000 | optional; journal |
 | `INTERLOCK_LOG_LEVEL` | `DEBUG|INFO|WARNING|ERROR`, `INFO` | optional; logging |
 
-Planned `.env.example` (not created in Phase 0):
+The `.env.example` exists for the current backend defaults. The LiveKit/FDB-v3 credential, provider, data-path, and seed configuration is not implemented; `VCE-001` and `FDB-002` must define exact validated names and externalize secrets before a reproduction command is advertised. Do not treat the sample backend configuration as sufficient for the official benchmark.
+
+Current `.env.example`:
 
 ```dotenv
 INTERLOCK_HOST=127.0.0.1

@@ -32,5 +32,10 @@ Every requirement has an explicit implementation and test mapping. Canonical ent
 | NFR-006 | Offline composition; fallback + fake provider | startup/provider events | providers/composition / INTEL-001, PRV-001, RUN-004 | T-OFF-01, T-LLM-01 | complete deterministic demo without credentials |
 | NFR-007 | Observability; causal/correlation IDs | projections/trace | runtime + frontend / RUN-001, API-002, UI-003 | T-OBS-01, T-UI-02 | input-to-output causal chain visible; demo step 11 |
 | NFR-008 | Retention/privacy; session expiry/reset | session/evidence/security | `runtime/session.py`, `truth/evidence.py` / RUN-001, TRU-001 | T-RET-01, T-SEC-01 | memory clears and crash limitation is visible |
+| FR-021 | LiveKit voice session | partial/final audio, barge-in, safe speech | `adapters/livekit_agent.py` / VCE-001 | T-VOICE-01 | real voice interaction; not implemented yet |
+| FR-022 | FDB-v3 generic tool mapping | fresh scenario and validated tool chains | `adapters/fdb_v3.py` / FDB-001 | T-FDB-01, T-ISO-01 | benchmark runner can call the submitted agent; not implemented yet |
+| FR-023 | End-to-end extension | correction, late effect, safe final output | extension demo / EXT-001 | T-EXT-01 | a working recorded use case, not a diagram |
+| NFR-009 | One-command reproduction | prerequisites, versions, seeds, nonempty official outputs | `scripts/reproduce_fdb_v3.sh` / FDB-002 | T-FDB-02 | evaluator reruns from supplied instructions; not implemented yet |
+| NFR-010 | Honest voice/FDB metrics | timestamped traces and official evaluator artifacts | VCE-001, FDB-002 | T-VOICE-01, T-FDB-02 | measured values with denominators; no fabricated scores |
 
 P2 polish has no requirement IDs and is intentionally deferred; it cannot be a dependency of any P0/P1 ticket.
