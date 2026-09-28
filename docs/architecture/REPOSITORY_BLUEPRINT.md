@@ -8,6 +8,7 @@ These paths are planned; none exists in Phase 0. “Creation ticket” is unique
 | `backend/interlock/domain/enums.py`; `backend/interlock/domain/models.py`; `backend/interlock/domain/events.py` | canonical enums, entities, event payload registry | INT-001 / A | T-DOM-01 |
 | `backend/interlock/runtime/journal.py`; `backend/interlock/runtime/session.py` | JournalPort and session registry/retention | RUN-001 / A | T-JRN-01, T-RET-01 |
 | `backend/interlock/runtime/reducer.py`; `backend/interlock/runtime/commands.py` | pure reducer and command union | RUN-002 / A | T-RED-01, T-RPL-01, invariant tests |
+| `backend/tests/test_world_effect_contract.py` | append-only reducer/verification regressions for shared world-effect ingress; may be extended by TST-003 | INT-002 / A, with C review | T-WLD-01, T-INV-I4-N, T-INV-I9-N |
 | `backend/interlock/runtime/dispatcher.py` | async command execution and replay suppression | RUN-003 / A | T-CON-01, T-RPL-01 |
 | `backend/interlock/intelligence/control.py`; `backend/interlock/providers/base.py`; `backend/interlock/providers/llm.py`; `backend/interlock/providers/fallback.py` | semantic/model provider contracts and offline rules | INTEL-001 / B | T-CTL-01, T-LLM-01 |
 | `backend/interlock/intelligence/intent_graph.py` | revisions, bindings, fingerprints, invalidation | INTEL-002 / B | T-INT-01, T-INT-02, T-CON-02 |

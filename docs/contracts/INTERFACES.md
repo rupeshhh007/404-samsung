@@ -35,6 +35,8 @@ flowchart LR
 
 All interfaces are session-scoped. Cancellation is cooperative according to descriptors; idempotency applies to logical action IDs and declared provider support.
 
+For `EffectInterpreter.observe`, `effect_id` is a stable local observation identity, `provider_effect_id` is the provider-qualified physical identity, and `logical_action_id` is the incident group for one intended action. It must not reuse an `effect_id` for changed content. The reducer stores a deep copy of each new observation; exact repeated IDs preserve the original object and conflicting repeated IDs fail closed. Distinct observations of one physical effect are retained; authoritative disagreement makes the derived current-world projection unresolved and requests `VerifyOutcome(operation_id, provider_effect_id=...)`. Distinct physical IDs for one logical action are retained and each receives an individually targeted `VerifyOutcome`. The optional physical target is additive; operation-only verification remains valid for timeouts. Verification adds evidence and a new observation, never mutates history. The verification provenance and projection rule are defined in `WORLD_EFFECTS.md`. `COMPENSATED` links to an existing committed observation of the same physical effect using `supersedes_effect_id`.
+
 ## Normative interface details
 
 ### `JournalPort.append(candidate)`

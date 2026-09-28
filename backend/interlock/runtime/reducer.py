@@ -23,6 +23,7 @@ from interlock.domain.enums import (
     ControlKind,
     DivergenceState,
     EffectState,
+    EventSource,
     EvidenceAuthority,
     EvidenceSource,
     IntentMaturity,
@@ -287,7 +288,7 @@ class Reducer:
                         session_id=state.session_id,
                         boundary="reducer",
                         code="REDUCER_TRANSITION_ERROR",
-                        digest=str(e),
+                        digest=f"Reducer transition failed ({type(e).__name__})",
                     )
                 ],
             )
@@ -1956,6 +1957,40 @@ def _handle_tool_timed_out(
     return new_state, cmds
 
 
+def _has_scoped_effect_verification(
+    state: SessionState, env: EventEnvelope, effect: EffectRecord
+) -> bool:
+    """Recognize a causally scoped verifier result without resolving projection here."""
+
+    if (
+        env.source != EventSource.TOOL
+        or not env.causation_id
+        or effect.authority != EvidenceAuthority.AUTHORITATIVE
+        or effect.state not in (EffectState.COMMITTED, EffectState.FAILED, EffectState.COMPENSATED)
+    ):
+        return False
+    covered_ids = sorted(
+        previous.effect_id
+        for previous in state.effects.values()
+        if previous.provider_effect_id == effect.provider_effect_id
+        and previous.authority == EvidenceAuthority.AUTHORITATIVE
+    )
+    if not covered_ids:
+        return False
+    return any(
+        evidence is not None
+        and evidence.source == EvidenceSource.TOOL
+        and evidence.authority == EvidenceAuthority.AUTHORITATIVE
+        and evidence.kind == "world_effect_verification"
+        and evidence.provenance.get("provider_effect_id") == effect.provider_effect_id
+        and evidence.provenance.get("verification_request_event_id") == env.causation_id
+        and isinstance(evidence.provenance.get("provider_request_id"), str)
+        and bool(evidence.provenance["provider_request_id"])
+        and evidence.provenance.get("verification_of_effect_ids") == covered_ids
+        for evidence in (state.evidence.get(evidence_id) for evidence_id in effect.evidence_ids)
+    )
+
+
 def _handle_world_effect_observed(
     state: SessionState, env: EventEnvelope
 ) -> Tuple[SessionState, List[Command]]:
@@ -1965,19 +2000,168 @@ def _handle_world_effect_observed(
         if isinstance(eff_data, EffectRecord)
         else EffectRecord.model_validate(eff_data)
     )
-    new_effects = {**state.effects, effect.effect_id: effect}
+    operation = state.operations.get(effect.operation_id)
+    if operation is None or operation.logical_action_id != effect.logical_action_id:
+        return state, [
+            RecordProtocolViolation(
+                session_id=state.session_id,
+                boundary="reducer",
+                code="INVALID_EFFECT_CORRELATION",
+                digest="Effect does not match a local operation",
+            )
+        ]
+
+    existing = state.effects.get(effect.effect_id)
+    if existing is not None:
+        if existing.model_dump(mode="json") != effect.model_dump(mode="json"):
+            return state, [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="IMMUTABLE_EFFECT_VIOLATION",
+                    digest="Effect ID conflicts with its immutable observation",
+                )
+            ]
+        # A repeated observation ID is idempotent; keep the stored object.
+        new_effects = state.effects
+    else:
+        if effect.state == EffectState.COMPENSATED:
+            prior = state.effects.get(effect.supersedes_effect_id or "")
+            if (
+                prior is None
+                or prior.state != EffectState.COMMITTED
+                or prior.provider_effect_id != effect.provider_effect_id
+            ):
+                return state, [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_EFFECT_COMPENSATION",
+                        digest="Compensation has no matching committed predecessor",
+                    )
+                ]
+        new_effects = {
+            **state.effects,
+            effect.effect_id: effect.model_copy(deep=True),
+        }
+
+    new_operations = state.operations
+    prior_authoritative_failure = any(
+        prior.state == EffectState.FAILED
+        and prior.authority == EvidenceAuthority.AUTHORITATIVE
+        and prior.provider_effect_id == effect.provider_effect_id
+        for prior in state.effects.values()
+    )
+    if existing is None and effect.state == EffectState.COMMITTED and not prior_authoritative_failure and operation.effect_state in (
+        EffectState.NOT_STARTED,
+        EffectState.IN_FLIGHT,
+        EffectState.OUTCOME_UNKNOWN,
+    ):
+        new_operations = {
+            **state.operations,
+            effect.operation_id: operation.model_copy(update={"effect_state": EffectState.COMMITTED}),
+        }
+    elif existing is None and effect.state == EffectState.COMPENSATED:
+        predecessor = state.effects[effect.supersedes_effect_id]
+        prior_operation = state.operations.get(predecessor.operation_id)
+        if prior_operation is not None and prior_operation.effect_state == EffectState.COMMITTED:
+            new_operations = {
+                **state.operations,
+                predecessor.operation_id: prior_operation.model_copy(
+                    update={"effect_state": EffectState.COMPENSATED}
+                ),
+            }
+
+    cmds: List[Command] = []
+    scoped_verification = _has_scoped_effect_verification(state, env, effect)
+    if existing is None and effect.state == EffectState.COMMITTED:
+        # Observation IDs are local facts; provider IDs identify physical effects.
+        # Neither conflicting physical facts nor duplicate physical writes can be
+        # collapsed merely because the later callback arrived last.
+        verification_targets: dict[str, str] = {}
+        for previous in state.effects.values():
+            if previous.state not in (
+                EffectState.COMMITTED,
+                EffectState.FAILED,
+                EffectState.COMPENSATED,
+            ) or previous.authority != EvidenceAuthority.AUTHORITATIVE:
+                continue
+            same_physical = previous.provider_effect_id == effect.provider_effect_id
+            if same_physical and not scoped_verification and (
+                previous.state != EffectState.COMMITTED
+                or previous.effect_type != effect.effect_type
+                or previous.subject != effect.subject
+                or previous.parameters != effect.parameters
+                or previous.logical_action_id != effect.logical_action_id
+            ):
+                verification_targets[effect.provider_effect_id] = effect.operation_id
+            if (
+                previous.state == EffectState.COMMITTED
+                and not same_physical
+                and previous.logical_action_id == effect.logical_action_id
+            ):
+                verification_targets[previous.provider_effect_id] = previous.operation_id
+                verification_targets[effect.provider_effect_id] = effect.operation_id
+        for provider_effect_id, operation_id in sorted(verification_targets.items()):
+            cmds.append(
+                VerifyOutcome(
+                    session_id=state.session_id,
+                    operation_id=operation_id,
+                    provider_effect_id=provider_effect_id,
+                )
+            )
+    elif existing is None and effect.supersedes_effect_id is not None and effect.state in (
+        EffectState.COMPENSATED,
+        EffectState.FAILED,
+        EffectState.OUTCOME_UNKNOWN,
+    ):
+        predecessor = state.effects.get(effect.supersedes_effect_id)
+        if predecessor is not None:
+            competing_compensations = (
+                previous
+                for previous in state.effects.values()
+                if previous.state == EffectState.COMPENSATED
+                and previous.supersedes_effect_id == predecessor.effect_id
+            )
+            conflicting_compensation = any(
+                previous.effect_type != effect.effect_type
+                or previous.subject != effect.subject
+                or previous.parameters != effect.parameters
+                for previous in competing_compensations
+            )
+            if (effect.state != EffectState.COMPENSATED or conflicting_compensation) and not scoped_verification:
+                cmds.append(
+                    VerifyOutcome(
+                        session_id=state.session_id,
+                        operation_id=effect.operation_id,
+                        provider_effect_id=predecessor.provider_effect_id,
+                    )
+                )
+    elif existing is None and effect.state == EffectState.FAILED and effect.authority == EvidenceAuthority.AUTHORITATIVE:
+        if not scoped_verification and any(
+            previous.state == EffectState.COMMITTED
+            and previous.authority == EvidenceAuthority.AUTHORITATIVE
+            and previous.provider_effect_id == effect.provider_effect_id
+            for previous in state.effects.values()
+        ):
+            cmds.append(
+                VerifyOutcome(
+                    session_id=state.session_id,
+                    operation_id=effect.operation_id,
+                    provider_effect_id=effect.provider_effect_id,
+                )
+            )
     new_state = state.model_copy(
         update={
             "effects": new_effects,
+            "operations": new_operations,
             "last_sequence": env.sequence,
             "metrics": state.metrics.model_copy(
                 update={"through_sequence": env.sequence}
             ),
         }
     )
-    cmds: List[Command] = [
-        PublishProjection(session_id=state.session_id, sequence=env.sequence)
-    ]
+    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 

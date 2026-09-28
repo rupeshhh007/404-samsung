@@ -19,6 +19,8 @@ Invalid transitions do not mutate the entity; they yield a `ProtocolViolationObs
 
 Operation and effect states are deliberately orthogonal: `operation=SUPERSEDED`, `cancellation=ACKNOWLEDGED`, `effect=COMMITTED` is valid.
 
+`EffectRecord.state` is the immutable state of one observation, not a mutable row for a physical object. A successful compensation is a new authoritative `COMPENSATED` observation linked by `supersedes_effect_id`; the prior `COMMITTED` observation remains. The original operation's effect dimension may advance to `COMPENSATED` without reactivating a superseded/cancelled/timed-out lifecycle. Conflicting authoritative observations do not rewrite historical `COMMITTED` facts or downgrade their operation state; the *derived current-world projection* is uncertain until targeted verification resolves the physical or logical-action conflict. A weaker later `OUTCOME_UNKNOWN` observation cannot revoke a prior authoritative commit.
+
 ```mermaid
 stateDiagram-v2
   [*] --> CREATED
