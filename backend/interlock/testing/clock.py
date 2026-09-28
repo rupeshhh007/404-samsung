@@ -33,6 +33,12 @@ class VirtualClock:
 
         return self._current_time_ms
 
+    @property
+    def pending_count(self) -> int:
+        """Return the number of scheduled callbacks pending execution."""
+
+        return len(self._scheduled)
+
     def schedule(
         self,
         delay_ms: int,
@@ -70,6 +76,16 @@ class VirtualClock:
             declaration_index=declaration_index,
         )
 
+    def cancel(self, handle: ScheduleHandle) -> bool:
+        """Cancel a scheduled callback by its handle if not yet executed."""
+
+        for i, (time_ms, decl_idx, _) in enumerate(self._scheduled):
+            if time_ms == handle.scheduled_time_ms and decl_idx == handle.declaration_index:
+                self._scheduled.pop(i)
+                heapq.heapify(self._scheduled)
+                return True
+        return False
+
     async def advance_to(self, target_ms: int) -> None:
         """Advance to an absolute time, draining all work due through it."""
 
@@ -89,6 +105,15 @@ class VirtualClock:
 
         self._current_time_ms = target
 
+    async def advance(self, duration_ms: int) -> None:
+        """Advance by a non-negative duration from the current logical time."""
+
+        duration = _require_logical_time(duration_ms, name="duration_ms")
+        await self.advance_to(self._current_time_ms + duration)
+
+
+Clock: TypeAlias = VirtualClock
+
 
 def _require_logical_time(value: object, *, name: str) -> int:
     """Return a strict non-negative integer logical time."""
@@ -98,3 +123,11 @@ def _require_logical_time(value: object, *, name: str) -> int:
     if value < 0:
         raise ValueError(f"{name} must be non-negative")
     return value
+
+
+__all__ = [
+    "Clock",
+    "ScheduleHandle",
+    "ScheduledCallback",
+    "VirtualClock",
+]
