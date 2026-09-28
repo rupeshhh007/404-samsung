@@ -62,6 +62,7 @@ class VerifyOutcome(BaseCommand):
 
     command_type: Literal["VerifyOutcome"] = "VerifyOutcome"
     operation_id: str = Field(..., min_length=1)
+    provider_effect_id: Optional[str] = Field(default=None, min_length=1)
 
 
 class BuildReconciliationPlan(BaseCommand):
