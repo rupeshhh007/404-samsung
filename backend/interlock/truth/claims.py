@@ -20,17 +20,24 @@ from typing import Any, Mapping, Sequence, Set, Tuple
 
 from interlock.domain.enums import (
     ClaimState,
+    DivergenceState,
     EffectState,
     EvidenceAuthority,
     EvidenceSource,
+    PlanState,
     PlanStepKind,
+    PlanStepState,
     ToolOutcome,
 )
 from interlock.domain.events import ClaimStateChanged
 from interlock.domain.models import (
     ClaimRecord,
+    DivergenceCase,
     EffectRecord,
     EvidenceRecord,
+    PlanStep,
+    ReconciliationPlan,
+    SessionState,
 )
 from interlock.execution.effects import (
     PhysicalWorldView,
@@ -63,6 +70,9 @@ CANONICAL_TOOL_PRODUCERS: Set[str] = {
     "appointment.cancel",
     "appointment.get",
 }
+
+# Canonical machine identifier for final reconciliation verification (strictly declared, no fuzzy aliases)
+CANONICAL_VERIFY_FINAL_STEP_KIND: str = PlanStepKind.VERIFY_FINAL.value  # "VERIFY_FINAL"
 
 # Canonical Legal Claim Transitions (STATE_MACHINES.md & reducer.py)
 LEGAL_CLAIM_TRANSITIONS: Mapping[ClaimState, Set[ClaimState]] = {
@@ -151,46 +161,52 @@ def _extract_claim_parameters(claim: ClaimRecord) -> dict[str, Any]:
     """Extract standard booking / appointment parameters from claim subject and object."""
     params: dict[str, Any] = {}
 
-    if isinstance(claim.subject, dict):
-        for key in (
-            "center_id",
-            "center",
-            "slot",
-            "requested_slot",
-            "confirmed_slot",
-            "provider_booking_id",
-            "booking_id",
-            "provider_request_id",
-            "logical_action_id",
-            "operation_id",
-            "is_reconciliation",
-            "plan_id",
-        ):
-            if key in claim.subject and claim.subject[key] is not None:
-                params[key] = claim.subject[key]
+    keys_to_extract = (
+        "center_id",
+        "center",
+        "slot",
+        "requested_slot",
+        "confirmed_slot",
+        "provider_booking_id",
+        "booking_id",
+        "resource_id",
+        "provider_request_id",
+        "request_id",
+        "logical_action_id",
+        "operation_id",
+        "is_reconciliation",
+        "plan_id",
+        "divergence_id",
+        "case_id",
+        "divergence_state",
+        "active_plan_id",
+        "step_id",
+        "step_kind",
+    )
 
-    if isinstance(claim.object, dict):
-        for key in (
-            "center_id",
-            "center",
-            "slot",
-            "requested_slot",
-            "confirmed_slot",
-            "provider_booking_id",
-            "booking_id",
-            "provider_request_id",
-            "logical_action_id",
-            "operation_id",
-            "is_reconciliation",
-            "plan_id",
-        ):
-            if key in claim.object and claim.object[key] is not None:
-                params[key] = claim.object[key]
+    for container in (claim.subject, claim.object):
+        if isinstance(container, dict):
+            for key in keys_to_extract:
+                if key in container and container[key] is not None:
+                    params[key] = container[key]
+            # Also extract from nested "reconciliation" subdict if present
+            if isinstance(container.get("reconciliation"), dict):
+                params["is_reconciliation"] = True
+                rec_dict = container["reconciliation"]
+                for key in keys_to_extract:
+                    if key in rec_dict and rec_dict[key] is not None:
+                        params[key] = rec_dict[key]
 
     if "center" in params and "center_id" not in params:
         params["center_id"] = params["center"]
     if "booking_id" in params and "provider_booking_id" not in params:
         params["provider_booking_id"] = params["booking_id"]
+    if "resource_id" in params and "provider_booking_id" not in params:
+        params["provider_booking_id"] = params["resource_id"]
+    if "request_id" in params and "provider_request_id" not in params:
+        params["provider_request_id"] = params["request_id"]
+    if "case_id" in params and "divergence_id" not in params:
+        params["divergence_id"] = params["case_id"]
     if "slot" in params:
         if "requested_slot" not in params:
             params["requested_slot"] = params["slot"]
@@ -475,9 +491,17 @@ def _evaluate_appointment_booked(
     evidence: Mapping[str, EvidenceRecord],
     views: Sequence[PhysicalWorldView],
     params: Mapping[str, Any],
+    *,
+    plans: Mapping[str, ReconciliationPlan] | None = None,
+    divergences: Mapping[str, DivergenceCase] | None = None,
+    active_plan_id: str | None = None,
 ) -> tuple[ClaimState, list[str], str]:
-    # Reconciliation check (Blocker #3):
-    is_reconciliation = bool(params.get("is_reconciliation", False) or "plan_id" in params)
+    # Reconciliation check (Blocker #3 & Strict Reconciliation Proof):
+    is_reconciliation = bool(
+        params.get("is_reconciliation", False)
+        or "plan_id" in params
+        or "divergence_id" in params
+    )
     if is_reconciliation:
         desired_plan_id = params.get("plan_id")
         desired_div_id = params.get("divergence_id")
@@ -485,40 +509,80 @@ def _evaluate_appointment_booked(
         desired_center = params.get("center_id")
         desired_slot = params.get("confirmed_slot") or params.get("requested_slot") or params.get("slot")
 
+        # 1. Section 5: REQUIRED RECONCILIATION IDENTITY MUST BE COMPLETE
+        # Fail closed to PENDING if any required field is missing.
+        if (
+            not desired_plan_id
+            or not desired_div_id
+            or not desired_booking_id
+            or not desired_center
+            or desired_slot is None
+        ):
+            return (
+                ClaimState.PENDING,
+                [],
+                "Reconciliation booking claim lacks required complete identity (plan_id, divergence_id, provider_booking_id, center_id, slot)",
+            )
+
+        # 2. Section 3, 7, 8: Exact canonical VERIFY_FINAL evidence discovery
         matching_vf_evs: list[EvidenceRecord] = []
         for ev in evidence.values():
             if ev.source != EvidenceSource.TOOL or ev.authority != EvidenceAuthority.AUTHORITATIVE:
                 continue
+
             prov = ev.provenance
-            step_kind = prov.get("step_kind") or prov.get("plan_step_kind")
-            step_id = str(prov.get("step_id", "")).lower()
-            kind = ev.kind.lower()
 
-            is_vf = (
-                step_kind in ("VERIFY_FINAL", PlanStepKind.VERIFY_FINAL)
-                or kind in ("reconciliation_verify_final", "reconciliation_verification")
-                or "verify_final" in step_id
-                or (prov.get("tool_name") == "appointment.get" and step_kind == "VERIFY_FINAL")
-            )
-            if not is_vf:
+            # Producer tool: if tool_name is present, must be canonical appointment.get
+            tool_name = prov.get("tool_name")
+            if tool_name is not None and tool_name != "appointment.get":
                 continue
 
-            # Check plan_id correlation
-            ev_plan_id = prov.get("plan_id")
-            if desired_plan_id is not None:
-                if ev_plan_id != desired_plan_id:
+            # Step kind: require exact canonical VERIFY_FINAL machine identifier.
+            # No fuzzy matching, no aliases, no substring matching, no .lower() widening.
+            step_kind = prov.get("step_kind")
+            if step_kind is None:
+                step_kind = prov.get("plan_step_kind")
+
+            if step_kind != CANONICAL_VERIFY_FINAL_STEP_KIND and step_kind != PlanStepKind.VERIFY_FINAL:
+                continue
+
+            # Step state check (if present): must be SUCCEEDED
+            step_state = prov.get("step_state") or prov.get("state")
+            if step_state is not None:
+                if (
+                    step_state != PlanStepState.SUCCEEDED.value
+                    and step_state != PlanStepState.SUCCEEDED
+                    and step_state != "SUCCEEDED"
+                ):
                     continue
-            elif ev_plan_id is not None:
-                pass
 
-            # Check divergence_id correlation
-            ev_div_id = prov.get("divergence_id")
-            if desired_div_id is not None and ev_div_id is not None and ev_div_id != desired_div_id:
+            # Section 7, 10, 13: Strict correlation fields (NO wildcard on missing)
+            ev_plan_id = prov.get("plan_id")
+            if not ev_plan_id or ev_plan_id != desired_plan_id:
                 continue
 
-            # Check resource / provider_effect_id correlation
+            ev_div_id = prov.get("divergence_id")
+            if not ev_div_id or ev_div_id != desired_div_id:
+                continue
+
             ev_booking_id = prov.get("provider_effect_id") or prov.get("provider_booking_id")
-            if desired_booking_id is not None and ev_booking_id is not None and ev_booking_id != desired_booking_id:
+            if not ev_booking_id or ev_booking_id != desired_booking_id:
+                continue
+
+            # Check if evidence provenance explicitly marks plan as inactive
+            if prov.get("is_active_plan") is False:
+                continue
+            if prov.get("plan_state") in (
+                PlanState.SUPERSEDED.value,
+                PlanState.SUPERSEDED,
+                PlanState.FAILED.value,
+                PlanState.FAILED,
+                "SUPERSEDED",
+                "FAILED",
+            ):
+                continue
+            ev_active_plan_id = prov.get("active_plan_id")
+            if ev_active_plan_id is not None and ev_active_plan_id != desired_plan_id:
                 continue
 
             matching_vf_evs.append(ev)
@@ -532,25 +596,129 @@ def _evaluate_appointment_booked(
 
         vf_ev = sorted(matching_vf_evs, key=lambda x: x.evidence_id)[0]
 
-        # Check physical world projection via EXE-005
-        relevant_views = _find_relevant_views(views, effects, evidence, params)
-        if not relevant_views:
-            vf_booking_id = vf_ev.provenance.get("provider_effect_id") or vf_ev.provenance.get("provider_booking_id")
-            if vf_booking_id:
-                relevant_views = [v for v in views if v.provider_effect_id == vf_booking_id]
+        # 3. Section 6: PROVE THE ACTIVE PLAN
+        if active_plan_id is not None and desired_plan_id != active_plan_id:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                f"Reconciliation plan '{desired_plan_id}' does not match active plan '{active_plan_id}'",
+            )
 
+        if plans:
+            plan = plans.get(desired_plan_id)
+            if plan is None:
+                return (
+                    ClaimState.PENDING,
+                    [vf_ev.evidence_id],
+                    f"Reconciliation plan '{desired_plan_id}' not found in known plans",
+                )
+            plan_state = getattr(plan, "state", None)
+            if plan_state in (
+                PlanState.SUPERSEDED,
+                PlanState.FAILED,
+                "SUPERSEDED",
+                "FAILED",
+            ):
+                return (
+                    ClaimState.PENDING,
+                    [vf_ev.evidence_id],
+                    f"Reconciliation plan '{desired_plan_id}' is in inactive state '{plan_state}'",
+                )
+            for other_pid, other_plan in plans.items():
+                if other_pid != desired_plan_id and getattr(other_plan, "divergence_id", None) == desired_div_id:
+                    other_state = getattr(other_plan, "state", None)
+                    if other_state in (
+                        PlanState.RUNNING,
+                        PlanState.AUTHORIZED,
+                        "RUNNING",
+                        "AUTHORIZED",
+                    ):
+                        return (
+                            ClaimState.PENDING,
+                            [vf_ev.evidence_id],
+                            f"Reconciliation plan '{desired_plan_id}' is superseded by active plan '{other_pid}'",
+                        )
+        else:
+            # If multiple plans are represented in evidence for this divergence, require active plan proof
+            ev_plans_for_div = {
+                ev.provenance.get("plan_id")
+                for ev in evidence.values()
+                if ev.provenance.get("divergence_id") == desired_div_id and ev.provenance.get("plan_id")
+            }
+            if len(ev_plans_for_div) > 1 and not active_plan_id:
+                return (
+                    ClaimState.PENDING,
+                    [vf_ev.evidence_id],
+                    f"Multiple reconciliation plans {sorted(ev_plans_for_div)} represented for divergence '{desired_div_id}' without active plan proof",
+                )
+
+        # 4. Section 9 & 10: UNRESOLVED DIVERGENCE GUARD (Resource-scoped)
+        div_resolved = False
+        if divergences:
+            target_div = divergences.get(desired_div_id)
+            if target_div is None:
+                return (
+                    ClaimState.PENDING,
+                    [vf_ev.evidence_id],
+                    f"Target divergence '{desired_div_id}' not found in known divergences",
+                )
+            div_state = getattr(target_div, "state", None)
+            if div_state != DivergenceState.RESOLVED and div_state != "RESOLVED":
+                return (
+                    ClaimState.PENDING,
+                    [vf_ev.evidence_id],
+                    f"Target divergence '{desired_div_id}' remains in unresolved state '{div_state}'",
+                )
+            div_resolved = True
+        else:
+            # Check evidence for divergence resolution or unresolved status
+            for ev in evidence.values():
+                if ev.provenance.get("divergence_id") == desired_div_id:
+                    ev_div_state = ev.provenance.get("divergence_state")
+                    if ev_div_state in (
+                        DivergenceState.OPEN,
+                        DivergenceState.RECONCILING,
+                        DivergenceState.PLANNED,
+                        DivergenceState.ESCALATED,
+                        "OPEN",
+                        "RECONCILING",
+                        "PLANNED",
+                        "ESCALATED",
+                    ):
+                        return (
+                            ClaimState.PENDING,
+                            [vf_ev.evidence_id],
+                            f"Target divergence '{desired_div_id}' is marked unresolved in evidence (state: '{ev_div_state}')",
+                        )
+                    if ev_div_state in (DivergenceState.RESOLVED, "RESOLVED"):
+                        div_resolved = True
+                if ev.kind in ("divergence_resolved", "divergence_resolution", "DivergenceResolved"):
+                    if ev.provenance.get("divergence_id") == desired_div_id:
+                        div_resolved = True
+
+            if params.get("divergence_state") in (DivergenceState.RESOLVED, "RESOLVED"):
+                div_resolved = True
+
+            if not div_resolved:
+                return (
+                    ClaimState.PENDING,
+                    [vf_ev.evidence_id],
+                    f"Target divergence '{desired_div_id}' resolution unproven; cannot confirm reconciliation booking",
+                )
+
+        # 5. Section 11: CURRENT WORLD MUST ALSO BE RESOLVED via EXE-005
+        relevant_views = [v for v in views if v.provider_effect_id == desired_booking_id]
         if not relevant_views:
             return (
                 ClaimState.PENDING,
                 [vf_ev.evidence_id],
-                "Reconciliation booking awaiting physical world observation",
+                f"Reconciliation booking '{desired_booking_id}' awaiting physical world observation",
             )
 
-        # Unresolved world guard (Probe 15)
         if any(view.certainty == WorldCertainty.UNRESOLVED for view in relevant_views):
             return (
                 ClaimState.PENDING,
-                [],
+                [vf_ev.evidence_id],
                 "Current physical world projection is UNRESOLVED; cannot confirm reconciliation booking",
             )
 
@@ -577,26 +745,17 @@ def _evaluate_appointment_booked(
                 "Reconciliation booking effect is not an authoritative committed effect",
             )
 
+        # 6. Physical Proposition Contradiction vs Confirmation
         vf_center = vf_ev.provenance.get("center_id") or vf_ev.provenance.get("center")
-        if desired_center is not None and vf_center is not None and vf_center != desired_center:
+        eff_center = eff.subject.get("center_id") or eff.subject.get("center")
+        if vf_center and vf_center != desired_center:
             eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
             return (
                 ClaimState.CONTRADICTED,
                 eids,
                 f"Reconciliation VERIFY_FINAL center '{vf_center}' contradicts desired center '{desired_center}'",
             )
-
-        vf_slot = vf_ev.provenance.get("confirmed_slot") or vf_ev.provenance.get("slot")
-        if desired_slot is not None and vf_slot is not None and not _match_slot(vf_slot, desired_slot):
-            eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
-            return (
-                ClaimState.CONTRADICTED,
-                eids,
-                f"Reconciliation VERIFY_FINAL slot '{vf_slot}' contradicts desired slot '{desired_slot}'",
-            )
-
-        eff_center = eff.subject.get("center_id") or eff.subject.get("center")
-        if desired_center is not None and eff_center != desired_center:
+        if eff_center and eff_center != desired_center:
             eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
             return (
                 ClaimState.CONTRADICTED,
@@ -604,8 +763,16 @@ def _evaluate_appointment_booked(
                 f"Reconciliation booking center '{eff_center}' contradicts desired center '{desired_center}'",
             )
 
+        vf_slot = vf_ev.provenance.get("confirmed_slot") or vf_ev.provenance.get("slot")
         eff_slot = eff.parameters.get("confirmed_slot") or eff.parameters.get("requested_slot")
-        if desired_slot is not None and not _match_slot(eff_slot, desired_slot):
+        if vf_slot and not _match_slot(vf_slot, desired_slot):
+            eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
+            return (
+                ClaimState.CONTRADICTED,
+                eids,
+                f"Reconciliation VERIFY_FINAL slot '{vf_slot}' contradicts desired slot '{desired_slot}'",
+            )
+        if eff_slot and not _match_slot(eff_slot, desired_slot):
             eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
             return (
                 ClaimState.CONTRADICTED,
@@ -617,7 +784,7 @@ def _evaluate_appointment_booked(
         return (
             ClaimState.CONFIRMED,
             confirm_eids,
-            f"Authoritative reconciliation booking confirmed for center '{eff_center}' / slot '{eff_slot}' (booking ID: '{eff.provider_effect_id}') via VERIFY_FINAL",
+            f"Authoritative reconciliation booking confirmed for center '{desired_center}' / slot '{desired_slot}' (booking ID: '{desired_booking_id}') via VERIFY_FINAL",
         )
 
     desired_slot = params.get("confirmed_slot") or params.get("requested_slot") or params.get("slot")
@@ -1228,12 +1395,53 @@ class ClaimEvaluator:
         rule_name = normalize_rule_name(claim.required_evidence_rule)
         params = _extract_claim_parameters(claim)
 
+        # Collect reconciliation context (plans, divergences, active_plan_id)
+        plans_map: dict[str, ReconciliationPlan] = {}
+        divergences_map: dict[str, DivergenceCase] = {}
+        active_plan_id: str | None = kwargs.get("active_plan_id") or params.get("active_plan_id")
+
+        session_state = kwargs.get("state") or kwargs.get("session_state")
+        for arg in args:
+            if isinstance(arg, SessionState) or (hasattr(arg, "plans") and hasattr(arg, "divergences")):
+                session_state = arg
+
+        if session_state is not None:
+            if hasattr(session_state, "plans") and isinstance(session_state.plans, Mapping):
+                plans_map.update(session_state.plans)
+            if hasattr(session_state, "divergences") and isinstance(session_state.divergences, Mapping):
+                divergences_map.update(session_state.divergences)
+
+        if "plans" in kwargs and isinstance(kwargs["plans"], Mapping):
+            plans_map.update(kwargs["plans"])
+        elif "plans" in kwargs and isinstance(kwargs["plans"], Sequence):
+            plans_map.update({p.plan_id: p for p in kwargs["plans"] if hasattr(p, "plan_id")})
+
+        if "divergences" in kwargs and isinstance(kwargs["divergences"], Mapping):
+            divergences_map.update(kwargs["divergences"])
+        elif "divergences" in kwargs and isinstance(kwargs["divergences"], Sequence):
+            divergences_map.update({d.divergence_id: d for d in kwargs["divergences"] if hasattr(d, "divergence_id")})
+
+        for arg in args:
+            if isinstance(arg, Mapping):
+                sample = next(iter(arg.values())) if arg else None
+                if isinstance(sample, ReconciliationPlan) and not plans_map:
+                    plans_map.update(arg)
+                elif isinstance(sample, DivergenceCase) and not divergences_map:
+                    divergences_map.update(arg)
+
         # Authoritative physical world projection via EXE-005
         views = project_world(effects_map, evidence_map)
 
         if rule_name == RULE_APPOINTMENT_BOOKED:
             target_state, eids, reason = _evaluate_appointment_booked(
-                claim, effects_map, evidence_map, views, params
+                claim,
+                effects_map,
+                evidence_map,
+                views,
+                params,
+                plans=plans_map if plans_map else None,
+                divergences=divergences_map if divergences_map else None,
+                active_plan_id=active_plan_id,
             )
         elif rule_name == RULE_APPOINTMENT_CANCELLED:
             target_state, eids, reason = _evaluate_appointment_cancelled(
@@ -1284,4 +1492,5 @@ __all__ = [
     "LEGAL_CLAIM_TRANSITIONS",
     "CANONICAL_RECEIPT_KINDS",
     "CANONICAL_RECEIPT_PRODUCERS",
+    "CANONICAL_VERIFY_FINAL_STEP_KIND",
 ]
