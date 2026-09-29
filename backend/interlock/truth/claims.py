@@ -524,21 +524,66 @@ def _evaluate_appointment_booked(
                 "Reconciliation booking claim lacks required complete identity (plan_id, divergence_id, provider_booking_id, center_id, slot)",
             )
 
-        # 2. Section 3, 7, 8: Exact canonical VERIFY_FINAL evidence discovery
+        # 2. CURRENT WORLD MUST BE RESOLVED via EXE-005
+        relevant_views = [v for v in views if v.provider_effect_id == desired_booking_id]
+        if not relevant_views:
+            return (
+                ClaimState.PENDING,
+                [],
+                f"Reconciliation booking '{desired_booking_id}' awaiting physical world observation",
+            )
+
+        if any(view.certainty == WorldCertainty.UNRESOLVED for view in relevant_views):
+            return (
+                ClaimState.PENDING,
+                [],
+                "Current physical world projection is UNRESOLVED; cannot confirm reconciliation booking",
+            )
+
+        if any(view.duplicate_physical_effect for view in relevant_views):
+            return (
+                ClaimState.UNCERTAIN,
+                [],
+                "Duplicate physical effects observed for reconciliation resource",
+            )
+
+        view = relevant_views[0]
+        if view.certainty != WorldCertainty.CONFIRMED or not view.current_effect_id:
+            return (
+                ClaimState.PENDING,
+                [],
+                "Reconciliation booking physical world projection is not confirmed",
+            )
+
+        eff = effects.get(view.current_effect_id)
+        if not eff or eff.state != EffectState.COMMITTED or eff.authority != EvidenceAuthority.AUTHORITATIVE:
+            return (
+                ClaimState.PENDING,
+                [],
+                "Reconciliation booking effect is not an authoritative committed effect",
+            )
+
+        # 3. Exact canonical VERIFY_FINAL evidence discovery tied to decisive observation
         matching_vf_evs: list[EvidenceRecord] = []
-        for ev in evidence.values():
+        for eid in eff.evidence_ids:
+            ev = evidence.get(eid)
+            if ev is None:
+                continue
             if ev.source != EvidenceSource.TOOL or ev.authority != EvidenceAuthority.AUTHORITATIVE:
+                continue
+
+            # Exact kind required: must be world_effect_verification
+            if ev.kind != "world_effect_verification":
                 continue
 
             prov = ev.provenance
 
-            # Producer tool: if tool_name is present, must be canonical appointment.get
+            # Producer tool: must be exact canonical appointment.get
             tool_name = prov.get("tool_name")
-            if tool_name is not None and tool_name != "appointment.get":
+            if tool_name != "appointment.get":
                 continue
 
             # Step kind: require exact canonical VERIFY_FINAL machine identifier.
-            # No fuzzy matching, no aliases, no substring matching, no .lower() widening.
             step_kind = prov.get("step_kind")
             if step_kind is None:
                 step_kind = prov.get("plan_step_kind")
@@ -556,7 +601,7 @@ def _evaluate_appointment_booked(
                 ):
                     continue
 
-            # Section 7, 10, 13: Strict correlation fields (NO wildcard on missing)
+            # Correlation fields (no wildcard on missing)
             ev_plan_id = prov.get("plan_id")
             if not ev_plan_id or ev_plan_id != desired_plan_id:
                 continue
@@ -569,7 +614,7 @@ def _evaluate_appointment_booked(
             if not ev_booking_id or ev_booking_id != desired_booking_id:
                 continue
 
-            # Check if evidence provenance explicitly marks plan as inactive
+            # Active plan checks in provenance
             if prov.get("is_active_plan") is False:
                 continue
             if prov.get("plan_state") in (
@@ -591,12 +636,19 @@ def _evaluate_appointment_booked(
             return (
                 ClaimState.PENDING,
                 [],
-                "Reconciliation booking awaiting exact matching authoritative VERIFY_FINAL evidence",
+                "Reconciliation booking awaiting exact matching authoritative VERIFY_FINAL evidence tied to decisive observation",
             )
 
         vf_ev = sorted(matching_vf_evs, key=lambda x: x.evidence_id)[0]
 
-        # 3. Section 6: PROVE THE ACTIVE PLAN
+        # 4. PROVE THE ACTIVE PLAN (Authoritative context required)
+        if not plans:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                "Missing authoritative reconciliation plan context; fails closed to PENDING",
+            )
+
         if active_plan_id is not None and desired_plan_id != active_plan_id:
             return (
                 ClaimState.PENDING,
@@ -604,146 +656,124 @@ def _evaluate_appointment_booked(
                 f"Reconciliation plan '{desired_plan_id}' does not match active plan '{active_plan_id}'",
             )
 
-        if plans:
-            plan = plans.get(desired_plan_id)
-            if plan is None:
-                return (
-                    ClaimState.PENDING,
-                    [vf_ev.evidence_id],
-                    f"Reconciliation plan '{desired_plan_id}' not found in known plans",
-                )
-            plan_state = getattr(plan, "state", None)
-            if plan_state in (
-                PlanState.SUPERSEDED,
-                PlanState.FAILED,
-                "SUPERSEDED",
-                "FAILED",
-            ):
-                return (
-                    ClaimState.PENDING,
-                    [vf_ev.evidence_id],
-                    f"Reconciliation plan '{desired_plan_id}' is in inactive state '{plan_state}'",
-                )
-            for other_pid, other_plan in plans.items():
-                if other_pid != desired_plan_id and getattr(other_plan, "divergence_id", None) == desired_div_id:
-                    other_state = getattr(other_plan, "state", None)
-                    if other_state in (
-                        PlanState.RUNNING,
-                        PlanState.AUTHORIZED,
-                        "RUNNING",
-                        "AUTHORIZED",
-                    ):
-                        return (
-                            ClaimState.PENDING,
-                            [vf_ev.evidence_id],
-                            f"Reconciliation plan '{desired_plan_id}' is superseded by active plan '{other_pid}'",
-                        )
-        else:
-            # If multiple plans are represented in evidence for this divergence, require active plan proof
-            ev_plans_for_div = {
-                ev.provenance.get("plan_id")
-                for ev in evidence.values()
-                if ev.provenance.get("divergence_id") == desired_div_id and ev.provenance.get("plan_id")
-            }
-            if len(ev_plans_for_div) > 1 and not active_plan_id:
-                return (
-                    ClaimState.PENDING,
-                    [vf_ev.evidence_id],
-                    f"Multiple reconciliation plans {sorted(ev_plans_for_div)} represented for divergence '{desired_div_id}' without active plan proof",
-                )
-
-        # 4. Section 9 & 10: UNRESOLVED DIVERGENCE GUARD (Resource-scoped)
-        div_resolved = False
-        if divergences:
-            target_div = divergences.get(desired_div_id)
-            if target_div is None:
-                return (
-                    ClaimState.PENDING,
-                    [vf_ev.evidence_id],
-                    f"Target divergence '{desired_div_id}' not found in known divergences",
-                )
-            div_state = getattr(target_div, "state", None)
-            if div_state != DivergenceState.RESOLVED and div_state != "RESOLVED":
-                return (
-                    ClaimState.PENDING,
-                    [vf_ev.evidence_id],
-                    f"Target divergence '{desired_div_id}' remains in unresolved state '{div_state}'",
-                )
-            div_resolved = True
-        else:
-            # Check evidence for divergence resolution or unresolved status
-            for ev in evidence.values():
-                if ev.provenance.get("divergence_id") == desired_div_id:
-                    ev_div_state = ev.provenance.get("divergence_state")
-                    if ev_div_state in (
-                        DivergenceState.OPEN,
-                        DivergenceState.RECONCILING,
-                        DivergenceState.PLANNED,
-                        DivergenceState.ESCALATED,
-                        "OPEN",
-                        "RECONCILING",
-                        "PLANNED",
-                        "ESCALATED",
-                    ):
-                        return (
-                            ClaimState.PENDING,
-                            [vf_ev.evidence_id],
-                            f"Target divergence '{desired_div_id}' is marked unresolved in evidence (state: '{ev_div_state}')",
-                        )
-                    if ev_div_state in (DivergenceState.RESOLVED, "RESOLVED"):
-                        div_resolved = True
-                if ev.kind in ("divergence_resolved", "divergence_resolution", "DivergenceResolved"):
-                    if ev.provenance.get("divergence_id") == desired_div_id:
-                        div_resolved = True
-
-            if params.get("divergence_state") in (DivergenceState.RESOLVED, "RESOLVED"):
-                div_resolved = True
-
-            if not div_resolved:
-                return (
-                    ClaimState.PENDING,
-                    [vf_ev.evidence_id],
-                    f"Target divergence '{desired_div_id}' resolution unproven; cannot confirm reconciliation booking",
-                )
-
-        # 5. Section 11: CURRENT WORLD MUST ALSO BE RESOLVED via EXE-005
-        relevant_views = [v for v in views if v.provider_effect_id == desired_booking_id]
-        if not relevant_views:
+        plan = plans.get(desired_plan_id)
+        if plan is None:
             return (
                 ClaimState.PENDING,
                 [vf_ev.evidence_id],
-                f"Reconciliation booking '{desired_booking_id}' awaiting physical world observation",
+                f"Reconciliation plan '{desired_plan_id}' not found in known plans",
             )
-
-        if any(view.certainty == WorldCertainty.UNRESOLVED for view in relevant_views):
+        plan_div_id = getattr(plan, "divergence_id", None)
+        if plan_div_id is not None and plan_div_id != desired_div_id:
             return (
                 ClaimState.PENDING,
                 [vf_ev.evidence_id],
-                "Current physical world projection is UNRESOLVED; cannot confirm reconciliation booking",
+                f"Reconciliation plan '{desired_plan_id}' divergence '{plan_div_id}' does not match desired divergence '{desired_div_id}'",
             )
 
-        if any(view.duplicate_physical_effect for view in relevant_views):
-            return (
-                ClaimState.UNCERTAIN,
-                [vf_ev.evidence_id],
-                "Duplicate physical effects observed for reconciliation resource",
-            )
-
-        view = relevant_views[0]
-        if view.certainty != WorldCertainty.CONFIRMED or not view.current_effect_id:
+        plan_state = getattr(plan, "state", None)
+        if plan_state in (
+            PlanState.SUPERSEDED,
+            PlanState.FAILED,
+            "SUPERSEDED",
+            "FAILED",
+        ):
             return (
                 ClaimState.PENDING,
                 [vf_ev.evidence_id],
-                "Reconciliation booking physical world projection is not confirmed",
+                f"Reconciliation plan '{desired_plan_id}' is in inactive state '{plan_state}'",
             )
+        for other_pid, other_plan in plans.items():
+            if other_pid != desired_plan_id and getattr(other_plan, "divergence_id", None) == desired_div_id:
+                other_state = getattr(other_plan, "state", None)
+                if other_state in (
+                    PlanState.RUNNING,
+                    PlanState.AUTHORIZED,
+                    "RUNNING",
+                    "AUTHORIZED",
+                ):
+                    return (
+                        ClaimState.PENDING,
+                        [vf_ev.evidence_id],
+                        f"Reconciliation plan '{desired_plan_id}' is superseded by active plan '{other_pid}'",
+                    )
 
-        eff = effects.get(view.current_effect_id)
-        if not eff or eff.state != EffectState.COMMITTED or eff.authority != EvidenceAuthority.AUTHORITATIVE:
+        # 5. UNRESOLVED DIVERGENCE GUARD (Authoritative context required; Resource-scoped)
+        if not divergences:
             return (
                 ClaimState.PENDING,
                 [vf_ev.evidence_id],
-                "Reconciliation booking effect is not an authoritative committed effect",
+                "Missing authoritative divergence context; fails closed to PENDING",
             )
+
+        target_div = divergences.get(desired_div_id)
+        if target_div is None:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                f"Target divergence '{desired_div_id}' not found in known divergences",
+            )
+        target_state = getattr(target_div, "state", None) if not isinstance(target_div, Mapping) else target_div.get("state")
+        if target_state != DivergenceState.RESOLVED and target_state != "RESOLVED":
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                f"Target divergence '{desired_div_id}' remains in unresolved state '{target_state}'",
+            )
+
+        # Scan ALL divergences touching the same physical resource/effect
+        # Any unresolved divergence (OPEN, PLANNED, RECONCILING, ESCALATED) must block confirmation
+        resource_effect_ids = set(view.observation_ids)
+        if view.current_effect_id:
+            resource_effect_ids.add(view.current_effect_id)
+
+        for div_id, div in divergences.items():
+            touches_resource = False
+
+            if div_id == desired_div_id:
+                touches_resource = True
+
+            div_booking_id = (
+                getattr(div, "provider_booking_id", None)
+                or getattr(div, "provider_effect_id", None)
+                or getattr(div, "booking_id", None)
+            )
+            if div_booking_id is not None and div_booking_id == desired_booking_id:
+                touches_resource = True
+
+            obs_eids = getattr(div, "observed_effect_ids", None) or []
+            if any(eid in resource_effect_ids or eid == desired_booking_id for eid in obs_eids):
+                touches_resource = True
+
+            if isinstance(div, Mapping):
+                dict_booking = (
+                    div.get("provider_booking_id")
+                    or div.get("provider_effect_id")
+                    or div.get("booking_id")
+                )
+                if dict_booking == desired_booking_id:
+                    touches_resource = True
+                dict_eids = div.get("observed_effect_ids", [])
+                if any(eid in resource_effect_ids or eid == desired_booking_id for eid in dict_eids):
+                    touches_resource = True
+
+            if touches_resource:
+                div_st = getattr(div, "state", None) if not isinstance(div, Mapping) else div.get("state")
+                if div_st in (
+                    DivergenceState.OPEN,
+                    DivergenceState.PLANNED,
+                    DivergenceState.RECONCILING,
+                    DivergenceState.ESCALATED,
+                    "OPEN",
+                    "PLANNED",
+                    "RECONCILING",
+                    "ESCALATED",
+                ) or (div_st != DivergenceState.RESOLVED and div_st != "RESOLVED"):
+                    return (
+                        ClaimState.PENDING,
+                        [vf_ev.evidence_id],
+                        f"Unresolved divergence '{div_id}' (state: '{div_st}') exists for physical resource '{desired_booking_id}'",
+                    )
 
         # 6. Physical Proposition Contradiction vs Confirmation
         vf_center = vf_ev.provenance.get("center_id") or vf_ev.provenance.get("center")
@@ -1318,9 +1348,21 @@ class ClaimEvaluator:
         sequence: int | None = None,
         as_of: datetime | None = None,
         active_intent_revision_id: str | None = None,
+        plans: Mapping[str, ReconciliationPlan] | Sequence[ReconciliationPlan] | None = None,
+        divergences: Mapping[str, DivergenceCase] | Sequence[DivergenceCase] | None = None,
         **kwargs: Any,
     ) -> tuple[ClaimStateChanged, ...]:
-        """Evaluate a ClaimRecord against world effects and evidence snapshots.
+        """Evaluate a ClaimRecord against world effects, evidence snapshots, and reconciliation context.
+
+        Parameters:
+            claim: The proposition claim to evaluate.
+            effects: Authoritative physical world effect records (from EXE-005).
+            evidence: Immutable evidence records (from TRU-001).
+            sequence: Logical sequence or clock timestamp.
+            as_of: Wall-clock cutoff timestamp for time-scoped rules.
+            active_intent_revision_id: Current active user intent revision ID.
+            plans: Authoritative reconciliation plans map or sequence.
+            divergences: Authoritative divergence cases map or sequence.
 
         Returns a tuple containing at most one canonical ClaimStateChanged event if
         a legal state change is required, or an empty tuple if the claim is unchanged.
@@ -1400,6 +1442,18 @@ class ClaimEvaluator:
         divergences_map: dict[str, DivergenceCase] = {}
         active_plan_id: str | None = kwargs.get("active_plan_id") or params.get("active_plan_id")
 
+        if plans is not None:
+            if isinstance(plans, Mapping):
+                plans_map.update({k: v for k, v in plans.items() if hasattr(v, "plan_id") or isinstance(v, ReconciliationPlan)})
+            elif isinstance(plans, Sequence):
+                plans_map.update({p.plan_id: p for p in plans if hasattr(p, "plan_id")})
+
+        if divergences is not None:
+            if isinstance(divergences, Mapping):
+                divergences_map.update({k: v for k, v in divergences.items() if hasattr(v, "divergence_id") or isinstance(v, DivergenceCase)})
+            elif isinstance(divergences, Sequence):
+                divergences_map.update({d.divergence_id: d for d in divergences if hasattr(d, "divergence_id")})
+
         session_state = kwargs.get("state") or kwargs.get("session_state")
         for arg in args:
             if isinstance(arg, SessionState) or (hasattr(arg, "plans") and hasattr(arg, "divergences")):
@@ -1472,13 +1526,33 @@ class ClaimEvaluator:
         self,
         claims: Sequence[ClaimRecord] | Mapping[str, ClaimRecord],
         *args: Any,
+        effects: Mapping[str, EffectRecord] | Sequence[EffectRecord] | None = None,
+        evidence: Mapping[str, EvidenceRecord] | Sequence[EvidenceRecord] | None = None,
+        sequence: int | None = None,
+        as_of: datetime | None = None,
+        active_intent_revision_id: str | None = None,
+        plans: Mapping[str, ReconciliationPlan] | Sequence[ReconciliationPlan] | None = None,
+        divergences: Mapping[str, DivergenceCase] | Sequence[DivergenceCase] | None = None,
         **kwargs: Any,
     ) -> tuple[ClaimStateChanged, ...]:
         """Evaluate multiple claims and collect state-change events deterministically."""
         claim_list = list(claims.values()) if isinstance(claims, Mapping) else list(claims)
         events: list[ClaimStateChanged] = []
         for cl in sorted(claim_list, key=lambda c: c.claim_id):
-            events.extend(self.evaluate(cl, *args, **kwargs))
+            events.extend(
+                self.evaluate(
+                    cl,
+                    *args,
+                    effects=effects,
+                    evidence=evidence,
+                    sequence=sequence,
+                    as_of=as_of,
+                    active_intent_revision_id=active_intent_revision_id,
+                    plans=plans,
+                    divergences=divergences,
+                    **kwargs,
+                )
+            )
         return tuple(events)
 
 
