@@ -23,6 +23,7 @@ from interlock.domain.enums import (
     EffectState,
     EvidenceAuthority,
     EvidenceSource,
+    PlanStepKind,
     ToolOutcome,
 )
 from interlock.domain.events import ClaimStateChanged
@@ -67,9 +68,6 @@ CANONICAL_TOOL_PRODUCERS: Set[str] = {
 LEGAL_CLAIM_TRANSITIONS: Mapping[ClaimState, Set[ClaimState]] = {
     ClaimState.PROPOSED: {
         ClaimState.PENDING,
-        ClaimState.CONFIRMED,
-        ClaimState.CONTRADICTED,
-        ClaimState.UNCERTAIN,
         ClaimState.STALE,
         ClaimState.SUPERSEDED,
     },
@@ -205,6 +203,7 @@ def _extract_claim_parameters(claim: ClaimRecord) -> dict[str, Any]:
 def _find_relevant_views(
     views: Sequence[PhysicalWorldView],
     effects: Mapping[str, EffectRecord],
+    evidence: Mapping[str, EvidenceRecord],
     params: Mapping[str, Any],
 ) -> list[PhysicalWorldView]:
     """Identify physical views relevant to the claim parameters using hierarchical physical identity.
@@ -212,46 +211,35 @@ def _find_relevant_views(
     Hierarchical selection:
     1. If provider_booking_id is supplied: select exact provider_effect_id. Do not discard
        because center or slot differ; proposition differences are compared later.
-    2. Else if logical_action_id is supplied: scope to that logical action.
-    3. Else: center may be used as a weaker scope.
+    2. Else if provider_request_id is supplied: scope to views containing effects created by that request.
+    3. Else if logical_action_id is supplied: scope to that logical action.
+    Fails closed (returns empty list) if identity is incomplete or only center_id is supplied.
     """
     target_booking_id = params.get("provider_booking_id")
+    target_req_id = params.get("provider_request_id")
     target_action_id = params.get("logical_action_id")
-    target_center_id = params.get("center_id")
 
     # 1. Exact physical booking identity
     if target_booking_id:
         return [view for view in views if view.provider_effect_id == target_booking_id]
 
-    # 2. Scoped logical action identity
+    # 2. Scoped by provider_request_id lineage
+    if target_req_id:
+        matching_booking_ids: set[str] = set()
+        for eff in effects.values():
+            for eid in eff.evidence_ids:
+                ev = evidence.get(eid)
+                if ev and ev.provenance.get("provider_request_id") == target_req_id:
+                    matching_booking_ids.add(eff.provider_effect_id)
+        if matching_booking_ids:
+            return [view for view in views if view.provider_effect_id in matching_booking_ids]
+
+    # 3. Scoped logical action identity
     if target_action_id:
         return [view for view in views if target_action_id in view.logical_action_ids]
 
-    # 3. Weaker center scope (when neither booking ID nor action ID is supplied)
-    if target_center_id:
-        relevant: list[PhysicalWorldView] = []
-        for view in views:
-            center_matches = False
-            if view.current_effect_id and view.current_effect_id in effects:
-                eff = effects[view.current_effect_id]
-                center_matches = (
-                    eff.subject.get("center_id") == target_center_id
-                    or eff.subject.get("center") == target_center_id
-                )
-            else:
-                for obs_id in view.observation_ids:
-                    eff = effects.get(obs_id)
-                    if eff and (
-                        eff.subject.get("center_id") == target_center_id
-                        or eff.subject.get("center") == target_center_id
-                    ):
-                        center_matches = True
-                        break
-            if center_matches:
-                relevant.append(view)
-        return relevant
-
-    return list(views)
+    # Incomplete identity fails closed: never match unrelated bookings by center alone
+    return []
 
 
 def _is_canonical_booking_evidence(
@@ -397,6 +385,7 @@ def _is_canonical_cancellation_evidence(
     ev: EvidenceRecord,
     eff: EffectRecord,
     expected_operation_id: str | None = None,
+    predecessor: EffectRecord | None = None,
 ) -> bool:
     """Validate supporting cancellation evidence according to canonical EXE-005 producer semantics."""
     if not isinstance(ev, EvidenceRecord):
@@ -411,24 +400,26 @@ def _is_canonical_cancellation_evidence(
     if not isinstance(req_id, str) or not req_id.strip():
         return False
 
+    op_id = prov.get("operation_id")
+    if not isinstance(op_id, str) or not op_id.strip():
+        return False
+
     if ev.kind == "booking_compensation":
         if prov.get("tool_name") != "appointment.cancel":
             return False
         if prov.get("provider_effect_id") != eff.provider_effect_id:
             return False
-        if prov.get("operation_id") != eff.operation_id:
-            return False
-        if expected_operation_id is not None and eff.operation_id != expected_operation_id:
-            return False
-        if expected_operation_id is not None and prov.get("operation_id") != expected_operation_id:
-            return False
-        return True
 
-    if ev.kind == "world_effect_verification":
-        if prov.get("tool_name") != "appointment.get":
-            return False
-        if prov.get("provider_effect_id") != eff.provider_effect_id:
-            return False
+        # Blocker #2: Validate cancel producer correlation separately from predecessor booking lineage.
+        # Do not require cancel evidence operation_id to equal the compensated booking effect's original operation_id.
+        if expected_operation_id is not None:
+            pred_op = predecessor.operation_id if predecessor else eff.operation_id
+            if (
+                op_id != expected_operation_id
+                and eff.operation_id != expected_operation_id
+                and pred_op != expected_operation_id
+            ):
+                return False
         return True
 
     return False
@@ -447,7 +438,10 @@ def _transition_event(
 
     legal_targets = LEGAL_CLAIM_TRANSITIONS.get(claim.state, set())
     if target_state not in legal_targets:
-        if ClaimState.STALE in legal_targets:
+        if claim.state == ClaimState.PROPOSED and ClaimState.PENDING in legal_targets:
+            target_state = ClaimState.PENDING
+            reason = f"Claim staged through PENDING before final verification: {reason}"
+        elif ClaimState.STALE in legal_targets:
             target_state = ClaimState.STALE
             reason = (
                 f"Transitioned to STALE because target {target_state} is illegal from {claim.state}: {reason}"
@@ -482,14 +476,148 @@ def _evaluate_appointment_booked(
     views: Sequence[PhysicalWorldView],
     params: Mapping[str, Any],
 ) -> tuple[ClaimState, list[str], str]:
-    # Reconciliation check: fail closed because ClaimEvaluator does not receive
-    # divergence or full resource-scope plan context.
+    # Reconciliation check (Blocker #3):
     is_reconciliation = bool(params.get("is_reconciliation", False) or "plan_id" in params)
     if is_reconciliation:
+        desired_plan_id = params.get("plan_id")
+        desired_div_id = params.get("divergence_id")
+        desired_booking_id = params.get("provider_booking_id")
+        desired_center = params.get("center_id")
+        desired_slot = params.get("confirmed_slot") or params.get("requested_slot") or params.get("slot")
+
+        matching_vf_evs: list[EvidenceRecord] = []
+        for ev in evidence.values():
+            if ev.source != EvidenceSource.TOOL or ev.authority != EvidenceAuthority.AUTHORITATIVE:
+                continue
+            prov = ev.provenance
+            step_kind = prov.get("step_kind") or prov.get("plan_step_kind")
+            step_id = str(prov.get("step_id", "")).lower()
+            kind = ev.kind.lower()
+
+            is_vf = (
+                step_kind in ("VERIFY_FINAL", PlanStepKind.VERIFY_FINAL)
+                or kind in ("reconciliation_verify_final", "reconciliation_verification")
+                or "verify_final" in step_id
+                or (prov.get("tool_name") == "appointment.get" and step_kind == "VERIFY_FINAL")
+            )
+            if not is_vf:
+                continue
+
+            # Check plan_id correlation
+            ev_plan_id = prov.get("plan_id")
+            if desired_plan_id is not None:
+                if ev_plan_id != desired_plan_id:
+                    continue
+            elif ev_plan_id is not None:
+                pass
+
+            # Check divergence_id correlation
+            ev_div_id = prov.get("divergence_id")
+            if desired_div_id is not None and ev_div_id is not None and ev_div_id != desired_div_id:
+                continue
+
+            # Check resource / provider_effect_id correlation
+            ev_booking_id = prov.get("provider_effect_id") or prov.get("provider_booking_id")
+            if desired_booking_id is not None and ev_booking_id is not None and ev_booking_id != desired_booking_id:
+                continue
+
+            matching_vf_evs.append(ev)
+
+        if not matching_vf_evs:
+            return (
+                ClaimState.PENDING,
+                [],
+                "Reconciliation booking awaiting exact matching authoritative VERIFY_FINAL evidence",
+            )
+
+        vf_ev = sorted(matching_vf_evs, key=lambda x: x.evidence_id)[0]
+
+        # Check physical world projection via EXE-005
+        relevant_views = _find_relevant_views(views, effects, evidence, params)
+        if not relevant_views:
+            vf_booking_id = vf_ev.provenance.get("provider_effect_id") or vf_ev.provenance.get("provider_booking_id")
+            if vf_booking_id:
+                relevant_views = [v for v in views if v.provider_effect_id == vf_booking_id]
+
+        if not relevant_views:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                "Reconciliation booking awaiting physical world observation",
+            )
+
+        # Unresolved world guard (Probe 15)
+        if any(view.certainty == WorldCertainty.UNRESOLVED for view in relevant_views):
+            return (
+                ClaimState.PENDING,
+                [],
+                "Current physical world projection is UNRESOLVED; cannot confirm reconciliation booking",
+            )
+
+        if any(view.duplicate_physical_effect for view in relevant_views):
+            return (
+                ClaimState.UNCERTAIN,
+                [vf_ev.evidence_id],
+                "Duplicate physical effects observed for reconciliation resource",
+            )
+
+        view = relevant_views[0]
+        if view.certainty != WorldCertainty.CONFIRMED or not view.current_effect_id:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                "Reconciliation booking physical world projection is not confirmed",
+            )
+
+        eff = effects.get(view.current_effect_id)
+        if not eff or eff.state != EffectState.COMMITTED or eff.authority != EvidenceAuthority.AUTHORITATIVE:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                "Reconciliation booking effect is not an authoritative committed effect",
+            )
+
+        vf_center = vf_ev.provenance.get("center_id") or vf_ev.provenance.get("center")
+        if desired_center is not None and vf_center is not None and vf_center != desired_center:
+            eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
+            return (
+                ClaimState.CONTRADICTED,
+                eids,
+                f"Reconciliation VERIFY_FINAL center '{vf_center}' contradicts desired center '{desired_center}'",
+            )
+
+        vf_slot = vf_ev.provenance.get("confirmed_slot") or vf_ev.provenance.get("slot")
+        if desired_slot is not None and vf_slot is not None and not _match_slot(vf_slot, desired_slot):
+            eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
+            return (
+                ClaimState.CONTRADICTED,
+                eids,
+                f"Reconciliation VERIFY_FINAL slot '{vf_slot}' contradicts desired slot '{desired_slot}'",
+            )
+
+        eff_center = eff.subject.get("center_id") or eff.subject.get("center")
+        if desired_center is not None and eff_center != desired_center:
+            eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
+            return (
+                ClaimState.CONTRADICTED,
+                eids,
+                f"Reconciliation booking center '{eff_center}' contradicts desired center '{desired_center}'",
+            )
+
+        eff_slot = eff.parameters.get("confirmed_slot") or eff.parameters.get("requested_slot")
+        if desired_slot is not None and not _match_slot(eff_slot, desired_slot):
+            eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
+            return (
+                ClaimState.CONTRADICTED,
+                eids,
+                f"Reconciliation booking slot '{eff_slot}' contradicts desired slot '{desired_slot}'",
+            )
+
+        confirm_eids = sorted(set([vf_ev.evidence_id, *eff.evidence_ids]))
         return (
-            ClaimState.PENDING,
-            [],
-            "reconciliation final-verification context requires cross-owner contract confirmation",
+            ClaimState.CONFIRMED,
+            confirm_eids,
+            f"Authoritative reconciliation booking confirmed for center '{eff_center}' / slot '{eff_slot}' (booking ID: '{eff.provider_effect_id}') via VERIFY_FINAL",
         )
 
     desired_slot = params.get("confirmed_slot") or params.get("requested_slot") or params.get("slot")
@@ -498,7 +626,21 @@ def _evaluate_appointment_booked(
     desired_booking_id = params.get("provider_booking_id")
     desired_op_id = params.get("operation_id")
 
-    relevant_views = _find_relevant_views(views, effects, params)
+    # Blocker #4: Required claim identity completeness check
+    if not desired_booking_id and not desired_req_id:
+        return (
+            ClaimState.PENDING,
+            [],
+            "appointment_booked proposition lacks required booking identity or request lineage",
+        )
+    if not desired_center or desired_slot is None:
+        return (
+            ClaimState.PENDING,
+            [],
+            "appointment_booked proposition lacks required center or slot parameter",
+        )
+
+    relevant_views = _find_relevant_views(views, effects, evidence, params)
 
     if not relevant_views:
         return (
@@ -714,7 +856,7 @@ def _evaluate_appointment_cancelled(
     desired_slot = params.get("confirmed_slot") or params.get("slot")
     desired_op_id = params.get("operation_id")
 
-    relevant_views = _find_relevant_views(views, effects, params)
+    relevant_views = _find_relevant_views(views, effects, evidence, params)
 
     if not relevant_views:
         return (
@@ -735,22 +877,34 @@ def _evaluate_appointment_cancelled(
                 and eff.state == EffectState.COMPENSATED
                 and eff.authority == EvidenceAuthority.AUTHORITATIVE
             ):
-                if desired_op_id and eff.operation_id != desired_op_id:
+                # Blocker #2: Validate predecessor booking lineage
+                if not eff.supersedes_effect_id or eff.supersedes_effect_id not in effects:
+                    continue
+
+                pred = effects[eff.supersedes_effect_id]
+                if (
+                    pred.state != EffectState.COMMITTED
+                    or pred.authority != EvidenceAuthority.AUTHORITATIVE
+                    or pred.effect_type != "appointment.booking"
+                    or pred.provider_effect_id != eff.provider_effect_id
+                ):
                     continue
 
                 eff_center = eff.subject.get("center_id") or eff.subject.get("center")
-                if desired_center and eff_center != desired_center:
+                pred_center = pred.subject.get("center_id") or pred.subject.get("center")
+                if desired_center and (eff_center != desired_center or pred_center != desired_center):
                     continue
 
                 eff_slot = eff.parameters.get("confirmed_slot") or eff.parameters.get("requested_slot")
-                if desired_slot and not _match_slot(eff_slot, desired_slot):
+                pred_slot = pred.parameters.get("confirmed_slot") or pred.parameters.get("requested_slot")
+                if desired_slot and (not _match_slot(eff_slot, desired_slot) or not _match_slot(pred_slot, desired_slot)):
                     continue
 
                 valid_eids = [
                     eid
                     for eid in eff.evidence_ids
                     if eid in evidence
-                    and _is_canonical_cancellation_evidence(evidence[eid], eff, desired_op_id)
+                    and _is_canonical_cancellation_evidence(evidence[eid], eff, desired_op_id, pred)
                 ]
                 if valid_eids:
                     return (
@@ -1095,6 +1249,13 @@ class ClaimEvaluator:
             )
         else:
             target_state, eids, reason = _evaluate_unknown_rule(claim, rule_name)
+
+        # Blocker #1: PROPOSED claims must be staged through PENDING before final truth states
+        if claim.state == ClaimState.PROPOSED:
+            if target_state in {ClaimState.CONFIRMED, ClaimState.CONTRADICTED, ClaimState.UNCERTAIN}:
+                staged_reason = f"Claim staged through PENDING before final verification: {reason}"
+                target_state = ClaimState.PENDING
+                reason = staged_reason
 
         event = _transition_event(claim, target_state, eids, reason, evidence_map)
         return (event,) if event is not None else ()
