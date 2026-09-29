@@ -563,8 +563,8 @@ def _evaluate_appointment_booked(
                 "Reconciliation booking effect is not an authoritative committed effect",
             )
 
-        # 3. Exact canonical VERIFY_FINAL evidence discovery tied to decisive observation
-        matching_vf_evs: list[EvidenceRecord] = []
+        # 3. Proof A: Exact canonical EXE-005 physical verification evidence discovery
+        matching_verif_evs: list[EvidenceRecord] = []
         for eid in eff.evidence_ids:
             ev = evidence.get(eid)
             if ev is None:
@@ -583,65 +583,23 @@ def _evaluate_appointment_booked(
             if tool_name != "appointment.get":
                 continue
 
-            # Step kind: require exact canonical VERIFY_FINAL machine identifier.
-            step_kind = prov.get("step_kind")
-            if step_kind is None:
-                step_kind = prov.get("plan_step_kind")
-
-            if step_kind != CANONICAL_VERIFY_FINAL_STEP_KIND and step_kind != PlanStepKind.VERIFY_FINAL:
-                continue
-
-            # Step state check (if present): must be SUCCEEDED
-            step_state = prov.get("step_state") or prov.get("state")
-            if step_state is not None:
-                if (
-                    step_state != PlanStepState.SUCCEEDED.value
-                    and step_state != PlanStepState.SUCCEEDED
-                    and step_state != "SUCCEEDED"
-                ):
-                    continue
-
-            # Correlation fields (no wildcard on missing)
-            ev_plan_id = prov.get("plan_id")
-            if not ev_plan_id or ev_plan_id != desired_plan_id:
-                continue
-
-            ev_div_id = prov.get("divergence_id")
-            if not ev_div_id or ev_div_id != desired_div_id:
-                continue
-
+            # Physical booking resource correlation (if provider_effect_id / provider_booking_id present)
             ev_booking_id = prov.get("provider_effect_id") or prov.get("provider_booking_id")
-            if not ev_booking_id or ev_booking_id != desired_booking_id:
+            if ev_booking_id is not None and ev_booking_id != desired_booking_id:
                 continue
 
-            # Active plan checks in provenance
-            if prov.get("is_active_plan") is False:
-                continue
-            if prov.get("plan_state") in (
-                PlanState.SUPERSEDED.value,
-                PlanState.SUPERSEDED,
-                PlanState.FAILED.value,
-                PlanState.FAILED,
-                "SUPERSEDED",
-                "FAILED",
-            ):
-                continue
-            ev_active_plan_id = prov.get("active_plan_id")
-            if ev_active_plan_id is not None and ev_active_plan_id != desired_plan_id:
-                continue
+            matching_verif_evs.append(ev)
 
-            matching_vf_evs.append(ev)
-
-        if not matching_vf_evs:
+        if not matching_verif_evs:
             return (
                 ClaimState.PENDING,
                 [],
-                "Reconciliation booking awaiting exact matching authoritative VERIFY_FINAL evidence tied to decisive observation",
+                "Reconciliation booking awaiting exact matching authoritative EXE-005 verification evidence tied to decisive observation",
             )
 
-        vf_ev = sorted(matching_vf_evs, key=lambda x: x.evidence_id)[0]
+        vf_ev = sorted(matching_verif_evs, key=lambda x: x.evidence_id)[0]
 
-        # 4. PROVE THE ACTIVE PLAN (Authoritative context required)
+        # 4. Proof B: Reconciliation workflow and active plan VERIFY_FINAL step proof
         if not plans:
             return (
                 ClaimState.PENDING,
@@ -663,7 +621,7 @@ def _evaluate_appointment_booked(
                 [vf_ev.evidence_id],
                 f"Reconciliation plan '{desired_plan_id}' not found in known plans",
             )
-        plan_div_id = getattr(plan, "divergence_id", None)
+        plan_div_id = getattr(plan, "divergence_id", None) if not isinstance(plan, Mapping) else plan.get("divergence_id")
         if plan_div_id is not None and plan_div_id != desired_div_id:
             return (
                 ClaimState.PENDING,
@@ -671,7 +629,7 @@ def _evaluate_appointment_booked(
                 f"Reconciliation plan '{desired_plan_id}' divergence '{plan_div_id}' does not match desired divergence '{desired_div_id}'",
             )
 
-        plan_state = getattr(plan, "state", None)
+        plan_state = getattr(plan, "state", None) if not isinstance(plan, Mapping) else plan.get("state")
         if plan_state in (
             PlanState.SUPERSEDED,
             PlanState.FAILED,
@@ -684,19 +642,66 @@ def _evaluate_appointment_booked(
                 f"Reconciliation plan '{desired_plan_id}' is in inactive state '{plan_state}'",
             )
         for other_pid, other_plan in plans.items():
-            if other_pid != desired_plan_id and getattr(other_plan, "divergence_id", None) == desired_div_id:
-                other_state = getattr(other_plan, "state", None)
-                if other_state in (
-                    PlanState.RUNNING,
-                    PlanState.AUTHORIZED,
-                    "RUNNING",
-                    "AUTHORIZED",
-                ):
-                    return (
-                        ClaimState.PENDING,
-                        [vf_ev.evidence_id],
-                        f"Reconciliation plan '{desired_plan_id}' is superseded by active plan '{other_pid}'",
+            if other_pid != desired_plan_id:
+                other_div = getattr(other_plan, "divergence_id", None) if not isinstance(other_plan, Mapping) else other_plan.get("divergence_id")
+                if other_div == desired_div_id:
+                    other_state = getattr(other_plan, "state", None) if not isinstance(other_plan, Mapping) else other_plan.get("state")
+                    if other_state in (
+                        PlanState.RUNNING,
+                        PlanState.AUTHORIZED,
+                        "RUNNING",
+                        "AUTHORIZED",
+                    ):
+                        return (
+                            ClaimState.PENDING,
+                            [vf_ev.evidence_id],
+                            f"Reconciliation plan '{desired_plan_id}' is superseded by active plan '{other_pid}'",
+                        )
+
+        # Locate exact canonical VERIFY_FINAL step in the active plan snapshot
+        steps = getattr(plan, "steps", None) if not isinstance(plan, Mapping) else plan.get("steps")
+        if not steps:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                f"Reconciliation plan '{desired_plan_id}' has no steps; cannot prove VERIFY_FINAL",
+            )
+
+        vf_steps = []
+        for step in steps:
+            step_kind = getattr(step, "kind", None) if not isinstance(step, Mapping) else step.get("kind")
+            if step_kind == PlanStepKind.VERIFY_FINAL or step_kind == CANONICAL_VERIFY_FINAL_STEP_KIND:
+                vf_steps.append(step)
+
+        if not vf_steps:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                f"Reconciliation plan '{desired_plan_id}' lacks canonical VERIFY_FINAL step",
+            )
+
+        completed_vf_steps = []
+        for step in vf_steps:
+            step_state = getattr(step, "state", None) if not isinstance(step, Mapping) else step.get("state")
+            if step_state == PlanStepState.SUCCEEDED or step_state == "SUCCEEDED":
+                # Verify resource correlation if step arguments contain target booking ID
+                step_args = getattr(step, "arguments", None) if not isinstance(step, Mapping) else step.get("arguments")
+                if isinstance(step_args, Mapping):
+                    step_booking_id = (
+                        step_args.get("provider_booking_id")
+                        or step_args.get("provider_effect_id")
+                        or step_args.get("booking_id")
                     )
+                    if step_booking_id is not None and step_booking_id != desired_booking_id:
+                        continue
+                completed_vf_steps.append(step)
+
+        if not completed_vf_steps:
+            return (
+                ClaimState.PENDING,
+                [vf_ev.evidence_id],
+                f"Reconciliation plan '{desired_plan_id}' VERIFY_FINAL step is not completed/succeeded",
+            )
 
         # 5. UNRESOLVED DIVERGENCE GUARD (Authoritative context required; Resource-scoped)
         if not divergences:
