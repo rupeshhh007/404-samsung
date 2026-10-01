@@ -642,6 +642,23 @@ class Truthlock:
                 through_sequence=resolved_pinned_seq,
             )
 
+        # A current sequence pin does not prove that an authorized write is
+        # actually being submitted. TRU-003 currently receives no canonical
+        # operation or ToolDispatchRequested snapshot, so caller slots cannot
+        # support this consequential process-state wording.
+        if template_key == "tmpl_dispatch_requested":
+            return TruthDecision(
+                status=TruthDecisionStatus.BLOCK,
+                speech_id=speech_id,
+                reason=(
+                    "Template 'tmpl_dispatch_requested' requires authoritative "
+                    "dispatch-state context that is not present in the TRUTHLOCK input"
+                ),
+                max_certainty=ClaimCertainty.UNCERTAIN,
+                policy_id=pol_ver,
+                through_sequence=resolved_pinned_seq,
+            )
+
         # TRU-003 has no canonical world-effect/desired-intent slot binding for
         # detailed divergence wording. Caller-provided slots are not evidence.
         if template_key == "tmpl_divergence":
