@@ -642,6 +642,36 @@ class Truthlock:
                 through_sequence=resolved_pinned_seq,
             )
 
+        # TRU-003 has no canonical world-effect/desired-intent slot binding for
+        # detailed divergence wording. Caller-provided slots are not evidence.
+        if template_key == "tmpl_divergence":
+            return TruthDecision(
+                status=TruthDecisionStatus.BLOCK,
+                speech_id=speech_id,
+                reason=(
+                    "Template 'tmpl_divergence' requires canonical observed_slot and "
+                    "desired_slot bindings that are not present in the TRUTHLOCK input"
+                ),
+                max_certainty=ClaimCertainty.UNCERTAIN,
+                policy_id=pol_ver,
+                through_sequence=resolved_pinned_seq,
+            )
+
+        # Prior emitted speech and correction lifecycle belong to TRU-004. The
+        # current request cannot prove either correction operand canonically.
+        if template_key == "tmpl_correction":
+            return TruthDecision(
+                status=TruthDecisionStatus.BLOCK,
+                speech_id=speech_id,
+                reason=(
+                    "Template 'tmpl_correction' requires TRU-004 linkage to the exact "
+                    "emitted speech and current verified truth"
+                ),
+                max_certainty=ClaimCertainty.UNCERTAIN,
+                policy_id=pol_ver,
+                through_sequence=resolved_pinned_seq,
+            )
+
         # --- 3. Resolve exact claim versions & lifecycle states ---
         if not act.claim_ids:
             if is_factual_consequential:
@@ -1069,7 +1099,7 @@ class Truthlock:
         policy_id: str,
         through_sequence: Optional[int],
     ) -> Optional[TruthDecision]:
-        """Check whether an unresolved divergence touches the resource required by speech."""
+        """Block definitive success unless canonical divergence context is safe."""
         is_definitive_success = (
             speech_act.act_type == SpeechActType.RESULT
             or speech_act.requested_certainty == ClaimCertainty.CONFIRMED
@@ -1077,82 +1107,122 @@ class Truthlock:
         if not is_definitive_success or not divergences:
             return None
 
-        # Extract target resource identifiers
-        target_booking_ids: Set[str] = set()
-        target_divergence_ids: Set[str] = set()
-
-        for k in ("provider_booking_id", "booking_id", "provider_effect_id", "resource_id"):
-            v = speech_act.slots.get(k)
-            if v:
-                target_booking_ids.add(str(v))
-
-        div_id = speech_act.slots.get("divergence_id") or speech_act.slots.get("case_id")
-        if div_id:
-            target_divergence_ids.add(str(div_id))
-
-        for cl in required_claims:
-            params = _extract_claim_params(cl)
-            for k in ("provider_booking_id", "booking_id", "provider_effect_id", "resource_id"):
-                v = params.get(k)
-                if v:
-                    target_booking_ids.add(str(v))
-            d_id = params.get("divergence_id") or params.get("case_id")
-            if d_id:
-                target_divergence_ids.add(str(d_id))
-
-        if not target_booking_ids and not target_divergence_ids:
+        unresolved_values = {
+            state.value for state in UNRESOLVED_DIVERGENCE_STATES
+        }
+        unresolved = {
+            divergence_id: divergence
+            for divergence_id, divergence in sorted(divergences.items())
+            if (
+                divergence.state.value
+                if isinstance(divergence.state, Enum)
+                else str(divergence.state)
+            )
+            in unresolved_values
+        }
+        if not unresolved:
             return None
 
-        # Deterministic order for divergence scan (Probe 19)
-        for d_key, div in sorted(divergences.items(), key=lambda item: item[0]):
-            curr_div_id = (
-                getattr(div, "divergence_id", None)
-                or (div.get("divergence_id") if isinstance(div, Mapping) else None)
-                or d_key
-            )
-            curr_state = (
-                getattr(div, "state", None)
-                or (div.get("state") if isinstance(div, Mapping) else None)
-            )
-            obs_eids = (
-                getattr(div, "observed_effect_ids", None)
-                or (div.get("observed_effect_ids") if isinstance(div, Mapping) else None)
-                or []
-            )
-            div_booking_id = (
-                getattr(div, "provider_booking_id", None)
-                or getattr(div, "booking_id", None)
-                or getattr(div, "provider_effect_id", None)
-                or (div.get("provider_booking_id") if isinstance(div, Mapping) else None)
-                or (div.get("booking_id") if isinstance(div, Mapping) else None)
+        # A caller-selected ID can identify an unresolved case to block, but it
+        # cannot prove that other unresolved cases are unrelated to the target.
+        speech_divergence_id = (
+            speech_act.slots.get("divergence_id")
+            or speech_act.slots.get("case_id")
+        )
+        if (
+            speech_divergence_id is not None
+            and str(speech_divergence_id) in unresolved
+        ):
+            divergence_id = str(speech_divergence_id)
+            return self._unresolved_divergence_decision(
+                speech_act,
+                divergence_id,
+                unresolved[divergence_id],
+                policy_id,
+                through_sequence,
             )
 
-            touches_resource = False
-            if curr_div_id in target_divergence_ids:
-                touches_resource = True
-            elif div_booking_id and str(div_booking_id) in target_booking_ids:
-                touches_resource = True
-            elif any(str(eid) in target_booking_ids for eid in obs_eids):
-                touches_resource = True
+        # A divergence ID carried by a required canonical claim is the only
+        # current TRUTHLOCK-local positive resource/case correlation.
+        claim_divergence_ids: Set[str] = set()
+        for claim in required_claims:
+            params = _extract_claim_params(claim)
+            divergence_id = params.get("divergence_id") or params.get("case_id")
+            if divergence_id is not None:
+                claim_divergence_ids.add(str(divergence_id))
 
-            if touches_resource:
-                state_val = curr_state.value if isinstance(curr_state, Enum) else str(curr_state)
-                unresolved_vals = {s.value for s in UNRESOLVED_DIVERGENCE_STATES}
-                if state_val in unresolved_vals:
-                    return TruthDecision(
-                        status=TruthDecisionStatus.BLOCK,
-                        speech_id=speech_act.speech_id,
-                        reason=(
-                            f"Resource '{next(iter(target_booking_ids), curr_div_id)}' touches unresolved "
-                            f"divergence '{curr_div_id}' in state '{state_val}'"
-                        ),
-                        max_certainty=ClaimCertainty.UNCERTAIN,
-                        policy_id=policy_id,
-                        through_sequence=through_sequence,
-                        downgraded_speech_act=self._create_downgrade(speech_act, ClaimCertainty.UNCERTAIN),
-                    )
+        for divergence_id in sorted(claim_divergence_ids):
+            if divergence_id not in divergences:
+                return TruthDecision(
+                    status=TruthDecisionStatus.BLOCK,
+                    speech_id=speech_act.speech_id,
+                    reason=(
+                        f"Required claim references divergence '{divergence_id}', but that "
+                        "case is absent from the pinned divergence snapshot"
+                    ),
+                    max_certainty=ClaimCertainty.UNCERTAIN,
+                    policy_id=policy_id,
+                    through_sequence=through_sequence,
+                )
+            if divergence_id in unresolved:
+                return self._unresolved_divergence_decision(
+                    speech_act,
+                    divergence_id,
+                    unresolved[divergence_id],
+                    policy_id,
+                    through_sequence,
+                )
 
-        return None
+        if claim_divergence_ids:
+            return None
+
+        # observed_effect_ids are local EffectRecord.effect_id values. Without
+        # an authoritative EffectRecord snapshot, provider booking identities
+        # cannot be mapped to them and unresolved cases cannot be proven unrelated.
+        unresolved_ids = sorted(unresolved)
+        return TruthDecision(
+            status=TruthDecisionStatus.BLOCK,
+            speech_id=speech_act.speech_id,
+            reason=(
+                "Definitive success cannot be correlated safely against unresolved "
+                f"divergence cases {unresolved_ids} without authoritative EffectRecord context"
+            ),
+            max_certainty=ClaimCertainty.UNCERTAIN,
+            policy_id=policy_id,
+            through_sequence=through_sequence,
+            downgraded_speech_act=self._create_downgrade(
+                speech_act, ClaimCertainty.UNCERTAIN
+            ),
+        )
+
+    def _unresolved_divergence_decision(
+        self,
+        speech_act: SpeechAct,
+        divergence_id: str,
+        divergence: DivergenceCase,
+        policy_id: str,
+        through_sequence: Optional[int],
+    ) -> TruthDecision:
+        """Create a deterministic block for one canonically identified case."""
+        state_value = (
+            divergence.state.value
+            if isinstance(divergence.state, Enum)
+            else str(divergence.state)
+        )
+        return TruthDecision(
+            status=TruthDecisionStatus.BLOCK,
+            speech_id=speech_act.speech_id,
+            reason=(
+                f"Required resource touches unresolved divergence '{divergence_id}' "
+                f"in state '{state_value}'"
+            ),
+            max_certainty=ClaimCertainty.UNCERTAIN,
+            policy_id=policy_id,
+            through_sequence=through_sequence,
+            downgraded_speech_act=self._create_downgrade(
+                speech_act, ClaimCertainty.UNCERTAIN
+            ),
+        )
 
     def _create_downgrade(
         self, original: SpeechAct, safe_certainty: ClaimCertainty
