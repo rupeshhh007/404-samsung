@@ -27,7 +27,7 @@ from interlock.truth.claims import (
     RULE_APPOINTMENT_CANCELLED,
     RULE_REQUEST_RECEIVED,
     RULE_SLOT_AVAILABLE,
-    _match_slot,
+    _extract_claim_parameters,
     normalize_rule_name,
 )
 
@@ -40,16 +40,6 @@ _CORRECTION_STATE_TEXT = {
     ClaimState.STALE: "the previous statement is no longer supported by current evidence",
     ClaimState.SUPERSEDED: "the previous statement is no longer current",
 }
-
-
-def _claim_parameters(claim: ClaimRecord) -> Dict[str, Any]:
-    """Extract canonical fact fields with ClaimGraph's object-over-subject precedence."""
-
-    params: Dict[str, Any] = {}
-    for source in (claim.subject, claim.object):
-        if isinstance(source, dict):
-            params.update({key: value for key, value in source.items() if value is not None})
-    return params
 
 
 def _controlled_text(value: Any) -> Optional[str]:
@@ -74,57 +64,77 @@ def _first_controlled_text(params: Dict[str, Any], *keys: str) -> Optional[str]:
 
 
 def _render_confirmed_fact(claim: ClaimRecord) -> Optional[str]:
-    """Render only canonical rule facts whose typed identity is complete enough."""
+    """Render the minimum fact proven by each canonical ClaimGraph rule."""
 
     rule = normalize_rule_name(claim.required_evidence_rule)
-    params = _claim_parameters(claim)
-    center_id = _first_controlled_text(params, "center_id", "center")
+    params = _extract_claim_parameters(claim)
 
     if rule == RULE_APPOINTMENT_BOOKED:
+        center_id = _controlled_text(params.get("center_id"))
+        slot_value = (
+            params.get("confirmed_slot")
+            or params.get("requested_slot")
+            or params.get("slot")
+        )
+        slot = _controlled_text(slot_value)
         provider_request_id = _first_controlled_text(
             params, "provider_request_id", "request_id"
         )
         provider_booking_id = _first_controlled_text(
             params, "provider_booking_id", "booking_id", "resource_id"
         )
-        requested_slot = _controlled_text(params.get("requested_slot"))
-        confirmed_slot = _controlled_text(params.get("confirmed_slot"))
-        if (
-            center_id is None
-            or provider_request_id is None
-            or provider_booking_id is None
-            or requested_slot is None
-            or confirmed_slot is None
-            or not _match_slot(params.get("requested_slot"), params.get("confirmed_slot"))
-        ):
+        is_reconciliation = bool(
+            params.get("is_reconciliation", False)
+            or "plan_id" in params
+            or "divergence_id" in params
+        )
+        if is_reconciliation:
+            plan_id = _controlled_text(params.get("plan_id"))
+            divergence_id = _controlled_text(params.get("divergence_id"))
+            if (
+                plan_id is None
+                or divergence_id is None
+                or provider_booking_id is None
+                or center_id is None
+                or slot is None
+            ):
+                return None
+        elif provider_request_id is None or center_id is None or slot is None:
             return None
-        return f"the appointment at center {center_id} is booked for {confirmed_slot}"
+        return f"the appointment at center {center_id} is booked for {slot}"
 
     if rule == RULE_APPOINTMENT_CANCELLED:
-        provider_booking_id = _first_controlled_text(
-            params, "provider_booking_id", "booking_id", "resource_id"
+        lineage_identity = _first_controlled_text(
+            params,
+            "provider_booking_id",
+            "provider_request_id",
+            "logical_action_id",
         )
-        if center_id is None or provider_booking_id is None:
+        if lineage_identity is None:
             return None
-        return f"booking {provider_booking_id} at center {center_id} is cancelled"
+        center_id = _controlled_text(params.get("center_id"))
+        slot = _controlled_text(params.get("confirmed_slot") or params.get("slot"))
+        if slot is not None and center_id is not None:
+            return f"the appointment for {slot} at center {center_id} is cancelled"
+        if slot is not None:
+            return f"the appointment for {slot} is cancelled"
+        if center_id is not None:
+            return f"the appointment at center {center_id} is cancelled"
+        return "the appointment is cancelled"
 
     if rule == RULE_SLOT_AVAILABLE:
         slot = _first_controlled_text(params, "slot", "requested_slot")
-        if center_id is None or slot is None:
-            return None
-        return f"the slot {slot} at center {center_id} is available"
+        center_id = _controlled_text(params.get("center_id"))
+        if slot is not None and center_id is not None:
+            return f"the {slot} slot at center {center_id} is available"
+        if slot is not None:
+            return f"the {slot} slot is available"
+        if center_id is not None:
+            return f"a slot at center {center_id} is available"
+        return "a slot is available"
 
     if rule == RULE_REQUEST_RECEIVED:
-        provider_request_id = _first_controlled_text(
-            params, "provider_request_id", "request_id"
-        )
-        requested_slot = _first_controlled_text(params, "requested_slot", "slot")
-        if center_id is None or provider_request_id is None or requested_slot is None:
-            return None
-        return (
-            f"the appointment request for {requested_slot} at center {center_id} "
-            f"was received as request {provider_request_id}"
-        )
+        return "the service received the request"
 
     return None
 
