@@ -799,9 +799,25 @@ class Truthlock:
 
                 resolved_claims.append(claim)
 
+        if canonical_correction:
+            for cl in resolved_claims:
+                canonical_claim = session_state.claims.get(cl.claim_id)
+                if canonical_claim is None or canonical_claim != cl:
+                    return TruthDecision(
+                        status=TruthDecisionStatus.BLOCK,
+                        speech_id=speech_id,
+                        reason=(
+                            f"Correction claim '{cl.claim_id}' does not exactly match the "
+                            "authoritative reducer state"
+                        ),
+                        max_certainty=ClaimCertainty.UNCERTAIN,
+                        policy_id=pol_ver,
+                        through_sequence=resolved_pinned_seq,
+                    )
+
         # --- 4. Review Blocker 1: Validate supporting evidence in pinned snapshot ---
         for cl in resolved_claims:
-            if canonical_correction:
+            if canonical_correction and cl.state != ClaimState.CONFIRMED:
                 continue
             if cl.state == ClaimState.CONFIRMED or is_factual_consequential:
                 # Every supporting_evidence_id required by the claim must exist in evidence snapshot
@@ -823,6 +839,20 @@ class Truthlock:
 
                 for eid in cl.supporting_evidence_ids:
                     ev = evidence_map[eid]
+                    if canonical_correction:
+                        canonical_evidence = session_state.evidence.get(eid)
+                        if canonical_evidence is None or canonical_evidence != ev:
+                            return TruthDecision(
+                                status=TruthDecisionStatus.BLOCK,
+                                speech_id=speech_id,
+                                reason=(
+                                    f"Correction evidence '{eid}' does not exactly match the "
+                                    "authoritative reducer state"
+                                ),
+                                max_certainty=ClaimCertainty.UNCERTAIN,
+                                policy_id=pol_ver,
+                                through_sequence=resolved_pinned_seq,
+                            )
                     if ev.expires_at is None:
                         continue
                     if evaluation_time is None:

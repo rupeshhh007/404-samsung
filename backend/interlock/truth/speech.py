@@ -9,7 +9,8 @@ consumes that canonical obligation and constructs a new, sequence-pinned
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 from pydantic import Field
 
@@ -21,12 +22,17 @@ from interlock.domain.enums import (
 )
 from interlock.domain.models import ClaimRecord, DomainBaseModel, SessionState, SpeechAct
 from interlock.runtime.commands import RequestSpeechCorrection
+from interlock.truth.claims import (
+    RULE_APPOINTMENT_BOOKED,
+    RULE_APPOINTMENT_CANCELLED,
+    RULE_REQUEST_RECEIVED,
+    RULE_SLOT_AVAILABLE,
+    _match_slot,
+    normalize_rule_name,
+)
 
 
 _CORRECTION_STATE_TEXT = {
-    ClaimState.CONFIRMED: (
-        "the proposition is now supported by current verified evidence"
-    ),
     ClaimState.CONTRADICTED: (
         "the previous statement is contradicted by current verified evidence"
     ),
@@ -34,6 +40,103 @@ _CORRECTION_STATE_TEXT = {
     ClaimState.STALE: "the previous statement is no longer supported by current evidence",
     ClaimState.SUPERSEDED: "the previous statement is no longer current",
 }
+
+
+def _claim_parameters(claim: ClaimRecord) -> Dict[str, Any]:
+    """Extract canonical fact fields with ClaimGraph's object-over-subject precedence."""
+
+    params: Dict[str, Any] = {}
+    for source in (claim.subject, claim.object):
+        if isinstance(source, dict):
+            params.update({key: value for key, value in source.items() if value is not None})
+    return params
+
+
+def _controlled_text(value: Any) -> Optional[str]:
+    """Return one bounded scalar value suitable for a controlled correction template."""
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 256 or any(character in text for character in "\r\n"):
+        return None
+    return text
+
+
+def _first_controlled_text(params: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = _controlled_text(params.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _render_confirmed_fact(claim: ClaimRecord) -> Optional[str]:
+    """Render only canonical rule facts whose typed identity is complete enough."""
+
+    rule = normalize_rule_name(claim.required_evidence_rule)
+    params = _claim_parameters(claim)
+    center_id = _first_controlled_text(params, "center_id", "center")
+
+    if rule == RULE_APPOINTMENT_BOOKED:
+        provider_request_id = _first_controlled_text(
+            params, "provider_request_id", "request_id"
+        )
+        provider_booking_id = _first_controlled_text(
+            params, "provider_booking_id", "booking_id", "resource_id"
+        )
+        requested_slot = _controlled_text(params.get("requested_slot"))
+        confirmed_slot = _controlled_text(params.get("confirmed_slot"))
+        if (
+            center_id is None
+            or provider_request_id is None
+            or provider_booking_id is None
+            or requested_slot is None
+            or confirmed_slot is None
+            or not _match_slot(params.get("requested_slot"), params.get("confirmed_slot"))
+        ):
+            return None
+        return f"the appointment at center {center_id} is booked for {confirmed_slot}"
+
+    if rule == RULE_APPOINTMENT_CANCELLED:
+        provider_booking_id = _first_controlled_text(
+            params, "provider_booking_id", "booking_id", "resource_id"
+        )
+        if center_id is None or provider_booking_id is None:
+            return None
+        return f"booking {provider_booking_id} at center {center_id} is cancelled"
+
+    if rule == RULE_SLOT_AVAILABLE:
+        slot = _first_controlled_text(params, "slot", "requested_slot")
+        if center_id is None or slot is None:
+            return None
+        return f"the slot {slot} at center {center_id} is available"
+
+    if rule == RULE_REQUEST_RECEIVED:
+        provider_request_id = _first_controlled_text(
+            params, "provider_request_id", "request_id"
+        )
+        requested_slot = _first_controlled_text(params, "requested_slot", "slot")
+        if center_id is None or provider_request_id is None or requested_slot is None:
+            return None
+        return (
+            f"the appointment request for {requested_slot} at center {center_id} "
+            f"was received as request {provider_request_id}"
+        )
+
+    return None
+
+
+def _render_current_state(claim: ClaimRecord) -> Optional[str]:
+    try:
+        claim_state = ClaimState(claim.state)
+    except ValueError:
+        return None
+    if claim_state == ClaimState.CONFIRMED:
+        return _render_confirmed_fact(claim)
+    return _CORRECTION_STATE_TEXT.get(claim_state)
 
 
 class CorrectionProposal(DomainBaseModel):
@@ -119,13 +222,11 @@ def _resolve_context(
     ):
         return None
 
-    try:
-        current_claim_state = ClaimState(current_claim.state)
-    except ValueError:
-        return None
-    current_state_text = _CORRECTION_STATE_TEXT.get(current_claim_state)
+    current_state_text = _render_current_state(current_claim)
     if current_state_text is None:
         return None
+
+    current_claim_state = ClaimState(current_claim.state)
 
     evidence_ids = tuple(current_claim.supporting_evidence_ids)
     if (
@@ -251,7 +352,7 @@ def validate_correction_proposal(
         "previous_statement": context.prior_speech.rendered_text,
         "current_state": context.current_state_text,
     }:
-        return "Correction wording is not derived from canonical speech and claim state"
+        return "Correction wording is not derived from canonical speech and current claim fact"
     if any(
         value is not None
         for value in (
