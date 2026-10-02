@@ -2262,21 +2262,29 @@ def _handle_claim_state_changed(
         )
 
     claim = state.claims[cid]
+    current_state = ClaimState(claim.state)
     target_state = ClaimState(env.payload["to_state"])
 
-    # Enforce optional from_state guard
-    if "from_state" in env.payload and claim.state.value != env.payload["from_state"]:
-        return (
-            state,
-            [
-                RecordProtocolViolation(
-                    session_id=state.session_id,
-                    boundary="reducer",
-                    code="INVALID_CLAIM_TRANSITION",
-                    digest=f"Claim '{cid}' from_state mismatch: actual {claim.state.value} != expected {env.payload['from_state']}",
-                )
-            ],
-        )
+    # DomainBaseModel(use_enum_values=True) may materialize enum fields as their
+    # string values. Normalize once so guards and transition-table lookups are
+    # safe for both enum and string representations.
+    if "from_state" in env.payload:
+        expected_from_state = ClaimState(env.payload["from_state"])
+        if current_state != expected_from_state:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_CLAIM_TRANSITION",
+                        digest=(
+                            f"Claim '{cid}' from_state mismatch: actual {current_state.value} "
+                            f"!= expected {expected_from_state.value}"
+                        ),
+                    )
+                ],
+            )
 
     # Enforce STATE_MACHINES.md transition table for Claim
     legal_claim_transitions = {
@@ -2307,7 +2315,7 @@ def _handle_claim_state_changed(
         ClaimState.SUPERSEDED: set(),
     }
 
-    if target_state not in legal_claim_transitions.get(claim.state, set()):
+    if target_state not in legal_claim_transitions.get(current_state, set()):
         return (
             state,
             [
