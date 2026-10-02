@@ -43,14 +43,15 @@ Payload fields listed are required unless marked `?`.
 | `WorldEffectObserved` | result interpreter → reducer | `effect: EffectRecord` | require an existing matching operation/logical action; insert a detached immutable observation by `effect_id`; identical IDs are idempotent and conflicting IDs are protocol violations. Distinct IDs for one physical effect or distinct physical effects for one logical action remain in the ledger; authoritative conflict schedules targeted `VerifyOutcome`. A confirmed late observation can advance the operation effect dimension without reactivating its lifecycle. A `COMPENSATED` observation must link to an existing committed observation of the same physical effect. Current-world certainty is derived from all observations, never from arrival order. |
 | `EvidenceRecorded` | adapters/reducer → reducer | `evidence` | insert immutable; conflicting ID is violation |
 | `ClaimProposed` | claim engine → reducer | `claim` | evaluate evidence rule |
-| `ClaimStateChanged` | claim engine → reducer | `claim_id, from, to, evidence_ids, reason` | transition per machine; evaluate queued speech |
+| `ClaimStateChanged` | claim engine → reducer | `claim_id, from, to, evidence_ids, reason` | transition per machine; advances updated_by_event_id; evaluates dependent speech acts |
 | `SpeechActProposed` | output planner → reducer | `speech_act` | command `ValidateSpeech` |
-| `SpeechActApproved` | TRUTHLOCK → reducer | `speech_id, rendered_text, policy_id` | queue output |
+| `SpeechActApproved` | TRUTHLOCK → reducer | `speech_id, rendered_text, policy_id, through_sequence?, claim_versions` | validate sequence pin & exact claim versions; stale retries `ValidateSpeech`; valid approval sets APPROVED, persists proof, commands `QueueOutput` |
 | `SpeechActBlocked` | TRUTHLOCK → reducer | `speech_id, reason, max_certainty` | record block; optionally propose safe wording |
-| `SpeechQueued` | output dispatcher → reducer | `speech_id` | APPROVED and claim versions still current; set QUEUED |
+| `SpeechQueued` | output dispatcher → reducer | `speech_id` | check claim versions current against state; if stale set CANCELLED; if current set QUEUED, command `EmitOutput` |
 | `SpeechEmissionStarted` | output adapter → reducer | `speech_id` | mark emitting |
-| `SpeechEmissionFinished` | output adapter → reducer | `speech_id, heard` | mark emitted; if later contradicted require correction |
-| `SpeechCancellationRequested` | reducer → reducer | `speech_id` | command stop; does not cancel operations |
+| `SpeechEmissionFinished` | output adapter → reducer | `speech_id, heard` | persist heard; if heard=false and cancellation_pending set CANCELLED; if heard=true and correction_pending set CORRECTION_REQUIRED and command `RequestSpeechCorrection`; else set EMITTED |
+| `SpeechEmissionFailed` | output adapter → reducer | `speech_id, error_code, heard, retryable?` | adapter failure fact; if heard=false set CANCELLED; if heard=true and correction_pending set CORRECTION_REQUIRED; else if heard=true mark EMITTED; no auto retry |
+| `SpeechCancellationRequested` | reducer → reducer | `speech_id` | command CancelSpeech; if QUEUED or EMITTING sets cancellation_pending=True awaiting adapter terminal fact; does not cancel operations |
 | `DivergenceDetected` | reconciliation detector → reducer | `case` | store open; command build plan/surface |
 | `ReconciliationPlanned` | planner → reducer | `plan` | capability hash and intent revision must match |
 | `ReconciliationAuthorized` | user/policy → reducer | `plan_id, evidence_id` | allow run |

@@ -126,6 +126,14 @@ class CancelSpeech(BaseCommand):
     speech_id: str = Field(..., min_length=1)
 
 
+class RequestSpeechCorrection(BaseCommand):
+    """Command emitted when an emitted speech act requires correction."""
+
+    command_type: Literal["RequestSpeechCorrection"] = "RequestSpeechCorrection"
+    speech_id: str = Field(..., min_length=1)
+    triggering_claim_id: str = Field(..., min_length=1)
+
+
 Command = Annotated[
     Union[
         InterpretInput,
@@ -142,6 +150,7 @@ Command = Annotated[
         RecordProtocolViolation,
         RequestClarification,
         CancelSpeech,
+        RequestSpeechCorrection,
     ],
     Field(discriminator="command_type"),
 ]

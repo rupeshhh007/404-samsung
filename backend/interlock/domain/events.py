@@ -243,6 +243,8 @@ class SpeechActApproved(DomainBaseModel):
     speech_id: str = Field(..., min_length=1)
     rendered_text: str = Field(..., min_length=1)
     policy_id: str = Field(..., min_length=1)
+    through_sequence: Optional[int] = Field(default=None, ge=1)
+    claim_versions: Dict[str, str] = Field(default_factory=dict)
 
 
 class SpeechActBlocked(DomainBaseModel):
@@ -270,6 +272,15 @@ class SpeechEmissionFinished(DomainBaseModel):
 
     speech_id: str = Field(..., min_length=1)
     heard: bool
+
+
+class SpeechEmissionFailed(DomainBaseModel):
+    """Event: SpeechEmissionFailed. Ingress: output adapter -> reducer."""
+
+    speech_id: str = Field(..., min_length=1)
+    error_code: str = Field(..., min_length=1)
+    heard: bool
+    retryable: bool = False
 
 
 class SpeechCancellationRequested(DomainBaseModel):
@@ -372,6 +383,7 @@ EVENT_PAYLOAD_REGISTRY: Dict[str, type[DomainBaseModel]] = {
     "SpeechQueued": SpeechQueued,
     "SpeechEmissionStarted": SpeechEmissionStarted,
     "SpeechEmissionFinished": SpeechEmissionFinished,
+    "SpeechEmissionFailed": SpeechEmissionFailed,
     "SpeechCancellationRequested": SpeechCancellationRequested,
     "DivergenceDetected": DivergenceDetected,
     "ReconciliationPlanned": ReconciliationPlanned,

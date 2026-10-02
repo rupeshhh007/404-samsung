@@ -63,6 +63,7 @@ from interlock.runtime.commands import (
     QueueOutput,
     RecordProtocolViolation,
     RequestClarification,
+    RequestSpeechCorrection,
     RequestToolCancellation,
     ValidateSpeech,
     VerifyOutcome,
@@ -2261,21 +2262,29 @@ def _handle_claim_state_changed(
         )
 
     claim = state.claims[cid]
+    current_state = ClaimState(claim.state)
     target_state = ClaimState(env.payload["to_state"])
 
-    # Enforce optional from_state guard
-    if "from_state" in env.payload and claim.state.value != env.payload["from_state"]:
-        return (
-            state,
-            [
-                RecordProtocolViolation(
-                    session_id=state.session_id,
-                    boundary="reducer",
-                    code="INVALID_CLAIM_TRANSITION",
-                    digest=f"Claim '{cid}' from_state mismatch: actual {claim.state.value} != expected {env.payload['from_state']}",
-                )
-            ],
-        )
+    # DomainBaseModel(use_enum_values=True) may materialize enum fields as their
+    # string values. Normalize once so guards and transition-table lookups are
+    # safe for both enum and string representations.
+    if "from_state" in env.payload:
+        expected_from_state = ClaimState(env.payload["from_state"])
+        if current_state != expected_from_state:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_CLAIM_TRANSITION",
+                        digest=(
+                            f"Claim '{cid}' from_state mismatch: actual {current_state.value} "
+                            f"!= expected {expected_from_state.value}"
+                        ),
+                    )
+                ],
+            )
 
     # Enforce STATE_MACHINES.md transition table for Claim
     legal_claim_transitions = {
@@ -2306,7 +2315,7 @@ def _handle_claim_state_changed(
         ClaimState.SUPERSEDED: set(),
     }
 
-    if target_state not in legal_claim_transitions.get(claim.state, set()):
+    if target_state not in legal_claim_transitions.get(current_state, set()):
         return (
             state,
             [
@@ -2326,20 +2335,49 @@ def _handle_claim_state_changed(
             "supporting_evidence_ids": env.payload.get(
                 "evidence_ids", claim.supporting_evidence_ids
             ),
+            "updated_by_event_id": env.event_id,
         }
     )
+
+    # Inspect ONLY speech acts whose approved_claim_versions contain this claim
+    new_speech = dict(state.speech)
+    cmds: List[Command] = []
+    for sp_id, speech in list(new_speech.items()):
+        if cid in speech.approved_claim_versions:
+            if speech.state == SpeechState.APPROVED:
+                new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.CANCELLED})
+                cmds.append(CancelSpeech(session_id=state.session_id, speech_id=sp_id))
+            elif speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
+                new_speech[sp_id] = speech.model_copy(
+                    update={"cancellation_pending": True, "correction_pending": True}
+                )
+                cmds.append(CancelSpeech(session_id=state.session_id, speech_id=sp_id))
+            elif speech.state == SpeechState.EMITTED:
+                if speech.heard is True:
+                    new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.CORRECTION_REQUIRED})
+                    cmds.append(
+                        RequestSpeechCorrection(
+                            session_id=state.session_id,
+                            speech_id=sp_id,
+                            triggering_claim_id=cid,
+                        )
+                    )
+                # If heard is False or None: preserve EMITTED history, do not request spoken correction
+            elif speech.state == SpeechState.CORRECTION_REQUIRED:
+                # remain as-is; do not generate duplicate correction requests.
+                pass
+
     new_state = state.model_copy(
         update={
             "claims": new_claims,
+            "speech": new_speech,
             "last_sequence": env.sequence,
             "metrics": state.metrics.model_copy(
                 update={"through_sequence": env.sequence}
             ),
         }
     )
-    cmds: List[Command] = [
-        PublishProjection(session_id=state.session_id, sequence=env.sequence)
-    ]
+    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 
@@ -2352,6 +2390,49 @@ def _handle_speech_act_proposed(
         if isinstance(sp_data, SpeechAct)
         else SpeechAct.model_validate(sp_data)
     )
+
+    if speech.speech_id in state.speech:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="DUPLICATE_SPEECH_ID",
+                    digest=f"SpeechAct with ID '{speech.speech_id}' already exists in session state",
+                )
+            ],
+        )
+
+    if (
+        speech.state != SpeechState.PROPOSED
+        or speech.rendered_text is not None
+        or speech.approved_policy_id is not None
+        or speech.approved_through_sequence is not None
+        or speech.approved_claim_versions != {}
+        or speech.heard is not None
+        or speech.cancellation_pending is not False
+        or speech.correction_pending is not False
+    ):
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_SPEECH_PROPOSAL",
+                    digest=(
+                        f"SpeechAct '{speech.speech_id}' cannot pre-populate reducer-owned lifecycle fields: "
+                        f"state={speech.state}, rendered_text={speech.rendered_text}, "
+                        f"policy={speech.approved_policy_id}, through_seq={speech.approved_through_sequence}, "
+                        f"claim_versions={speech.approved_claim_versions}, heard={speech.heard}, "
+                        f"cancellation_pending={speech.cancellation_pending}, "
+                        f"correction_pending={speech.correction_pending}"
+                    ),
+                )
+            ],
+        )
+
     new_speech = {**state.speech, speech.speech_id: speech}
     new_state = state.model_copy(
         update={
@@ -2399,8 +2480,110 @@ def _handle_speech_act_approved(
             ],
         )
 
+    through_sequence = env.payload.get("through_sequence")
+    claim_versions = env.payload.get("claim_versions", {})
+
+    # Future pin check
+    if through_sequence is not None and through_sequence > state.last_sequence:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="FUTURE_SPEECH_PIN",
+                    digest=f"Speech approval through_sequence {through_sequence} exceeds current sequence {state.last_sequence}",
+                )
+            ],
+        )
+
+    # Missing pin check
+    if through_sequence is None:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="MISSING_SPEECH_PIN",
+                    digest=f"Speech approval for '{sp_id}' is missing required through_sequence pin",
+                )
+            ],
+        )
+
+    # Exact claim-version key coverage check
+    expected_claim_ids = set(speech.claim_ids)
+    provided_claim_ids = set(claim_versions.keys())
+    if expected_claim_ids != provided_claim_ids:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_SPEECH_APPROVAL_PROOF",
+                    digest=(
+                        f"Speech '{sp_id}' claim_versions keys {provided_claim_ids} "
+                        f"do not match expected claim_ids {expected_claim_ids}"
+                    ),
+                )
+            ],
+        )
+
+    # Check for blank versions in claim_versions
+    for cid, ver in claim_versions.items():
+        if not ver or not isinstance(ver, str):
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_SPEECH_APPROVAL_PROOF",
+                        digest=f"Speech '{sp_id}' has blank or invalid version for claim '{cid}'",
+                    )
+                ],
+            )
+
+    # Staleness check:
+    # 1. sequence pin staleness
+    is_stale = through_sequence < state.last_sequence
+
+    # 2. claim version staleness
+    if not is_stale:
+        for cid, ver in claim_versions.items():
+            if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
+                is_stale = True
+                break
+
+    if is_stale:
+        # Normal race condition: stale snapshot evaluated by TRUTHLOCK.
+        # Retry: leave speech PROPOSED, emit ValidateSpeech again, advance sequence, PublishProjection.
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            ValidateSpeech(session_id=state.session_id, speech_id=sp_id),
+            PublishProjection(session_id=state.session_id, sequence=env.sequence),
+        ]
+        return new_state, cmds
+
+    # Valid approval: persist rendered_text and proof, transition to APPROVED, emit QueueOutput
     new_speech = dict(state.speech)
-    new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.APPROVED})
+    new_speech[sp_id] = speech.model_copy(
+        update={
+            "state": SpeechState.APPROVED,
+            "rendered_text": env.payload["rendered_text"],
+            "approved_policy_id": env.payload["policy_id"],
+            "approved_through_sequence": through_sequence,
+            "approved_claim_versions": claim_versions,
+        }
+    )
     new_state = state.model_copy(
         update={
             "speech": new_speech,
@@ -2410,7 +2593,7 @@ def _handle_speech_act_approved(
             ),
         }
     )
-    cmds: List[Command] = [
+    cmds = [
         QueueOutput(
             session_id=state.session_id,
             speech_id=sp_id,
@@ -2486,6 +2669,34 @@ def _handle_speech_queued(
             ],
         )
     speech = state.speech[sp_id]
+    if speech.state == SpeechState.QUEUED:
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
+    if speech.state == SpeechState.CANCELLED:
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
     if speech.state != SpeechState.APPROVED:
         return (
             state,
@@ -2499,7 +2710,39 @@ def _handle_speech_queued(
             ],
         )
 
+    # Pre-queue currency check:
+    # 1. cancellation_pending flag
+    # 2. For each approved_claim_versions entry: current ClaimRecord must exist and updated_by_event_id must exactly match.
+    is_stale = speech.cancellation_pending
+    if not is_stale:
+        for cid, ver in speech.approved_claim_versions.items():
+            if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
+                is_stale = True
+                break
+
     new_speech = dict(state.speech)
+    if is_stale:
+        new_speech[sp_id] = speech.model_copy(
+            update={
+                "state": SpeechState.CANCELLED,
+                "cancellation_pending": False,
+                "correction_pending": False,
+            }
+        )
+        new_state = state.model_copy(
+            update={
+                "speech": new_speech,
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
     new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.QUEUED})
     new_state = state.model_copy(
         update={
@@ -2534,6 +2777,20 @@ def _handle_speech_emission_started(
             ],
         )
     speech = state.speech[sp_id]
+    if speech.state == SpeechState.EMITTING:
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
     if speech.state != SpeechState.QUEUED:
         return (
             state,
@@ -2581,7 +2838,43 @@ def _handle_speech_emission_finished(
             ],
         )
     speech = state.speech[sp_id]
-    if speech.state != SpeechState.EMITTING:
+    heard = bool(env.payload.get("heard", False))
+
+    if speech.state in (
+        SpeechState.EMITTED,
+        SpeechState.CORRECTION_REQUIRED,
+        SpeechState.CANCELLED,
+    ):
+        if speech.heard is not None and heard == speech.heard:
+            new_state = state.model_copy(
+                update={
+                    "last_sequence": env.sequence,
+                    "metrics": state.metrics.model_copy(
+                        update={"through_sequence": env.sequence}
+                    ),
+                }
+            )
+            cmds: List[Command] = [
+                PublishProjection(session_id=state.session_id, sequence=env.sequence)
+            ]
+            return new_state, cmds
+
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="CONTRADICTORY_SPEECH_TERMINAL",
+                    digest=(
+                        f"Incoming SpeechEmissionFinished heard={heard} contradicts established speech "
+                        f"'{sp_id}' in state {speech.state} (heard={speech.heard})"
+                    ),
+                )
+            ],
+        )
+
+    if speech.state not in (SpeechState.QUEUED, SpeechState.EMITTING):
         return (
             state,
             [
@@ -2589,13 +2882,47 @@ def _handle_speech_emission_finished(
                     session_id=state.session_id,
                     boundary="reducer",
                     code="INVALID_SPEECH_TRANSITION",
-                    digest=f"Speech '{sp_id}' is in state '{speech.state}', expected EMITTING",
+                    digest=f"Speech '{sp_id}' is in state '{speech.state}', expected EMITTING or QUEUED",
                 )
             ],
         )
 
+    cmds: List[Command] = []
+
+    if not heard:
+        if speech.cancellation_pending:
+            target_state = SpeechState.CANCELLED
+        else:
+            target_state = SpeechState.EMITTED
+    else:  # heard is True
+        if speech.correction_pending:
+            target_state = SpeechState.CORRECTION_REQUIRED
+            triggering_cid = ""
+            for cid, ver in speech.approved_claim_versions.items():
+                if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
+                    triggering_cid = cid
+                    break
+            if not triggering_cid and speech.claim_ids:
+                triggering_cid = speech.claim_ids[0]
+            cmds.append(
+                RequestSpeechCorrection(
+                    session_id=state.session_id,
+                    speech_id=sp_id,
+                    triggering_claim_id=triggering_cid,
+                )
+            )
+        else:
+            target_state = SpeechState.EMITTED
+
     new_speech = dict(state.speech)
-    new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.EMITTED})
+    new_speech[sp_id] = speech.model_copy(
+        update={
+            "state": target_state,
+            "heard": heard,
+            "cancellation_pending": False,
+            "correction_pending": False,
+        }
+    )
     new_state = state.model_copy(
         update={
             "speech": new_speech,
@@ -2605,9 +2932,7 @@ def _handle_speech_emission_finished(
             ),
         }
     )
-    cmds: List[Command] = [
-        PublishProjection(session_id=state.session_id, sequence=env.sequence)
-    ]
+    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 
@@ -2632,6 +2957,7 @@ def _handle_speech_cancellation_requested(
         SpeechState.EMITTED,
         SpeechState.CANCELLED,
         SpeechState.BLOCKED,
+        SpeechState.CORRECTION_REQUIRED,
     ):
         return (
             state,
@@ -2644,6 +2970,24 @@ def _handle_speech_cancellation_requested(
                 )
             ],
         )
+
+    if speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
+        new_speech = dict(state.speech)
+        new_speech[sp_id] = speech.model_copy(update={"cancellation_pending": True})
+        new_state = state.model_copy(
+            update={
+                "speech": new_speech,
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            CancelSpeech(session_id=state.session_id, speech_id=sp_id),
+            PublishProjection(session_id=state.session_id, sequence=env.sequence),
+        ]
+        return new_state, cmds
 
     new_speech = dict(state.speech)
     new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.CANCELLED})
@@ -2660,6 +3004,158 @@ def _handle_speech_cancellation_requested(
         CancelSpeech(session_id=state.session_id, speech_id=sp_id),
         PublishProjection(session_id=state.session_id, sequence=env.sequence),
     ]
+    return new_state, cmds
+
+
+def _handle_speech_emission_failed(
+    state: SessionState, env: EventEnvelope
+) -> Tuple[SessionState, List[Command]]:
+    sp_id = env.payload["speech_id"]
+    if sp_id not in state.speech:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="UNKNOWN_SPEECH",
+                    digest=f"Speech '{sp_id}' not found",
+                )
+            ],
+        )
+    speech = state.speech[sp_id]
+    heard = bool(env.payload.get("heard", False))
+
+    if speech.state in (
+        SpeechState.EMITTED,
+        SpeechState.CORRECTION_REQUIRED,
+        SpeechState.CANCELLED,
+    ):
+        if speech.heard is not None and heard == speech.heard:
+            new_state = state.model_copy(
+                update={
+                    "last_sequence": env.sequence,
+                    "metrics": state.metrics.model_copy(
+                        update={"through_sequence": env.sequence}
+                    ),
+                }
+            )
+            cmds: List[Command] = [
+                PublishProjection(session_id=state.session_id, sequence=env.sequence)
+            ]
+            return new_state, cmds
+
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="CONTRADICTORY_SPEECH_TERMINAL",
+                    digest=(
+                        f"Incoming SpeechEmissionFailed heard={heard} contradicts established speech "
+                        f"'{sp_id}' in state {speech.state} (heard={speech.heard})"
+                    ),
+                )
+            ],
+        )
+
+    cmds: List[Command] = []
+
+    if speech.state == SpeechState.APPROVED:
+        if heard:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_SPEECH_TRANSITION",
+                        digest=f"Speech '{sp_id}' in state APPROVED cannot fail with heard=True",
+                    )
+                ],
+            )
+        target_state = SpeechState.CANCELLED
+        new_speech = dict(state.speech)
+        new_speech[sp_id] = speech.model_copy(
+            update={
+                "state": target_state,
+                "heard": False,
+                "cancellation_pending": False,
+                "correction_pending": False,
+            }
+        )
+    elif speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
+        if not heard:
+            target_state = SpeechState.CANCELLED
+            new_speech = dict(state.speech)
+            new_speech[sp_id] = speech.model_copy(
+                update={
+                    "state": target_state,
+                    "heard": False,
+                    "cancellation_pending": False,
+                    "correction_pending": False,
+                }
+            )
+        elif heard and not speech.correction_pending:
+            target_state = SpeechState.EMITTED
+            new_speech = dict(state.speech)
+            new_speech[sp_id] = speech.model_copy(
+                update={
+                    "state": target_state,
+                    "heard": True,
+                    "cancellation_pending": False,
+                    "correction_pending": False,
+                }
+            )
+        else:  # heard and speech.correction_pending
+            target_state = SpeechState.CORRECTION_REQUIRED
+            triggering_cid = ""
+            for cid, ver in speech.approved_claim_versions.items():
+                if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
+                    triggering_cid = cid
+                    break
+            if not triggering_cid and speech.claim_ids:
+                triggering_cid = speech.claim_ids[0]
+            cmds.append(
+                RequestSpeechCorrection(
+                    session_id=state.session_id,
+                    speech_id=sp_id,
+                    triggering_claim_id=triggering_cid,
+                )
+            )
+            new_speech = dict(state.speech)
+            new_speech[sp_id] = speech.model_copy(
+                update={
+                    "state": target_state,
+                    "heard": True,
+                    "cancellation_pending": False,
+                    "correction_pending": False,
+                }
+            )
+    else:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_SPEECH_TRANSITION",
+                    digest=f"Cannot handle SpeechEmissionFailed for speech '{sp_id}' in state '{speech.state}'",
+                )
+            ],
+        )
+
+    new_state = state.model_copy(
+        update={
+            "speech": new_speech,
+            "last_sequence": env.sequence,
+            "metrics": state.metrics.model_copy(
+                update={"through_sequence": env.sequence}
+            ),
+        }
+    )
+    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 
@@ -3060,6 +3556,7 @@ _HANDLERS = {
     "SpeechQueued": _handle_speech_queued,
     "SpeechEmissionStarted": _handle_speech_emission_started,
     "SpeechEmissionFinished": _handle_speech_emission_finished,
+    "SpeechEmissionFailed": _handle_speech_emission_failed,
     "SpeechCancellationRequested": _handle_speech_cancellation_requested,
     "DivergenceDetected": _handle_divergence_detected,
     "ReconciliationPlanned": _handle_reconciliation_planned,
