@@ -56,6 +56,11 @@ from interlock.truth.claims import (
     _match_slot,
     normalize_rule_name,
 )
+from interlock.truth.speech import (
+    CorrectionProposal,
+    validate_correction_proposal,
+    validate_correction_speech_act,
+)
 
 
 class TruthDecisionStatus(str, Enum):
@@ -463,10 +468,17 @@ class Truthlock:
         auth_seq = authoritative_sequence
         pol_ver = policy_version or self.policy_id
         evaluation_time = as_of
+        correction_proposal: Optional[CorrectionProposal] = None
+        session_state = kwargs.get("state") or kwargs.get("session_state")
 
         # If request object/dict passed as first positional arg
         if request is not None:
-            if isinstance(request, SpeechAct):
+            if isinstance(request, CorrectionProposal):
+                correction_proposal = request
+                act = request.speech_act
+                if pinned_seq is None:
+                    pinned_seq = request.through_sequence
+            elif isinstance(request, SpeechAct):
                 act = request
             elif hasattr(request, "speech_act") and hasattr(request, "claims"):
                 act = getattr(request, "speech_act")
@@ -511,7 +523,6 @@ class Truthlock:
                     evidence_input = arg
 
         # Parse kwargs
-        session_state = kwargs.get("state") or kwargs.get("session_state")
         if session_state is not None:
             if auth_seq is None and hasattr(session_state, "last_sequence"):
                 auth_seq = session_state.last_sequence
@@ -679,20 +690,23 @@ class Truthlock:
                 through_sequence=resolved_pinned_seq,
             )
 
-        # Prior emitted speech and correction lifecycle belong to TRU-004. The
-        # current request cannot prove either correction operand canonically.
+        canonical_correction = False
         if template_key == "tmpl_correction":
-            return TruthDecision(
-                status=TruthDecisionStatus.BLOCK,
-                speech_id=speech_id,
-                reason=(
-                    "Template 'tmpl_correction' requires TRU-004 linkage to the exact "
-                    "emitted speech and current verified truth"
-                ),
-                max_certainty=ClaimCertainty.UNCERTAIN,
-                policy_id=pol_ver,
-                through_sequence=resolved_pinned_seq,
+            correction_error = (
+                validate_correction_speech_act(act, session_state)
+                if correction_proposal is None
+                else validate_correction_proposal(correction_proposal, session_state)
             )
+            if correction_error is not None:
+                return TruthDecision(
+                    status=TruthDecisionStatus.BLOCK,
+                    speech_id=speech_id,
+                    reason=correction_error,
+                    max_certainty=ClaimCertainty.UNCERTAIN,
+                    policy_id=pol_ver,
+                    through_sequence=resolved_pinned_seq,
+                )
+            canonical_correction = True
 
         # --- 3. Resolve exact claim versions & lifecycle states ---
         if not act.claim_ids:
@@ -721,7 +735,7 @@ class Truthlock:
                 claim = claims_map[cid]
 
                 # Fail-closed lifecycle checks per ClaimState
-                if claim.state == ClaimState.CONTRADICTED:
+                if claim.state == ClaimState.CONTRADICTED and not canonical_correction:
                     return TruthDecision(
                         status=TruthDecisionStatus.BLOCK,
                         speech_id=speech_id,
@@ -730,7 +744,7 @@ class Truthlock:
                         policy_id=pol_ver,
                         through_sequence=resolved_pinned_seq,
                     )
-                if claim.state == ClaimState.STALE:
+                if claim.state == ClaimState.STALE and not canonical_correction:
                     return TruthDecision(
                         status=TruthDecisionStatus.BLOCK,
                         speech_id=speech_id,
@@ -739,7 +753,7 @@ class Truthlock:
                         policy_id=pol_ver,
                         through_sequence=resolved_pinned_seq,
                     )
-                if claim.state == ClaimState.SUPERSEDED:
+                if claim.state == ClaimState.SUPERSEDED and not canonical_correction:
                     return TruthDecision(
                         status=TruthDecisionStatus.BLOCK,
                         speech_id=speech_id,
@@ -771,7 +785,7 @@ class Truthlock:
                             through_sequence=resolved_pinned_seq,
                             downgraded_speech_act=self._create_downgrade(act, ClaimCertainty.PROGRESS),
                         )
-                if claim.state == ClaimState.UNCERTAIN:
+                if claim.state == ClaimState.UNCERTAIN and not canonical_correction:
                     if act.requested_certainty != ClaimCertainty.UNCERTAIN or is_factual_consequential:
                         return TruthDecision(
                             status=TruthDecisionStatus.BLOCK,
@@ -787,6 +801,8 @@ class Truthlock:
 
         # --- 4. Review Blocker 1: Validate supporting evidence in pinned snapshot ---
         for cl in resolved_claims:
+            if canonical_correction:
+                continue
             if cl.state == ClaimState.CONFIRMED or is_factual_consequential:
                 # Every supporting_evidence_id required by the claim must exist in evidence snapshot
                 missing_eids = [
@@ -980,12 +996,24 @@ class Truthlock:
                         )
 
         # --- 6. Divergence Guard ---
-        div_decision = self._check_divergence_guard(act, resolved_claims, divergences_map, pol_ver, resolved_pinned_seq)
+        div_decision = (
+            None
+            if canonical_correction
+            else self._check_divergence_guard(
+                act,
+                resolved_claims,
+                divergences_map,
+                pol_ver,
+                resolved_pinned_seq,
+            )
+        )
         if div_decision is not None:
             return div_decision
 
         # --- 7. Compute minimum allowed certainty across all required claims (Invariant I6) ---
-        if not resolved_claims:
+        if canonical_correction:
+            effective_ceiling = ClaimCertainty.CONFIRMED
+        elif not resolved_claims:
             effective_ceiling = ClaimCertainty.PROGRESS if not is_factual_consequential else ClaimCertainty.UNCERTAIN
         else:
             supported_certainties: List[ClaimCertainty] = []
