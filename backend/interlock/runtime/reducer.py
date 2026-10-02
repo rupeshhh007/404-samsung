@@ -2382,6 +2382,49 @@ def _handle_speech_act_proposed(
         if isinstance(sp_data, SpeechAct)
         else SpeechAct.model_validate(sp_data)
     )
+
+    if speech.speech_id in state.speech:
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="DUPLICATE_SPEECH_ID",
+                    digest=f"SpeechAct with ID '{speech.speech_id}' already exists in session state",
+                )
+            ],
+        )
+
+    if (
+        speech.state != SpeechState.PROPOSED
+        or speech.rendered_text is not None
+        or speech.approved_policy_id is not None
+        or speech.approved_through_sequence is not None
+        or speech.approved_claim_versions != {}
+        or speech.heard is not None
+        or speech.cancellation_pending is not False
+        or speech.correction_pending is not False
+    ):
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="INVALID_SPEECH_PROPOSAL",
+                    digest=(
+                        f"SpeechAct '{speech.speech_id}' cannot pre-populate reducer-owned lifecycle fields: "
+                        f"state={speech.state}, rendered_text={speech.rendered_text}, "
+                        f"policy={speech.approved_policy_id}, through_seq={speech.approved_through_sequence}, "
+                        f"claim_versions={speech.approved_claim_versions}, heard={speech.heard}, "
+                        f"cancellation_pending={speech.cancellation_pending}, "
+                        f"correction_pending={speech.correction_pending}"
+                    ),
+                )
+            ],
+        )
+
     new_speech = {**state.speech, speech.speech_id: speech}
     new_state = state.model_copy(
         update={
@@ -2787,23 +2830,41 @@ def _handle_speech_emission_finished(
             ],
         )
     speech = state.speech[sp_id]
+    heard = bool(env.payload.get("heard", False))
+
     if speech.state in (
         SpeechState.EMITTED,
         SpeechState.CORRECTION_REQUIRED,
         SpeechState.CANCELLED,
     ):
-        new_state = state.model_copy(
-            update={
-                "last_sequence": env.sequence,
-                "metrics": state.metrics.model_copy(
-                    update={"through_sequence": env.sequence}
-                ),
-            }
+        if speech.heard is not None and heard == speech.heard:
+            new_state = state.model_copy(
+                update={
+                    "last_sequence": env.sequence,
+                    "metrics": state.metrics.model_copy(
+                        update={"through_sequence": env.sequence}
+                    ),
+                }
+            )
+            cmds: List[Command] = [
+                PublishProjection(session_id=state.session_id, sequence=env.sequence)
+            ]
+            return new_state, cmds
+
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="CONTRADICTORY_SPEECH_TERMINAL",
+                    digest=(
+                        f"Incoming SpeechEmissionFinished heard={heard} contradicts established speech "
+                        f"'{sp_id}' in state {speech.state} (heard={speech.heard})"
+                    ),
+                )
+            ],
         )
-        cmds: List[Command] = [
-            PublishProjection(session_id=state.session_id, sequence=env.sequence)
-        ]
-        return new_state, cmds
 
     if speech.state not in (SpeechState.QUEUED, SpeechState.EMITTING):
         return (
@@ -2818,7 +2879,6 @@ def _handle_speech_emission_finished(
             ],
         )
 
-    heard = bool(env.payload.get("heard", False))
     cmds: List[Command] = []
 
     if not heard:
@@ -2956,29 +3016,57 @@ def _handle_speech_emission_failed(
             ],
         )
     speech = state.speech[sp_id]
+    heard = bool(env.payload.get("heard", False))
 
     if speech.state in (
         SpeechState.EMITTED,
         SpeechState.CORRECTION_REQUIRED,
         SpeechState.CANCELLED,
     ):
-        new_state = state.model_copy(
-            update={
-                "last_sequence": env.sequence,
-                "metrics": state.metrics.model_copy(
-                    update={"through_sequence": env.sequence}
-                ),
-            }
-        )
-        cmds: List[Command] = [
-            PublishProjection(session_id=state.session_id, sequence=env.sequence)
-        ]
-        return new_state, cmds
+        if speech.heard is not None and heard == speech.heard:
+            new_state = state.model_copy(
+                update={
+                    "last_sequence": env.sequence,
+                    "metrics": state.metrics.model_copy(
+                        update={"through_sequence": env.sequence}
+                    ),
+                }
+            )
+            cmds: List[Command] = [
+                PublishProjection(session_id=state.session_id, sequence=env.sequence)
+            ]
+            return new_state, cmds
 
-    heard = bool(env.payload.get("heard", False))
+        return (
+            state,
+            [
+                RecordProtocolViolation(
+                    session_id=state.session_id,
+                    boundary="reducer",
+                    code="CONTRADICTORY_SPEECH_TERMINAL",
+                    digest=(
+                        f"Incoming SpeechEmissionFailed heard={heard} contradicts established speech "
+                        f"'{sp_id}' in state {speech.state} (heard={speech.heard})"
+                    ),
+                )
+            ],
+        )
+
     cmds: List[Command] = []
 
     if speech.state == SpeechState.APPROVED:
+        if heard:
+            return (
+                state,
+                [
+                    RecordProtocolViolation(
+                        session_id=state.session_id,
+                        boundary="reducer",
+                        code="INVALID_SPEECH_TRANSITION",
+                        digest=f"Speech '{sp_id}' in state APPROVED cannot fail with heard=True",
+                    )
+                ],
+            )
         target_state = SpeechState.CANCELLED
         new_speech = dict(state.speech)
         new_speech[sp_id] = speech.model_copy(
