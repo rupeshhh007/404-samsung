@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, Optional
 
 from pydantic import Field
@@ -165,6 +166,148 @@ class _CorrectionContext:
     current_state_text: str
 
 
+class _CorrectionObligationStatus(str, Enum):
+    NONE = "NONE"
+    LIVE = "LIVE"
+    SATISFIED_HEARD = "SATISFIED_HEARD"
+    DEAD_NON_HEARD = "DEAD_NON_HEARD"
+    MALFORMED = "MALFORMED"
+
+
+def _has_complete_approval_proof(speech: SpeechAct) -> bool:
+    return bool(
+        speech.rendered_text
+        and speech.approved_policy_id
+        and speech.approved_through_sequence is not None
+        and speech.approved_claim_versions
+        and set(speech.approved_claim_versions) == set(speech.claim_ids)
+    )
+
+
+def _has_any_approval_proof(speech: SpeechAct) -> bool:
+    return bool(
+        speech.rendered_text is not None
+        or speech.approved_policy_id is not None
+        or speech.approved_through_sequence is not None
+        or speech.approved_claim_versions
+    )
+
+
+def _classify_correction_child(child: SpeechAct) -> _CorrectionObligationStatus:
+    """Classify one historical attempt using reducer-owned lifecycle/heard facts."""
+
+    try:
+        child_state = SpeechState(child.state)
+    except ValueError:
+        return _CorrectionObligationStatus.MALFORMED
+
+    if child.correction_pending and not child.cancellation_pending:
+        return _CorrectionObligationStatus.MALFORMED
+
+    if child_state == SpeechState.PROPOSED:
+        if (
+            child.heard is not None
+            or _has_any_approval_proof(child)
+            or child.cancellation_pending
+            or child.correction_pending
+        ):
+            return _CorrectionObligationStatus.MALFORMED
+        return _CorrectionObligationStatus.LIVE
+
+    if child_state == SpeechState.APPROVED:
+        if (
+            child.heard is not None
+            or not _has_complete_approval_proof(child)
+            or child.cancellation_pending
+            or child.correction_pending
+        ):
+            return _CorrectionObligationStatus.MALFORMED
+        return _CorrectionObligationStatus.LIVE
+
+    if child_state in {SpeechState.QUEUED, SpeechState.EMITTING}:
+        if child.heard is not None or not _has_complete_approval_proof(child):
+            return _CorrectionObligationStatus.MALFORMED
+        return _CorrectionObligationStatus.LIVE
+
+    if child_state == SpeechState.BLOCKED:
+        if (
+            child.heard is not None
+            or _has_any_approval_proof(child)
+            or child.cancellation_pending
+            or child.correction_pending
+        ):
+            return _CorrectionObligationStatus.MALFORMED
+        return _CorrectionObligationStatus.DEAD_NON_HEARD
+
+    if child_state == SpeechState.CANCELLED:
+        if (
+            child.heard is True
+            or child.cancellation_pending
+            or child.correction_pending
+            or (
+                _has_any_approval_proof(child)
+                and not _has_complete_approval_proof(child)
+            )
+        ):
+            return _CorrectionObligationStatus.MALFORMED
+        return _CorrectionObligationStatus.DEAD_NON_HEARD
+
+    if child_state == SpeechState.EMITTED:
+        if (
+            child.heard is None
+            or not _has_complete_approval_proof(child)
+            or child.cancellation_pending
+            or child.correction_pending
+        ):
+            return _CorrectionObligationStatus.MALFORMED
+        if child.heard is True:
+            return _CorrectionObligationStatus.SATISFIED_HEARD
+        return _CorrectionObligationStatus.DEAD_NON_HEARD
+
+    if child_state == SpeechState.CORRECTION_REQUIRED:
+        if (
+            child.heard is not True
+            or not _has_complete_approval_proof(child)
+            or child.cancellation_pending
+            or child.correction_pending
+        ):
+            return _CorrectionObligationStatus.MALFORMED
+        return _CorrectionObligationStatus.SATISFIED_HEARD
+
+    return _CorrectionObligationStatus.MALFORMED
+
+
+def _correction_obligation_status(
+    prior_speech_id: str,
+    state: SessionState,
+    *,
+    exclude_speech_id: Optional[str] = None,
+) -> _CorrectionObligationStatus:
+    """Classify all sibling attempts without relying on map insertion order."""
+
+    statuses: set[_CorrectionObligationStatus] = set()
+    for storage_id, child in sorted(state.speech.items()):
+        if (
+            child.act_type != SpeechActType.CORRECTION
+            or child.supersedes_speech_id != prior_speech_id
+            or child.speech_id == exclude_speech_id
+        ):
+            continue
+        if storage_id != child.speech_id:
+            return _CorrectionObligationStatus.MALFORMED
+        statuses.add(_classify_correction_child(child))
+
+    if _CorrectionObligationStatus.MALFORMED in statuses:
+        return _CorrectionObligationStatus.MALFORMED
+    if _CorrectionObligationStatus.SATISFIED_HEARD in statuses:
+        return _CorrectionObligationStatus.SATISFIED_HEARD
+    if _CorrectionObligationStatus.LIVE in statuses:
+        return _CorrectionObligationStatus.LIVE
+    if _CorrectionObligationStatus.DEAD_NON_HEARD in statuses:
+        return _CorrectionObligationStatus.DEAD_NON_HEARD
+    return _CorrectionObligationStatus.NONE
+
+
 def _lineage_is_valid(
     prior_speech: SpeechAct,
     state: SessionState,
@@ -249,14 +392,15 @@ def _resolve_context(
         if evidence is None or evidence.evidence_id != evidence_id:
             return None
 
-    corrections = [
-        speech
-        for speech in state.speech.values()
-        if speech.act_type == SpeechActType.CORRECTION
-        and speech.supersedes_speech_id == prior.speech_id
-        and speech.speech_id != exclude_speech_id
-    ]
-    if corrections:
+    obligation_status = _correction_obligation_status(
+        prior.speech_id,
+        state,
+        exclude_speech_id=exclude_speech_id,
+    )
+    if obligation_status not in {
+        _CorrectionObligationStatus.NONE,
+        _CorrectionObligationStatus.DEAD_NON_HEARD,
+    }:
         return None
 
     return _CorrectionContext(
