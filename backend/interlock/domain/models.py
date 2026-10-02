@@ -315,6 +315,12 @@ class SpeechAct(DomainBaseModel):
     created_by_event_id: str = Field(..., min_length=1)
     schema_version: Literal[1] = 1
     supersedes_speech_id: Optional[str] = None
+    rendered_text: Optional[str] = None
+    approved_policy_id: Optional[str] = None
+    approved_through_sequence: Optional[int] = Field(default=None, ge=1)
+    approved_claim_versions: Dict[str, str] = Field(default_factory=dict)
+    heard: Optional[bool] = None
+    correction_pending: bool = False
 
 
 class DivergenceCase(DomainBaseModel):

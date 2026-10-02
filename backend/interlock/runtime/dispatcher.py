@@ -29,6 +29,7 @@ from interlock.runtime.commands import (
     QueueOutput,
     RecordProtocolViolation,
     RequestClarification,
+    RequestSpeechCorrection,
     RequestToolCancellation,
     ValidateSpeech,
     VerifyOutcome,
@@ -180,6 +181,7 @@ _COMMAND_TYPES: tuple[type[BaseCommand], ...] = (
     RecordProtocolViolation,
     RequestClarification,
     CancelSpeech,
+    RequestSpeechCorrection,
 )
 _KNOWN_COMMAND_NAMES = frozenset(
     command_type.model_fields["command_type"].default

@@ -68,4 +68,4 @@ Input is an immutable sequence-pinned desired revision, authoritative effects, o
 
 ### `Truthlock.validate(request)`
 
-Input contains the SpeechAct, claim versions and evidence records at `through_sequence`, plus policy version. Output is `APPROVE(template,text)`, `BLOCK(reason,max_certainty)`, or `RETRY_STALE_SNAPSHOT`. The dispatcher journals the corresponding event; it does not enqueue audio directly. Validation is idempotent for `(speech_id, through_sequence, policy_version)`.
+Input contains the SpeechAct, claim versions and evidence records at `through_sequence`, plus policy version. Output is `APPROVE(template, text, through_sequence, claim_versions)`, `BLOCK(reason, max_certainty)`, or `RETRY_STALE_SNAPSHOT`. The decision forwards `through_sequence` and exact `claim_versions` (mapping each `claim_id` to `ClaimRecord.updated_by_event_id`) into `SpeechActApproved`. Stale sequence pins or claim version mismatches consumed by the reducer retry via `ValidateSpeech` rather than approving. On claim contradiction of emitted heard speech, the reducer emits `RequestSpeechCorrection`. Validation is idempotent for `(speech_id, through_sequence, policy_version)`.

@@ -28,6 +28,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
+from pydantic import Field
+
 from interlock.domain.enums import (
     ClaimCertainty,
     ClaimState,
@@ -354,6 +356,7 @@ class TruthDecision(DomainBaseModel):
     max_certainty: Optional[ClaimCertainty] = None
     downgraded_speech_act: Optional[SpeechAct] = None
     through_sequence: Optional[int] = None
+    claim_versions: Dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_approved(self) -> bool:
@@ -377,6 +380,8 @@ class TruthDecision(DomainBaseModel):
             speech_id=self.speech_id,
             rendered_text=self.rendered_text,
             policy_id=self.policy_id,
+            through_sequence=self.through_sequence,
+            claim_versions=self.claim_versions,
         )
 
     def create_blocked_event(self) -> SpeechActBlocked:
@@ -1096,7 +1101,9 @@ class Truthlock:
                     )
 
         # --- 9. Render approved text with typed slots supported by claim snapshot ---
-        rendered_text = _render_template(template, act.slots, supported_claim_slot)
+        resolved_claim_versions = {
+            cl.claim_id: cl.updated_by_event_id for cl in resolved_claims
+        }
 
         return TruthDecision(
             status=TruthDecisionStatus.APPROVE,
@@ -1106,6 +1113,7 @@ class Truthlock:
             policy_id=pol_ver,
             max_certainty=effective_ceiling,
             through_sequence=resolved_pinned_seq,
+            claim_versions=resolved_claim_versions,
         )
 
     def _check_divergence_guard(

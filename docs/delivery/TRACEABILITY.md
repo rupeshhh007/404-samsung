@@ -18,8 +18,8 @@ Every requirement has an explicit implementation and test mapping. Canonical ent
 | FR-012 | Reconciliation; DivergenceCase/Plan | divergence/plan states; I10 | `execution/reconciliation.py` / EXE-006 | T-REC-01, T-REC-02, T-REC-03, T-E2E-02 | P0 surfaces mismatch; P1 safely repairs or honors denial; steps 8–10 |
 | FR-013 | Evidence; EvidenceRecord | EvidenceRecorded; I8 | `truth/evidence.py` / TRU-001 | T-EVD-01, T-INV-I8-N | immutable source plus derived provenance; step 1 |
 | FR-014 | ClaimGraph; ClaimRecord | ClaimStateChanged; I9 | `truth/claims.py` / TRU-002 | T-CLM-01, T-INV-I9-N | exact center/slot evidence required; steps 7–10 |
-| FR-015 | TRUTHLOCK; SpeechAct/Truthlock | SpeechActApproved/Blocked; I6 | `truth/truthlock.py` / TRU-003 | T-TRU-01, T-INV-I6-N | unsupported success absent; steps 8/10, block metric |
-| FR-016 | Speech; SpeechAct | CORRECTION_REQUIRED; I6 | `truth/speech.py` / TRU-004 | T-SPK-01 | emitted false statement creates explicit correction |
+| FR-015 | TRUTHLOCK; SpeechAct/Truthlock | SpeechActApproved/Blocked; sequence pin; I6 | `truth/truthlock.py` / TRU-003 | T-TRU-01, T-INV-I6-N | sequence-pinned approval gate; unsupported success absent; steps 8/10, block metric |
+| FR-016 | Speech; SpeechAct | CORRECTION_REQUIRED / RequestSpeechCorrection; I6 | `truth/speech.py` / TRU-004 | T-SPK-01 | contradicted emitted speech triggers RequestSpeechCorrection; explicit correction speech |
 | FR-017 | References/Evidence | derived EvidenceRecorded; I8 | `intelligence/references.py` / INTEL-003 | T-REF-01 | prior frame anchored without mutation; demo optional frame step |
 | FR-018 | API/WS/Frontend projections | SessionStarted/input/snapshot sequence | `adapters/http.py`, `websocket.py`; frontend clients / API-001, API-002, UI-002 | T-API-01, T-WS-01, T-UI-02, T-UI-03 | accepted commands and lossless resync; all UI steps |
 | FR-019 | Scenario/Faults | FaultActivated/virtual time | `testing/clock.py`, `scenario.py`, `faults.py` / TST-001, TST-002 | T-SCN-01, T-FLT-01, T-E2E-02 | reproducible fault catalogue and G-04; scenario success metric |
