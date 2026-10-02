@@ -28,7 +28,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from interlock.domain.enums import (
     ClaimCertainty,
@@ -358,6 +358,12 @@ class TruthDecision(DomainBaseModel):
     through_sequence: Optional[int] = None
     claim_versions: Dict[str, str] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_approval_pin(self) -> "TruthDecision":
+        if self.status == TruthDecisionStatus.APPROVE and self.through_sequence is None:
+            raise ValueError("TruthDecision with APPROVE status must have non-null through_sequence")
+        return self
+
     @property
     def is_approved(self) -> bool:
         return self.status == TruthDecisionStatus.APPROVE
@@ -376,6 +382,8 @@ class TruthDecision(DomainBaseModel):
             raise ValueError(f"Cannot create SpeechActApproved from decision status '{self.status}'")
         if not self.rendered_text:
             raise ValueError("Cannot create SpeechActApproved without rendered_text")
+        if self.through_sequence is None:
+            raise ValueError("Cannot create SpeechActApproved without through_sequence pin")
         return SpeechActApproved(
             speech_id=self.speech_id,
             rendered_text=self.rendered_text,
@@ -507,6 +515,8 @@ class Truthlock:
         if session_state is not None:
             if auth_seq is None and hasattr(session_state, "last_sequence"):
                 auth_seq = session_state.last_sequence
+            if pinned_seq is None and hasattr(session_state, "last_sequence"):
+                pinned_seq = session_state.last_sequence
             if divergences_input is None and hasattr(session_state, "divergences"):
                 divergences_input = session_state.divergences
             if claims_input is None and hasattr(session_state, "claims"):
@@ -578,27 +588,17 @@ class Truthlock:
         )
 
         # --- 2. Snapshot Pinning & Sequence Context Check ---
-        if requires_sequence_context and pinned_seq is None:
+        if pinned_seq is None:
             return TruthDecision(
                 status=TruthDecisionStatus.BLOCK,
                 speech_id=speech_id,
-                reason="Consequential or factual speech requires through_sequence",
+                reason="Speech validation requires through_sequence snapshot pin",
                 max_certainty=ClaimCertainty.UNCERTAIN,
                 policy_id=pol_ver,
                 through_sequence=None,
             )
-        if requires_sequence_context and auth_seq is None:
-            return TruthDecision(
-                status=TruthDecisionStatus.BLOCK,
-                speech_id=speech_id,
-                reason=(
-                    "Consequential or factual speech requires authoritative_sequence "
-                    "or a session state that supplies it"
-                ),
-                max_certainty=ClaimCertainty.UNCERTAIN,
-                policy_id=pol_ver,
-                through_sequence=resolved_pinned_seq,
-            )
+        if auth_seq is None:
+            auth_seq = pinned_seq
         if (
             resolved_pinned_seq is not None
             and auth_seq is not None
@@ -1101,6 +1101,7 @@ class Truthlock:
                     )
 
         # --- 9. Render approved text with typed slots supported by claim snapshot ---
+        rendered_text = _render_template(template, act.slots, supported_claim_slot)
         resolved_claim_versions = {
             cl.claim_id: cl.updated_by_event_id for cl in resolved_claims
         }

@@ -320,6 +320,7 @@ class SpeechAct(DomainBaseModel):
     approved_through_sequence: Optional[int] = Field(default=None, ge=1)
     approved_claim_versions: Dict[str, str] = Field(default_factory=dict)
     heard: Optional[bool] = None
+    cancellation_pending: bool = False
     correction_pending: bool = False
 
 

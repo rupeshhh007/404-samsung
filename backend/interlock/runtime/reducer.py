@@ -2336,11 +2336,13 @@ def _handle_claim_state_changed(
     cmds: List[Command] = []
     for sp_id, speech in list(new_speech.items()):
         if cid in speech.approved_claim_versions:
-            if speech.state in (SpeechState.APPROVED, SpeechState.QUEUED):
+            if speech.state == SpeechState.APPROVED:
                 new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.CANCELLED})
                 cmds.append(CancelSpeech(session_id=state.session_id, speech_id=sp_id))
-            elif speech.state == SpeechState.EMITTING:
-                new_speech[sp_id] = speech.model_copy(update={"correction_pending": True})
+            elif speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
+                new_speech[sp_id] = speech.model_copy(
+                    update={"cancellation_pending": True, "correction_pending": True}
+                )
                 cmds.append(CancelSpeech(session_id=state.session_id, speech_id=sp_id))
             elif speech.state == SpeechState.EMITTED:
                 if speech.heard is True:
@@ -2616,6 +2618,34 @@ def _handle_speech_queued(
             ],
         )
     speech = state.speech[sp_id]
+    if speech.state == SpeechState.QUEUED:
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
+    if speech.state == SpeechState.CANCELLED:
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
     if speech.state != SpeechState.APPROVED:
         return (
             state,
@@ -2630,16 +2660,24 @@ def _handle_speech_queued(
         )
 
     # Pre-queue currency check:
-    # For each approved_claim_versions entry: current ClaimRecord must exist and updated_by_event_id must exactly match.
-    is_stale = False
-    for cid, ver in speech.approved_claim_versions.items():
-        if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
-            is_stale = True
-            break
+    # 1. cancellation_pending flag
+    # 2. For each approved_claim_versions entry: current ClaimRecord must exist and updated_by_event_id must exactly match.
+    is_stale = speech.cancellation_pending
+    if not is_stale:
+        for cid, ver in speech.approved_claim_versions.items():
+            if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
+                is_stale = True
+                break
 
     new_speech = dict(state.speech)
     if is_stale:
-        new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.CANCELLED})
+        new_speech[sp_id] = speech.model_copy(
+            update={
+                "state": SpeechState.CANCELLED,
+                "cancellation_pending": False,
+                "correction_pending": False,
+            }
+        )
         new_state = state.model_copy(
             update={
                 "speech": new_speech,
@@ -2688,6 +2726,20 @@ def _handle_speech_emission_started(
             ],
         )
     speech = state.speech[sp_id]
+    if speech.state == SpeechState.EMITTING:
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
     if speech.state != SpeechState.QUEUED:
         return (
             state,
@@ -2735,7 +2787,25 @@ def _handle_speech_emission_finished(
             ],
         )
     speech = state.speech[sp_id]
-    if speech.state != SpeechState.EMITTING:
+    if speech.state in (
+        SpeechState.EMITTED,
+        SpeechState.CORRECTION_REQUIRED,
+        SpeechState.CANCELLED,
+    ):
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
+    if speech.state not in (SpeechState.QUEUED, SpeechState.EMITTING):
         return (
             state,
             [
@@ -2743,7 +2813,7 @@ def _handle_speech_emission_finished(
                     session_id=state.session_id,
                     boundary="reducer",
                     code="INVALID_SPEECH_TRANSITION",
-                    digest=f"Speech '{sp_id}' is in state '{speech.state}', expected EMITTING",
+                    digest=f"Speech '{sp_id}' is in state '{speech.state}', expected EMITTING or QUEUED",
                 )
             ],
         )
@@ -2751,8 +2821,13 @@ def _handle_speech_emission_finished(
     heard = bool(env.payload.get("heard", False))
     cmds: List[Command] = []
 
-    if speech.correction_pending:
-        if heard:
+    if not heard:
+        if speech.cancellation_pending:
+            target_state = SpeechState.CANCELLED
+        else:
+            target_state = SpeechState.EMITTED
+    else:  # heard is True
+        if speech.correction_pending:
             target_state = SpeechState.CORRECTION_REQUIRED
             triggering_cid = ""
             for cid, ver in speech.approved_claim_versions.items():
@@ -2770,14 +2845,13 @@ def _handle_speech_emission_finished(
             )
         else:
             target_state = SpeechState.EMITTED
-    else:
-        target_state = SpeechState.EMITTED
 
     new_speech = dict(state.speech)
     new_speech[sp_id] = speech.model_copy(
         update={
             "state": target_state,
             "heard": heard,
+            "cancellation_pending": False,
             "correction_pending": False,
         }
     )
@@ -2829,11 +2903,12 @@ def _handle_speech_cancellation_requested(
             ],
         )
 
-    if speech.state == SpeechState.EMITTING:
-        # Do not immediately set CANCELLED. Keep state EMITTING, emit CancelSpeech,
-        # wait for SpeechEmissionFinished or SpeechEmissionFailed to record whether audio was heard.
+    if speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
+        new_speech = dict(state.speech)
+        new_speech[sp_id] = speech.model_copy(update={"cancellation_pending": True})
         new_state = state.model_copy(
             update={
+                "speech": new_speech,
                 "last_sequence": env.sequence,
                 "metrics": state.metrics.model_copy(
                     update={"through_sequence": env.sequence}
@@ -2881,19 +2956,40 @@ def _handle_speech_emission_failed(
             ],
         )
     speech = state.speech[sp_id]
+
+    if speech.state in (
+        SpeechState.EMITTED,
+        SpeechState.CORRECTION_REQUIRED,
+        SpeechState.CANCELLED,
+    ):
+        new_state = state.model_copy(
+            update={
+                "last_sequence": env.sequence,
+                "metrics": state.metrics.model_copy(
+                    update={"through_sequence": env.sequence}
+                ),
+            }
+        )
+        cmds: List[Command] = [
+            PublishProjection(session_id=state.session_id, sequence=env.sequence)
+        ]
+        return new_state, cmds
+
     heard = bool(env.payload.get("heard", False))
     cmds: List[Command] = []
 
-    if speech.state in (SpeechState.APPROVED, SpeechState.QUEUED):
+    if speech.state == SpeechState.APPROVED:
         target_state = SpeechState.CANCELLED
         new_speech = dict(state.speech)
         new_speech[sp_id] = speech.model_copy(
             update={
                 "state": target_state,
                 "heard": False,
+                "cancellation_pending": False,
+                "correction_pending": False,
             }
         )
-    elif speech.state == SpeechState.EMITTING:
+    elif speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
         if not heard:
             target_state = SpeechState.CANCELLED
             new_speech = dict(state.speech)
@@ -2901,6 +2997,7 @@ def _handle_speech_emission_failed(
                 update={
                     "state": target_state,
                     "heard": False,
+                    "cancellation_pending": False,
                     "correction_pending": False,
                 }
             )
@@ -2911,6 +3008,8 @@ def _handle_speech_emission_failed(
                 update={
                     "state": target_state,
                     "heard": True,
+                    "cancellation_pending": False,
+                    "correction_pending": False,
                 }
             )
         else:  # heard and speech.correction_pending
@@ -2934,6 +3033,7 @@ def _handle_speech_emission_failed(
                 update={
                     "state": target_state,
                     "heard": True,
+                    "cancellation_pending": False,
                     "correction_pending": False,
                 }
             )

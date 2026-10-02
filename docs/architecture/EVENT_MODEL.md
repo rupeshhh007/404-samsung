@@ -49,9 +49,9 @@ Payload fields listed are required unless marked `?`.
 | `SpeechActBlocked` | TRUTHLOCK → reducer | `speech_id, reason, max_certainty` | record block; optionally propose safe wording |
 | `SpeechQueued` | output dispatcher → reducer | `speech_id` | check claim versions current against state; if stale set CANCELLED; if current set QUEUED, command `EmitOutput` |
 | `SpeechEmissionStarted` | output adapter → reducer | `speech_id` | mark emitting |
-| `SpeechEmissionFinished` | output adapter → reducer | `speech_id, heard` | persist heard; if correction_pending and heard=true set CORRECTION_REQUIRED and command `RequestSpeechCorrection`; else set EMITTED |
-| `SpeechEmissionFailed` | output adapter → reducer | `speech_id, error_code, heard, retryable?` | adapter failure fact; if heard=false cancel; if heard=true mark EMITTED (or CORRECTION_REQUIRED if correction_pending); no auto retry |
-| `SpeechCancellationRequested` | reducer → reducer | `speech_id` | command CancelSpeech; if EMITTING remain EMITTING until adapter terminal fact; does not cancel operations |
+| `SpeechEmissionFinished` | output adapter → reducer | `speech_id, heard` | persist heard; if heard=false and cancellation_pending set CANCELLED; if heard=true and correction_pending set CORRECTION_REQUIRED and command `RequestSpeechCorrection`; else set EMITTED |
+| `SpeechEmissionFailed` | output adapter → reducer | `speech_id, error_code, heard, retryable?` | adapter failure fact; if heard=false set CANCELLED; if heard=true and correction_pending set CORRECTION_REQUIRED; else if heard=true mark EMITTED; no auto retry |
+| `SpeechCancellationRequested` | reducer → reducer | `speech_id` | command CancelSpeech; if QUEUED or EMITTING sets cancellation_pending=True awaiting adapter terminal fact; does not cancel operations |
 | `DivergenceDetected` | reconciliation detector → reducer | `case` | store open; command build plan/surface |
 | `ReconciliationPlanned` | planner → reducer | `plan` | capability hash and intent revision must match |
 | `ReconciliationAuthorized` | user/policy → reducer | `plan_id, evidence_id` | allow run |
