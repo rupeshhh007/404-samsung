@@ -24,6 +24,9 @@ from interlock.runtime.commands import RequestSpeechCorrection
 
 
 _CORRECTION_STATE_TEXT = {
+    ClaimState.CONFIRMED: (
+        "the proposition is now supported by current verified evidence"
+    ),
     ClaimState.CONTRADICTED: (
         "the previous statement is contradicted by current verified evidence"
     ),
@@ -49,6 +52,33 @@ class _CorrectionContext:
     current_state_text: str
 
 
+def _lineage_is_valid(
+    prior_speech: SpeechAct,
+    state: SessionState,
+    correction_speech_id: str,
+) -> bool:
+    """Verify existing ancestry without rewriting or following an unbounded graph."""
+
+    seen: set[str] = set()
+    current = prior_speech
+    for _ in range(len(state.speech) + 1):
+        if current.speech_id == correction_speech_id or current.speech_id in seen:
+            return False
+        seen.add(current.speech_id)
+
+        parent_id = current.supersedes_speech_id
+        if parent_id is None:
+            return True
+        if parent_id == correction_speech_id:
+            return False
+
+        parent = state.speech.get(parent_id)
+        if parent is None or parent.speech_id != parent_id:
+            return False
+        current = parent
+    return False
+
+
 def _resolve_context(
     request: RequestSpeechCorrection,
     state: SessionState,
@@ -64,9 +94,6 @@ def _resolve_context(
     if prior is None or prior.speech_id != request.speech_id:
         return None
     if prior.state != SpeechState.CORRECTION_REQUIRED or prior.heard is not True:
-        return None
-    if prior.act_type == SpeechActType.CORRECTION:
-        # ADR-018 does not explicitly authorize correction-of-correction chains.
         return None
     if (
         not prior.rendered_text
@@ -146,6 +173,12 @@ class CorrectionPolicy:
         context = _resolve_context(request, state)
         if context is None:
             return None
+        if not _lineage_is_valid(
+            context.prior_speech,
+            state,
+            correction_speech_id,
+        ):
+            return None
 
         current_claim = context.current_claim
         speech_act = SpeechAct(
@@ -193,6 +226,8 @@ def validate_correction_proposal(
     stored = state.speech.get(act.speech_id)
     if stored is not None and stored != act:
         return "Correction speech ID conflicts with a different stored SpeechAct"
+    if not _lineage_is_valid(context.prior_speech, state, act.speech_id):
+        return "Correction lineage is missing, cyclic, or self-referential"
     expected_versions = {
         context.current_claim.claim_id: context.current_claim.updated_by_event_id,
     }
