@@ -31,6 +31,7 @@ from interlock.domain.enums import (
     PlanState,
     PlanStepState,
     RuntimeMode,
+    SpeechActType,
     SpeechState,
     ToolOutcome,
 )
@@ -2219,6 +2220,174 @@ def _insert_immutable_evidence(
     )
 
 
+def _has_complete_speech_approval_proof(speech: SpeechAct) -> bool:
+    """Mirror the lifecycle proof shape used by the correction policy."""
+
+    return bool(
+        speech.rendered_text
+        and speech.approved_policy_id
+        and speech.approved_through_sequence is not None
+        and speech.approved_claim_versions
+        and set(speech.approved_claim_versions) == set(speech.claim_ids)
+    )
+
+
+def _has_any_speech_approval_proof(speech: SpeechAct) -> bool:
+    return bool(
+        speech.rendered_text is not None
+        or speech.approved_policy_id is not None
+        or speech.approved_through_sequence is not None
+        or speech.approved_claim_versions
+    )
+
+
+def _is_dead_non_heard_correction_attempt(speech: SpeechAct) -> bool:
+    """Fail closed unless one correction child is canonically dead and unheard.
+
+    This predicate intentionally mirrors ``truth.speech`` lifecycle classification
+    without importing the Truth layer into the authoritative runtime reducer.
+    """
+
+    try:
+        speech_state = SpeechState(speech.state)
+    except ValueError:
+        return False
+
+    if speech.correction_pending and not speech.cancellation_pending:
+        return False
+
+    if speech_state == SpeechState.BLOCKED:
+        return bool(
+            speech.heard is None
+            and not _has_any_speech_approval_proof(speech)
+            and not speech.cancellation_pending
+            and not speech.correction_pending
+        )
+
+    if speech_state == SpeechState.CANCELLED:
+        return bool(
+            speech.heard is not True
+            and not speech.cancellation_pending
+            and not speech.correction_pending
+            and (
+                not _has_any_speech_approval_proof(speech)
+                or _has_complete_speech_approval_proof(speech)
+            )
+        )
+
+    if speech_state == SpeechState.EMITTED:
+        return bool(
+            speech.heard is False
+            and _has_complete_speech_approval_proof(speech)
+            and not speech.cancellation_pending
+            and not speech.correction_pending
+        )
+
+    return False
+
+
+def _correction_lineage_is_well_formed(
+    prior_speech: SpeechAct,
+    state: SessionState,
+) -> bool:
+    """Reject missing, mismatched, self-referential, or cyclic ancestry."""
+
+    seen: set[str] = set()
+    current = prior_speech
+    for _ in range(len(state.speech) + 1):
+        if current.speech_id in seen:
+            return False
+        seen.add(current.speech_id)
+
+        parent_id = current.supersedes_speech_id
+        if parent_id is None:
+            return True
+        parent = state.speech.get(parent_id)
+        if parent is None or parent.speech_id != parent_id:
+            return False
+        current = parent
+    return False
+
+
+def _correction_retry_command(
+    state: SessionState,
+    terminal_speech_id: str,
+) -> Optional[RequestSpeechCorrection]:
+    """Return one retry command when the last correction attempt becomes unusable."""
+
+    terminal = state.speech.get(terminal_speech_id)
+    if (
+        terminal is None
+        or terminal.speech_id != terminal_speech_id
+        or terminal.act_type != SpeechActType.CORRECTION
+        or terminal.supersedes_speech_id is None
+        or not _is_dead_non_heard_correction_attempt(terminal)
+    ):
+        return None
+
+    prior_id = terminal.supersedes_speech_id
+    prior = state.speech.get(prior_id)
+    if (
+        prior is None
+        or prior.speech_id != prior_id
+        or prior.state != SpeechState.CORRECTION_REQUIRED
+        or prior.heard is not True
+        or not prior.rendered_text
+        or not prior.approved_policy_id
+        or prior.approved_through_sequence is None
+        or not prior.approved_claim_versions
+        or not _correction_lineage_is_well_formed(prior, state)
+    ):
+        return None
+
+    found_attempt = False
+    for storage_id, sibling in sorted(state.speech.items()):
+        if (
+            sibling.act_type != SpeechActType.CORRECTION
+            or sibling.supersedes_speech_id != prior_id
+        ):
+            continue
+        found_attempt = True
+        if (
+            storage_id != sibling.speech_id
+            or not _is_dead_non_heard_correction_attempt(sibling)
+        ):
+            return None
+    if not found_attempt:
+        return None
+
+    for claim_id in sorted(set(prior.claim_ids) & set(prior.approved_claim_versions)):
+        claim = state.claims.get(claim_id)
+        if (
+            claim is not None
+            and claim.claim_id == claim_id
+            and claim.updated_by_event_id != prior.approved_claim_versions[claim_id]
+        ):
+            return RequestSpeechCorrection(
+                session_id=state.session_id,
+                speech_id=prior_id,
+                triggering_claim_id=claim_id,
+            )
+    return None
+
+
+def _correction_retry_commands(
+    state: SessionState,
+    terminal_speech_ids: List[str],
+) -> List[Command]:
+    """Deduplicate parent retries when one event terminalizes several children."""
+
+    commands: List[Command] = []
+    requested_parents: set[str] = set()
+    for speech_id in sorted(terminal_speech_ids):
+        command = _correction_retry_command(state, speech_id)
+        if command is None or command.speech_id in requested_parents:
+            continue
+        requested_parents.add(command.speech_id)
+        commands.append(command)
+    return commands
+
+
 def _handle_claim_proposed(
     state: SessionState, env: EventEnvelope
 ) -> Tuple[SessionState, List[Command]]:
@@ -2342,11 +2511,13 @@ def _handle_claim_state_changed(
     # Inspect ONLY speech acts whose approved_claim_versions contain this claim
     new_speech = dict(state.speech)
     cmds: List[Command] = []
+    terminal_correction_ids: List[str] = []
     for sp_id, speech in list(new_speech.items()):
         if cid in speech.approved_claim_versions:
             if speech.state == SpeechState.APPROVED:
                 new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.CANCELLED})
                 cmds.append(CancelSpeech(session_id=state.session_id, speech_id=sp_id))
+                terminal_correction_ids.append(sp_id)
             elif speech.state in (SpeechState.QUEUED, SpeechState.EMITTING):
                 new_speech[sp_id] = speech.model_copy(
                     update={"cancellation_pending": True, "correction_pending": True}
@@ -2377,6 +2548,7 @@ def _handle_claim_state_changed(
             ),
         }
     )
+    cmds.extend(_correction_retry_commands(new_state, terminal_correction_ids))
     cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
@@ -2646,9 +2818,8 @@ def _handle_speech_act_blocked(
             ),
         }
     )
-    cmds: List[Command] = [
-        PublishProjection(session_id=state.session_id, sequence=env.sequence)
-    ]
+    cmds = _correction_retry_commands(new_state, [sp_id])
+    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 
@@ -2738,9 +2909,8 @@ def _handle_speech_queued(
                 ),
             }
         )
-        cmds: List[Command] = [
-            PublishProjection(session_id=state.session_id, sequence=env.sequence)
-        ]
+        cmds = _correction_retry_commands(new_state, [sp_id])
+        cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
         return new_state, cmds
 
     new_speech[sp_id] = speech.model_copy(update={"state": SpeechState.QUEUED})
@@ -2932,6 +3102,8 @@ def _handle_speech_emission_finished(
             ),
         }
     )
+    if not heard:
+        cmds.extend(_correction_retry_commands(new_state, [sp_id]))
     cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
@@ -3002,8 +3174,9 @@ def _handle_speech_cancellation_requested(
     )
     cmds: List[Command] = [
         CancelSpeech(session_id=state.session_id, speech_id=sp_id),
-        PublishProjection(session_id=state.session_id, sequence=env.sequence),
     ]
+    cmds.extend(_correction_retry_commands(new_state, [sp_id]))
+    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 
@@ -3155,6 +3328,8 @@ def _handle_speech_emission_failed(
             ),
         }
     )
+    if target_state == SpeechState.CANCELLED and not heard:
+        cmds.extend(_correction_retry_commands(new_state, [sp_id]))
     cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
