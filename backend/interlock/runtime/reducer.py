@@ -2312,8 +2312,13 @@ def _correction_lineage_is_well_formed(
 def _correction_retry_command(
     state: SessionState,
     terminal_speech_id: str,
+    *,
+    epistemically_invalidated: bool,
 ) -> Optional[RequestSpeechCorrection]:
-    """Return one retry command when the last correction attempt becomes unusable."""
+    """Return one retry command only for a truth-stale correction attempt."""
+
+    if not epistemically_invalidated:
+        return None
 
     terminal = state.speech.get(terminal_speech_id)
     if (
@@ -2374,13 +2379,19 @@ def _correction_retry_command(
 def _correction_retry_commands(
     state: SessionState,
     terminal_speech_ids: List[str],
+    *,
+    epistemically_invalidated: bool,
 ) -> List[Command]:
-    """Deduplicate parent retries when one event terminalizes several children."""
+    """Deduplicate cause-aware parent retries from one reducer event."""
 
     commands: List[Command] = []
     requested_parents: set[str] = set()
     for speech_id in sorted(terminal_speech_ids):
-        command = _correction_retry_command(state, speech_id)
+        command = _correction_retry_command(
+            state,
+            speech_id,
+            epistemically_invalidated=epistemically_invalidated,
+        )
         if command is None or command.speech_id in requested_parents:
             continue
         requested_parents.add(command.speech_id)
@@ -2548,7 +2559,13 @@ def _handle_claim_state_changed(
             ),
         }
     )
-    cmds.extend(_correction_retry_commands(new_state, terminal_correction_ids))
+    cmds.extend(
+        _correction_retry_commands(
+            new_state,
+            terminal_correction_ids,
+            epistemically_invalidated=True,
+        )
+    )
     cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
@@ -2818,8 +2835,11 @@ def _handle_speech_act_blocked(
             ),
         }
     )
-    cmds = _correction_retry_commands(new_state, [sp_id])
-    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
+    # A generic policy block does not prove stale truth.  TRUTHLOCK snapshot
+    # staleness follows its ValidateSpeech retry path instead.
+    cmds: List[Command] = [
+        PublishProjection(session_id=state.session_id, sequence=env.sequence)
+    ]
     return new_state, cmds
 
 
@@ -2884,15 +2904,14 @@ def _handle_speech_queued(
     # Pre-queue currency check:
     # 1. cancellation_pending flag
     # 2. For each approved_claim_versions entry: current ClaimRecord must exist and updated_by_event_id must exactly match.
-    is_stale = speech.cancellation_pending
-    if not is_stale:
-        for cid, ver in speech.approved_claim_versions.items():
-            if cid not in state.claims or state.claims[cid].updated_by_event_id != ver:
-                is_stale = True
-                break
+    claim_versions_stale = any(
+        cid not in state.claims or state.claims[cid].updated_by_event_id != ver
+        for cid, ver in speech.approved_claim_versions.items()
+    )
+    should_cancel = speech.cancellation_pending or claim_versions_stale
 
     new_speech = dict(state.speech)
-    if is_stale:
+    if should_cancel:
         new_speech[sp_id] = speech.model_copy(
             update={
                 "state": SpeechState.CANCELLED,
@@ -2909,7 +2928,11 @@ def _handle_speech_queued(
                 ),
             }
         )
-        cmds = _correction_retry_commands(new_state, [sp_id])
+        cmds = _correction_retry_commands(
+            new_state,
+            [sp_id],
+            epistemically_invalidated=claim_versions_stale,
+        )
         cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
         return new_state, cmds
 
@@ -3103,7 +3126,13 @@ def _handle_speech_emission_finished(
         }
     )
     if not heard:
-        cmds.extend(_correction_retry_commands(new_state, [sp_id]))
+        cmds.extend(
+            _correction_retry_commands(
+                new_state,
+                [sp_id],
+                epistemically_invalidated=speech.correction_pending,
+            )
+        )
     cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
@@ -3174,9 +3203,8 @@ def _handle_speech_cancellation_requested(
     )
     cmds: List[Command] = [
         CancelSpeech(session_id=state.session_id, speech_id=sp_id),
+        PublishProjection(session_id=state.session_id, sequence=env.sequence),
     ]
-    cmds.extend(_correction_retry_commands(new_state, [sp_id]))
-    cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
 
@@ -3329,7 +3357,13 @@ def _handle_speech_emission_failed(
         }
     )
     if target_state == SpeechState.CANCELLED and not heard:
-        cmds.extend(_correction_retry_commands(new_state, [sp_id]))
+        cmds.extend(
+            _correction_retry_commands(
+                new_state,
+                [sp_id],
+                epistemically_invalidated=speech.correction_pending,
+            )
+        )
     cmds.append(PublishProjection(session_id=state.session_id, sequence=env.sequence))
     return new_state, cmds
 
