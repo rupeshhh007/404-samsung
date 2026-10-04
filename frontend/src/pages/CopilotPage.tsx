@@ -45,7 +45,8 @@ export function CopilotPage({
   const awaitingFirstProjection = state.loading && projection === null;
 
   return (
-    <main id="main-content" className="mx-auto w-full max-w-7xl space-y-4 px-4 py-5">
+    <main id="main-content" className="mx-auto w-full max-w-7xl space-y-4 px-4 py-4">
+      {/* Top feedback notifications */}
       {(state.error || actionError) && (
         <div className="error-message" role="alert">
           {actionError ?? state.error?.message}
@@ -54,36 +55,60 @@ export function CopilotPage({
 
       {awaitingFirstProjection && (
         <div className="loading-message" role="status">
-          Connecting and awaiting the first authoritative projection…
+          Connecting to INTERLOCK runtime and awaiting first authoritative projection…
         </div>
       )}
 
       {!awaitingFirstProjection && projection === null && (
-        <div className="empty-state" role="status">
-          Start a session to load authoritative intent, operation, world, claim, and speech projections.
+        <div className="empty-state text-center py-6" role="status">
+          <p className="font-medium text-stone-800 dark:text-stone-200">
+            Welcome to the INTERLOCK consistency runtime.
+          </p>
+          <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+            Click <strong>Start Session</strong> above to begin multimodal input interpretation and reality tracking.
+          </p>
         </div>
       )}
 
-      <DivergenceAlert divergences={divergences} plans={plans} />
+      {/* Asymmetric Two-Column Product Layout */}
+      <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-12">
+        {/* Left Column: Primary Interaction & Verified Output (5 cols on lg) */}
+        <div className="space-y-4 lg:col-span-5">
+          {/* TRUTHLOCK Speech Gate */}
+          <TruthBanner speech={speech} />
 
-      <div className="workbench-grid">
-        <InputPanel
-          speech={speech}
-          sessionAvailable={state.sessionId !== null}
-          actionPending={actionPending}
-          onSubmitText={onSubmitText}
-          onCancelSpeech={onCancelSpeech}
-        />
-
-        <div className="space-y-4">
-          <IntentPanel intent={intent} revision={revision} />
-          <OperationPanel operations={operations} />
-          <WorldPanel effects={effects} />
+          {/* Conversation Input & Speech Feed */}
+          <InputPanel
+            speech={speech}
+            sessionAvailable={state.sessionId !== null}
+            actionPending={actionPending}
+            onSubmitText={onSubmitText}
+            onCancelSpeech={onCancelSpeech}
+          />
         </div>
 
-        <div className="space-y-4">
+        {/* Right Column: State of Reality Workbench (7 cols on lg) */}
+        <div className="space-y-4 lg:col-span-7">
+          {/* Reality Alignment / Divergence Monitor */}
+          <DivergenceAlert
+            divergences={divergences}
+            plans={plans}
+            intent={intent}
+            revision={revision}
+            effects={effects}
+          />
+
+          {/* 1. What the user wants: Intent Card */}
+          <IntentPanel intent={intent} revision={revision} />
+
+          {/* 2. What the system is doing: Operations Card */}
+          <OperationPanel operations={operations} />
+
+          {/* 3. What the real world says: Observed World Card */}
+          <WorldPanel effects={effects} />
+
+          {/* 4. Claims & Evidence */}
           <ClaimPanel claims={claims} evidence={evidence} />
-          <TruthBanner speech={speech} />
         </div>
       </div>
     </main>
