@@ -9,6 +9,15 @@
       "timezone": "Asia/Kolkata"
     }
   ],
+  "diagnostics": [
+    {
+      "device_id": "device-demo-01",
+      "error_code": "E101",
+      "title": "SIMULATED device diagnostic",
+      "summary": "SIMULATED service inspection is recommended.",
+      "center_ids": ["ctr-01"]
+    }
+  ],
   "availability": {
     "ctr-01": [
       "2030-01-15T11:00:00+05:30",
@@ -18,6 +27,9 @@
   "initial_bookings": [],
   "cancelled_at": "2030-01-15T05:30:01.500Z",
   "default_outcomes": {
+    "device.lookup_error": ["SUCCEEDED"],
+    "service.find_centers": ["SUCCEEDED"],
+    "appointment.availability": ["SUCCEEDED"],
     "appointment.book": ["SUCCEEDED"],
     "appointment.get": ["SUCCEEDED"],
     "appointment.cancel": ["SUCCEEDED"]

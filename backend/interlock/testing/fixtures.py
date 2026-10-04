@@ -14,7 +14,10 @@ from interlock.execution.descriptors import ToolRegistry
 
 
 ProviderOutcome = Literal["ACKNOWLEDGED", "SUCCEEDED", "FAILED", "UNKNOWN"]
-_TOOLS = frozenset({"appointment.book", "appointment.get", "appointment.cancel"})
+_TOOLS = frozenset({
+    "device.lookup_error", "service.find_centers", "appointment.availability",
+    "appointment.book", "appointment.get", "appointment.cancel",
+})
 _FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 
 
@@ -26,6 +29,14 @@ class FakeCenter(_FixtureModel):
     center_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     timezone: str = Field(min_length=1)
+
+
+class FakeDiagnostic(_FixtureModel):
+    device_id: str = Field(min_length=1)
+    error_code: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    center_ids: tuple[str, ...]
 
 
 class FakeBooking(_FixtureModel):
@@ -50,6 +61,7 @@ class FakeProviderFixture(_FixtureModel):
     fixture_id: str = Field(min_length=1)
     label: str = Field(min_length=1)
     centers: tuple[FakeCenter, ...]
+    diagnostics: tuple[FakeDiagnostic, ...]
     availability: dict[str, tuple[str, ...]]
     initial_bookings: tuple[FakeBooking, ...]
     cancelled_at: str = Field(min_length=1)
@@ -64,6 +76,14 @@ class FakeProviderFixture(_FixtureModel):
             raise ValueError("centers must have unique identities")
         if frozenset(self.availability) != frozenset(center_ids):
             raise ValueError("availability must cover exactly the declared centers")
+        diagnostic_keys = [(item.device_id, item.error_code) for item in self.diagnostics]
+        if not diagnostic_keys or len(diagnostic_keys) != len(set(diagnostic_keys)):
+            raise ValueError("diagnostic identities must be unique and nonempty")
+        for item in self.diagnostics:
+            if len(item.center_ids) != len(set(item.center_ids)) or any(
+                center_id not in center_ids for center_id in item.center_ids
+            ):
+                raise ValueError("diagnostic center references must be unique and known")
         for slots in self.availability.values():
             if len(slots) != len(set(slots)):
                 raise ValueError("availability slots must be unique")
@@ -76,7 +96,7 @@ class FakeProviderFixture(_FixtureModel):
             raise ValueError("initial booking references an unknown center")
         _parse_rfc3339(self.cancelled_at)
         if frozenset(self.default_outcomes) != _TOOLS:
-            raise ValueError("default outcomes must cover exactly the appointment tools")
+            raise ValueError("default outcomes must cover exactly the six supported tools")
         if any(not outcomes for outcomes in self.default_outcomes.values()):
             raise ValueError("each tool requires at least one deterministic outcome")
         if any(
@@ -149,6 +169,7 @@ def _parse_rfc3339(value: str) -> datetime:
 __all__ = [
     "FakeBooking",
     "FakeCenter",
+    "FakeDiagnostic",
     "FakeProviderFixture",
     "ProviderOutcome",
     "load_demo_fixture",

@@ -29,6 +29,9 @@ _CANCEL_FIELDS = frozenset({
     "schemaVersion", "kind", "operationId", "targetRequestId", "reason",
 })
 _WIRE_TO_TOOL = {
+    "LOOKUP_DEVICE_ERROR": "device.lookup_error",
+    "FIND_SERVICE_CENTERS": "service.find_centers",
+    "GET_APPOINTMENT_AVAILABILITY": "appointment.availability",
     "BOOK_APPOINTMENT": "appointment.book",
     "GET_APPOINTMENT": "appointment.get",
     "CANCEL_APPOINTMENT": "appointment.cancel",
@@ -76,7 +79,13 @@ class FakeAppointmentProvider:
                 raise ValueError("only appointment.book supports acknowledgement")
             scripts[tool] = sequence
         self._fixture_id = seed.fixture_id
-        self._centers = {center.center_id for center in seed.centers}
+        self._centers = {
+            center.center_id: center.model_dump(mode="python") for center in seed.centers
+        }
+        self._diagnostics = {
+            (item.device_id, item.error_code): item.model_dump(mode="python")
+            for item in seed.diagnostics
+        }
         self._availability = {
             center_id: tuple(slots) for center_id, slots in seed.availability.items()
         }
@@ -239,13 +248,68 @@ class FakeAppointmentProvider:
             if "bookingId" in payload:
                 response["booking"] = {"bookingId": payload["bookingId"]}
             return response
-        if record.tool_name == "appointment.book":
+        if record.tool_name == "device.lookup_error":
+            response.update(self._lookup_error(payload))
+        elif record.tool_name == "service.find_centers":
+            response.update(self._find_centers(payload))
+        elif record.tool_name == "appointment.availability":
+            response.update(self._available(payload))
+        elif record.tool_name == "appointment.book":
             response.update(self._book(record, payload))
         elif record.tool_name == "appointment.get":
             response.update(self._get(payload))
         else:
             response.update(self._cancel_booking(payload))
         return response
+
+    def _lookup_error(self, payload: dict[str, str]) -> dict[str, Any]:
+        diagnostic = self._diagnostics.get((payload["deviceId"], payload["errorCode"]))
+        if diagnostic is None:
+            return _wire_failure("ERROR_LOOKUP_FAILED", "DIAGNOSTIC_NOT_FOUND")
+        return {
+            "state": "ERROR_LOOKUP_SUCCEEDED",
+            "diagnostic": {
+                "deviceId": diagnostic["device_id"],
+                "errorCode": diagnostic["error_code"],
+                "title": diagnostic["title"],
+                "summary": diagnostic["summary"],
+            },
+        }
+
+    def _find_centers(self, payload: dict[str, str]) -> dict[str, Any]:
+        diagnostic = self._diagnostics.get((payload["deviceId"], payload["errorCode"]))
+        if diagnostic is None:
+            return _wire_failure("CENTER_SEARCH_FAILED", "QUERY_NOT_FOUND")
+        return {
+            "state": "SERVICE_CENTERS_FOUND",
+            "query": {"deviceId": payload["deviceId"], "errorCode": payload["errorCode"]},
+            "serviceCenters": [
+                {
+                    "serviceCenterId": self._centers[center_id]["center_id"],
+                    "name": self._centers[center_id]["name"],
+                    "timezone": self._centers[center_id]["timezone"],
+                }
+                for center_id in diagnostic["center_ids"]
+            ],
+        }
+
+    def _available(self, payload: dict[str, str]) -> dict[str, Any]:
+        center_id = payload["serviceCenterId"]
+        if center_id not in self._centers:
+            return _wire_failure("AVAILABILITY_FAILED", "CENTER_NOT_FOUND")
+        occupied = {
+            booking["confirmed_slot"] for booking in self._bookings.values()
+            if booking["center_id"] == center_id and booking.get("cancelled_at") is None
+        }
+        return {
+            "state": "AVAILABILITY_FOUND",
+            "availability": {
+                "serviceCenterId": center_id,
+                "availableStarts": [
+                    slot for slot in self._availability[center_id] if slot not in occupied
+                ],
+            },
+        }
 
     def _book(self, record: _RequestRecord, payload: dict[str, str]) -> dict[str, Any]:
         center_id = payload["serviceCenterId"]
@@ -304,7 +368,11 @@ def create_fake_tool_transport(
 
 
 def _payload(tool_name: str, value: Any) -> dict[str, str]:
-    if tool_name == "appointment.book":
+    if tool_name in {"device.lookup_error", "service.find_centers"}:
+        fields = {"deviceId", "errorCode"}
+    elif tool_name == "appointment.availability":
+        fields = {"serviceCenterId"}
+    elif tool_name == "appointment.book":
         fields = {"serviceCenterId", "requestedStart"}
     else:
         fields = {"bookingId", "serviceCenterId"}
@@ -336,6 +404,9 @@ def _wire_failure(state: str, code: str, booking_id: str | None = None) -> dict[
 
 def _failure_state(tool_name: str) -> str:
     return {
+        "device.lookup_error": "ERROR_LOOKUP_FAILED",
+        "service.find_centers": "CENTER_SEARCH_FAILED",
+        "appointment.availability": "AVAILABILITY_FAILED",
         "appointment.book": "BOOKING_FAILED",
         "appointment.get": "LOOKUP_FAILED",
         "appointment.cancel": "CANCELLATION_FAILED",
