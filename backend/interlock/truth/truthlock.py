@@ -119,6 +119,13 @@ class ControlledTemplate:
 
 # Canonical controlled templates per docs/components/TRUTHLOCK.md table
 CONTROLLED_TEMPLATES: Dict[str, ControlledTemplate] = {
+    "tmpl_clarification": ControlledTemplate(
+        template_id="tmpl_clarification",
+        template_pattern="Could you clarify what you want me to do?",
+        fallback_pattern="Could you clarify what you want me to do?",
+        allowed_act_types={SpeechActType.CLARIFICATION},
+        max_certainty=ClaimCertainty.PROGRESS,
+    ),
     "tmpl_checking": ControlledTemplate(
         template_id="tmpl_checking",
         template_pattern="Checking…",
@@ -193,6 +200,7 @@ CONTROLLED_TEMPLATES: Dict[str, ControlledTemplate] = {
 }
 
 TEMPLATE_ALIASES: Dict[str, str] = {
+    "clarification": "tmpl_clarification",
     "preparation_pending": "tmpl_checking",
     "checking": "tmpl_checking",
     "slot_available": "tmpl_slot_available",

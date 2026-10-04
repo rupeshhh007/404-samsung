@@ -14,6 +14,11 @@ TRUTHLOCK receives structured `SpeechAct`, sequence-pinned claim snapshots, and 
 
 Unsupported acts are blocked or downgraded to a safe controlled template; a free model rewrite is never permitted to increase certainty. If an emitted statement later becomes contradicted, mark it `CORRECTION_REQUIRED` and propose an explicit correction referencing current evidence. TRUTHLOCK cannot retract heard audio or guarantee source truth. Tests: T-TRU-01 and I6.
 
+The canonical nonconsequential clarification template is `tmpl_clarification`
+with fixed rendered text “Could you clarify what you want me to do?”. Runtime
+maps `RequestClarification` to a proposed `CLARIFICATION` SpeechAct using this
+template; model-provided clarification prose is not rendered directly.
+
 ## Implementation contract
 
 - Purpose: ensure consequential output certainty does not exceed sequence-pinned claim/evidence state.
