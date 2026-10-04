@@ -1,9 +1,13 @@
-"""TRU-004: deterministic policy for proposing corrective speech.
+"""TRU-004: runtime-agnostic output boundary and corrective-speech policy.
 
-The reducer owns speech lifecycle transitions and emits ``RequestSpeechCorrection``
-only after audible output has reached ``CORRECTION_REQUIRED``.  This module
-consumes that canonical obligation and constructs a new, sequence-pinned
-``PROPOSED`` SpeechAct.  It performs no I/O and never mutates reducer state.
+``OutputPort`` is the inward boundary implemented by text/TTS adapters.  It
+contains no dispatcher, journal, command, or authoritative-state machinery.
+
+The reducer owns correction lifecycle transitions and emits
+``RequestSpeechCorrection`` only after audible output has reached
+``CORRECTION_REQUIRED``.  The correction policy consumes that canonical
+obligation and constructs a new, sequence-pinned ``PROPOSED`` SpeechAct.  It
+performs no I/O and never mutates reducer state.
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
 
 from pydantic import Field
 
@@ -31,6 +35,55 @@ from interlock.truth.claims import (
     _extract_claim_parameters,
     normalize_rule_name,
 )
+
+
+class OutputPort(Protocol):
+    """Inward async contract implemented by text/TTS adapters and fakes.
+
+    ``emit`` returns only after the adapter has started the exact approved text;
+    the command handler then journals ``SpeechEmissionStarted``.  Completion or
+    failure remains an adapter ingress fact.  ``cancel`` is cooperative and
+    never claims that output has terminalized.
+    """
+
+    async def emit(
+        self,
+        *,
+        session_id: str,
+        speech_id: str,
+        rendered_text: str,
+    ) -> None:
+        """Start emitting the persisted approved text for one speech act."""
+
+    async def cancel(self, *, session_id: str, speech_id: str) -> None:
+        """Request an output stop without manufacturing a terminal fact."""
+
+
+class OutputPortFailure(Exception):
+    """Typed adapter terminal failure with explicit heard semantics.
+
+    An adapter must use this only when it can truthfully establish all fields.
+    Ambiguous transport exceptions remain dispatcher failures and do not invent
+    a ``heard`` value.
+    """
+
+    def __init__(
+        self,
+        error_code: str,
+        *,
+        heard: bool,
+        retryable: bool = False,
+    ) -> None:
+        if not isinstance(error_code, str) or not error_code:
+            raise ValueError("error_code must be a non-empty string")
+        if type(heard) is not bool:
+            raise TypeError("heard must be a boolean")
+        if type(retryable) is not bool:
+            raise TypeError("retryable must be a boolean")
+        super().__init__("output adapter reported a terminal failure")
+        self.error_code = error_code
+        self.heard = heard
+        self.retryable = retryable
 
 
 _CORRECTION_STATE_TEXT = {
