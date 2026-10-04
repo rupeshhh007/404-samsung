@@ -87,6 +87,7 @@ class RuntimeDependencies:
     bindings: BindingResolver | None = None
     verification_scope: Callable[[EventEnvelope, SessionState], VerificationScope | None] | None = None
     input_context: Callable[[SessionState, EvidenceRecord], dict[str, Any]] | None = None
+    projection: CommandHandler | None = None
     extra_handlers: Mapping[type[BaseCommand], CommandHandler] | None = None
 
 
@@ -140,7 +141,7 @@ class _Session:
             (RequestClarification, self._clarify),
             (RequestSpeechCorrection, self._correct),
             (RecordProtocolViolation, self._violation),
-            (PublishProjection, self._projection),
+            (PublishProjection, dependencies.projection or self._projection),
         ):
             self.dispatcher.register(kind, handler)
         for kind, handler in (dependencies.extra_handlers or {}).items():
