@@ -555,18 +555,33 @@ class Application:
         self._sessions: dict[str, _Session] = {}
         self._lifecycle_lock = asyncio.Lock()
 
-    async def start_session(self, session_id: str, *, logical_time: int = 0) -> SessionState:
+    async def start_session(
+        self,
+        session_id: str,
+        *,
+        logical_time: int = 0,
+        mode: RuntimeMode | str | None = None,
+    ) -> SessionState:
         async with self._lifecycle_lock:
             if not session_id or session_id in self._sessions:
                 raise ValueError("session identity must be new and nonempty")
             if len(self._sessions) >= self.max_sessions:
                 raise RuntimeError("session capacity reached")
-            session = _Session(session_id, self.settings, self.registry, self.dependencies)
+            try:
+                session_mode = RuntimeMode(mode or self.settings.INTERLOCK_MODE)
+            except ValueError as exc:
+                raise ValueError("session mode is invalid") from exc
+            if session_mode == RuntimeMode.REPLAY:
+                raise ValueError("live sessions cannot start in REPLAY mode")
+            session_settings = self.settings.model_copy(
+                update={"INTERLOCK_MODE": session_mode.value}, deep=True
+            )
+            session = _Session(session_id, session_settings, self.registry, self.dependencies)
             self._sessions[session_id] = session
             try:
                 event = await session.journal.append(EventCandidate(
                     session_id=session_id, event_type="SessionStarted", source=EventSource.SYSTEM,
-                    payload={"mode": self.settings.INTERLOCK_MODE}, logical_time=logical_time,
+                    payload={"mode": session_mode.value}, logical_time=logical_time,
                 ))
                 await session.wait_through(event.sequence)
             except BaseException:
