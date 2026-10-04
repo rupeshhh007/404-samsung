@@ -1,4 +1,22 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, {
+  useCallback,
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useSyncExternalStore,
+} from 'react';
+import {
+  HttpApplicationError,
+  HttpProtocolError,
+  InterlockHttpClient,
+} from './api/http';
+import type { FrontendError, ProjectionEventMessage } from './api/types';
+import { ProjectionSocketClient } from './api/websocket';
+import { SessionBar } from './components/SessionBar';
+import { CopilotPage } from './pages/CopilotPage';
+import { TracePage } from './pages/TracePage';
+import { createProjectionStore } from './state/store';
 
 // Semantic Status Badge Helper
 interface BadgeProps {
@@ -75,7 +93,7 @@ const TABS: TabDefinition[] = [
   { id: 'trace', label: '4. Trace & Metrics' },
 ];
 
-export const App: React.FC = () => {
+const LegacyShell: React.FC = () => {
   // Theme state: initialized from localStorage -> prefers-color-scheme -> default 'dark'
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
@@ -575,5 +593,260 @@ export const App: React.FC = () => {
     </div>
   );
 };
+
+type View = 'copilot' | 'trace';
+type Theme = 'light' | 'dark';
+
+function initialTheme(): Theme {
+  try {
+    const stored = localStorage.getItem('interlock-theme');
+    if (stored === 'light' || stored === 'dark') return stored;
+    if (window.matchMedia?.('(prefers-color-scheme: light)').matches) return 'light';
+  } catch {
+    // Storage and media-query access are optional presentation capabilities.
+  }
+  return 'dark';
+}
+
+function frontendError(error: unknown): FrontendError {
+  if (error instanceof HttpApplicationError) {
+    return {
+      kind: 'HTTP',
+      message: error.message,
+      recoverable: error.status >= 500,
+      status: error.status,
+    };
+  }
+  if (error instanceof HttpProtocolError) {
+    return {
+      kind: 'PROTOCOL',
+      message: error.message,
+      recoverable: false,
+      status: null,
+    };
+  }
+  return {
+    kind: 'CONNECTION',
+    message: error instanceof Error ? error.message : 'The backend request failed.',
+    recoverable: true,
+    status: null,
+  };
+}
+
+export const App: React.FC = () => {
+  const store = useMemo(() => createProjectionStore(), []);
+  const http = useMemo(() => new InterlockHttpClient(), []);
+  const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
+  const socketRef = useRef<ProjectionSocketClient | null>(null);
+  const requestSequence = useRef(0);
+
+  const [view, setView] = useState<View>('copilot');
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [actionPending, setActionPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [traceEvents, setTraceEvents] = useState<readonly ProjectionEventMessage[]>([]);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceError, setTraceError] = useState<string | null>(null);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    try {
+      localStorage.setItem('interlock-theme', theme);
+    } catch {
+      // A blocked storage write does not affect runtime state.
+    }
+  }, [theme]);
+
+  useEffect(() => () => socketRef.current?.disconnect(), []);
+
+  useEffect(() => {
+    const sessionId = state.sessionId;
+    if (!sessionId) {
+      setTraceEvents([]);
+      setTraceLoading(false);
+      setTraceError(null);
+      return;
+    }
+
+    let cancelled = false;
+    async function loadHistory() {
+      setTraceLoading(true);
+      setTraceError(null);
+      try {
+        const collected: ProjectionEventMessage[] = [];
+        let afterSequence = 0;
+        let hasMore = true;
+        while (hasMore) {
+          const page = await http.getEvents(sessionId, afterSequence);
+          if (cancelled) return;
+          const next = page.events.filter((event) => event.sequence > afterSequence);
+          collected.push(...next);
+          if (next.length === 0) break;
+          afterSequence = next[next.length - 1].sequence;
+          hasMore = page.has_more;
+        }
+        if (!cancelled) {
+          setTraceEvents([...collected].sort((left, right) => left.sequence - right.sequence));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const normalized = frontendError(error);
+          setTraceError(`Trace history unavailable: ${normalized.message}`);
+        }
+      } finally {
+        if (!cancelled) setTraceLoading(false);
+      }
+    }
+    void loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [http, state.sessionId, state.lastAppliedSequence]);
+
+  const nextRequestId = useCallback((kind: string) => {
+    requestSequence.current += 1;
+    return `interlock-ui-${kind}-${requestSequence.current}`;
+  }, []);
+
+  const startSession = useCallback(async () => {
+    setActionPending(true);
+    setActionError(null);
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    store.reset();
+    setTraceEvents([]);
+    try {
+      store.beginConnection();
+      const created = await http.createSession({
+        mode: 'DEMO',
+        client_request_id: nextRequestId('session'),
+      });
+      const snapshot = await http.getSession(created.session_id);
+      store.applySnapshot({
+        type: 'snapshot',
+        schema_version: 1,
+        session_id: snapshot.session_id,
+        through_sequence: snapshot.through_sequence,
+        projection: snapshot.projection,
+      });
+      const socket = new ProjectionSocketClient({
+        url: created.ws_url,
+        sessionId: created.session_id,
+        store,
+        loadSnapshot: (url) => http.getSnapshotUrl(url),
+      });
+      socketRef.current = socket;
+      socket.connect();
+    } catch (error) {
+      const normalized = frontendError(error);
+      store.markError(normalized);
+      setActionError(normalized.message);
+    } finally {
+      setActionPending(false);
+    }
+  }, [http, nextRequestId, store]);
+
+  const submitText = useCallback(async (content: string) => {
+    if (!state.sessionId) return;
+    setActionPending(true);
+    setActionError(null);
+    try {
+      await http.submitInput(state.sessionId, {
+        modality: 'TEXT',
+        content,
+        client_request_id: nextRequestId('input'),
+      });
+    } catch (error) {
+      setActionError(frontendError(error).message);
+    } finally {
+      setActionPending(false);
+    }
+  }, [http, nextRequestId, state.sessionId]);
+
+  const cancelSpeech = useCallback(async (speechId: string) => {
+    if (!state.sessionId) return;
+    setActionPending(true);
+    setActionError(null);
+    try {
+      await http.cancelSpeech(state.sessionId, speechId, {
+        client_request_id: nextRequestId('speech-cancel'),
+      });
+    } catch (error) {
+      setActionError(frontendError(error).message);
+    } finally {
+      setActionPending(false);
+    }
+  }, [http, nextRequestId, state.sessionId]);
+
+  return (
+    <div className="min-h-screen bg-[#faf8f5] text-stone-800 transition-colors dark:bg-[#12100e] dark:text-stone-200">
+      <a href="#main-content" className="skip-link">Skip to main content</a>
+      <header className="app-header">
+        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <div>
+            <p className="font-mono text-xl font-bold tracking-wider text-stone-950 dark:text-white">INTERLOCK</p>
+            <p className="text-xs text-stone-500 dark:text-stone-400">Consistency runtime workbench</p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <nav aria-label="Primary views" className="view-switcher">
+              <button
+                type="button"
+                className={view === 'copilot' ? 'view-button view-button-active' : 'view-button'}
+                aria-current={view === 'copilot' ? 'page' : undefined}
+                onClick={() => setView('copilot')}
+              >
+                Copilot
+              </button>
+              <button
+                type="button"
+                className={view === 'trace' ? 'view-button view-button-active' : 'view-button'}
+                aria-current={view === 'trace' ? 'page' : undefined}
+                onClick={() => setView('trace')}
+              >
+                Trace
+              </button>
+            </nav>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+              aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            >
+              {theme === 'dark' ? 'Light theme' : 'Dark theme'}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="mx-auto w-full max-w-7xl px-4 pt-4">
+        <SessionBar state={state} actionPending={actionPending} onStartSession={() => void startSession()} />
+      </div>
+
+      {view === 'copilot' ? (
+        <CopilotPage
+          state={state}
+          actionPending={actionPending}
+          actionError={actionError}
+          onSubmitText={submitText}
+          onCancelSpeech={cancelSpeech}
+        />
+      ) : (
+        <TracePage
+          state={state}
+          events={traceEvents}
+          loading={traceLoading}
+          error={traceError}
+        />
+      )}
+
+      <footer className="border-t border-stone-200 px-4 py-3 text-center text-xs text-stone-500 dark:border-stone-800 dark:text-stone-400">
+        Anticipate early · Commit safely · Speak only what reality confirms
+      </footer>
+    </div>
+  );
+};
+
+void LegacyShell;
 
 export default App;
