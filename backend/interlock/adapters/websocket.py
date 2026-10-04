@@ -180,13 +180,26 @@ class _SessionProjection:
 class ProjectionHub:
     """Bounded projection history and subscriber fan-out, scoped by session."""
 
-    def __init__(self, *, history_limit: int = 256, subscriber_buffer: int = 64) -> None:
+    def __init__(
+        self,
+        *,
+        history_limit: int = 256,
+        subscriber_buffer: int = 64,
+        max_sessions: int = 128,
+        max_subscribers: int = 512,
+    ) -> None:
         if type(history_limit) is not int or history_limit < 1:
             raise ValueError("history_limit must be positive")
         if type(subscriber_buffer) is not int or subscriber_buffer < 1:
             raise ValueError("subscriber_buffer must be positive")
+        if type(max_sessions) is not int or max_sessions < 1:
+            raise ValueError("max_sessions must be positive")
+        if type(max_subscribers) is not int or max_subscribers < 1:
+            raise ValueError("max_subscribers must be positive")
         self.history_limit = history_limit
         self.subscriber_buffer = subscriber_buffer
+        self.max_sessions = max_sessions
+        self.max_subscribers = max_subscribers
         self._application: Application | None = None
         self._sessions: dict[str, _SessionProjection] = {}
         self._subscribers: dict[str, set[ProjectionSubscription]] = {}
@@ -231,9 +244,7 @@ class ProjectionHub:
         async with self._lock:
             if self._closed:
                 return False
-            session = self._sessions.setdefault(
-                event.session_id, _SessionProjection(deque(maxlen=self.history_limit))
-            )
+            session = self._session_for_publish_locked(event.session_id)
             if event.sequence <= session.last_sequence:
                 if session.event_ids.get(event.sequence) == event.event_id:
                     return False
@@ -289,6 +300,8 @@ class ProjectionHub:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("projection hub is shut down")
+            if sum(len(items) for items in self._subscribers.values()) >= self.max_subscribers:
+                raise RuntimeError("projection subscriber capacity reached")
             # Publication uses the same lock.  Pinning the detached application
             # snapshot here prevents an event from landing between snapshot and
             # history selection and disappearing from both initial views.
@@ -314,6 +327,26 @@ class ProjectionHub:
                 subscriber.enqueued_sequence = state.last_sequence
             self._subscribers.setdefault(session_id, set()).add(subscriber)
         return subscriber
+
+    def _session_for_publish_locked(self, session_id: str) -> _SessionProjection:
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+        if len(self._sessions) >= self.max_sessions:
+            retired = next(
+                (
+                    retained_id
+                    for retained_id in self._sessions
+                    if not self._subscribers.get(retained_id)
+                ),
+                None,
+            )
+            if retired is None:
+                raise ProjectionError("projection session capacity reached")
+            self._sessions.pop(retired, None)
+        session = _SessionProjection(deque(maxlen=self.history_limit))
+        self._sessions[session_id] = session
+        return session
 
     async def unsubscribe(self, subscriber: ProjectionSubscription) -> None:
         async with self._lock:
