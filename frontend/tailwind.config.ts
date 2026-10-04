@@ -9,44 +9,68 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Semantic roles from docs/demo/UI_SPECIFICATION.md:
-        // - Neutral / warm-neutral: unknown / uninitialized
-        // - Blue: active / read
-        // - Violet: speculative (ANTICIPATE)
-        // - Amber: cancellation / pending
-        // - Red: divergence / block
-        // - Teal: reconciliation (ADAPT)
-        // - Green: authoritative confirmation (VERIFY)
+        // Night Instrument Tokens
+        ink: {
+          950: 'var(--ink-950)',
+          900: 'var(--ink-900)',
+          850: 'var(--ink-850)',
+          800: 'var(--ink-800)',
+          700: 'var(--ink-700)',
+          600: 'var(--ink-600)',
+          500: 'var(--ink-500)',
+        },
+        bone: {
+          50: 'var(--bone-50)',
+          300: 'var(--bone-300)',
+          500: 'var(--bone-500)',
+          600: 'var(--bone-600)',
+          paper: 'var(--paper)',
+          paperInk: 'var(--paper-ink)',
+        },
+        sig: {
+          active: 'var(--sig-active)',
+          activeGlow: 'var(--sig-active-glow)',
+          activeWash: 'var(--sig-active-wash)',
+          spec: 'var(--sig-spec)',
+          specGlow: 'var(--sig-spec-glow)',
+          specWash: 'var(--sig-spec-wash)',
+          pending: 'var(--sig-pending)',
+          pendingGlow: 'var(--sig-pending-glow)',
+          pendingWash: 'var(--sig-pending-wash)',
+          alarm: 'var(--sig-alarm)',
+          alarmGlow: 'var(--sig-alarm-glow)',
+          alarmWash: 'var(--sig-alarm-wash)',
+          adapt: 'var(--sig-adapt)',
+          adaptGlow: 'var(--sig-adapt-glow)',
+          adaptWash: 'var(--sig-adapt-wash)',
+          verify: 'var(--sig-verify)',
+          verifyGlow: 'var(--sig-verify-glow)',
+          verifyWash: 'var(--sig-verify-wash)',
+        },
+        // Compatibility alias mapping
         interlock: {
-          // Warm foundation surfaces
-          bgLight: '#faf8f5',
-          bgDark: '#12100e',
-          surfaceLight: '#ffffff',
-          surfaceDark: '#1c1917',
-          cardLight: '#f5f3ef',
-          cardDark: '#292524',
-          borderLight: '#e7e5e4',
-          borderDark: '#38332e',
-          textLight: '#1c1917',
-          textDark: '#f5f5f4',
-          textMutedLight: '#78716c',
-          textMutedDark: '#a8a29e',
-
-          // Preserved canonical semantic colors
-          unknown: '#78716c',       // Warm stone neutral
-          active: '#3b82f6',        // Blue
-          speculative: '#a855f7',   // Violet (ANTICIPATE)
-          pending: '#f59e0b',       // Amber
-          cancellation: '#d97706',  // Amber
-          divergence: '#ef4444',    // Red
-          block: '#dc2626',         // Red
-          reconcile: '#14b8a6',     // Teal (ADAPT)
-          verify: '#10b981',        // Green (VERIFY)
+          bgDark: 'var(--ink-950)',
+          surfaceDark: 'var(--ink-850)',
+          cardDark: 'var(--ink-800)',
+          borderDark: 'var(--ink-600)',
+          textDark: 'var(--bone-50)',
+          textMutedDark: 'var(--bone-500)',
+          active: 'var(--sig-active)',
+          speculative: 'var(--sig-spec)',
+          pending: 'var(--sig-pending)',
+          divergence: 'var(--sig-alarm)',
+          reconcile: 'var(--sig-adapt)',
+          verify: 'var(--sig-verify)',
         },
       },
       fontFamily: {
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
-        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        display: ['Bricolage Grotesque Variable', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        voice: ['Instrument Serif', 'Georgia', 'serif'],
+        mono: ['JetBrains Mono Variable', 'ui-monospace', 'Menlo', 'monospace'],
+        sans: ['Bricolage Grotesque Variable', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+      },
+      borderRadius: {
+        none: '0px',
       },
     },
   },

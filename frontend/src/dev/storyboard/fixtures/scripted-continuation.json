@@ -1,0 +1,994 @@
+{
+  "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+  "origin": "SCRIPTED_CONTINUATION",
+  "events": [
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-32",
+      "sequence": 32,
+      "event_type": "ReconciliationPlanned",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "01a1092a-29af-7c3d-af87-a4b06a58c2fe",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 32,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "RUNNING",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ],
+          "divergences": [
+            {
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "desired_fingerprint": "sha256:071c7a9a6d6aa01a937cc496c52270cbfdcabba1c6046584e0d54a37fdc9ce5d",
+              "observed_effect_ids": [
+                "sha256:45d9e044cda90512b4c54ff28c3e5eb16db84e78e16d8eed378aa756172f9a1d"
+              ],
+              "kind": "DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT",
+              "state": "RECONCILING",
+              "detected_by_event_id": "01a1092a-29af-7c3d-af87-a4b06a58c2fe",
+              "authorization_required": true,
+              "schema_version": 1
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-33",
+      "sequence": 33,
+      "event_type": "ReconciliationStepChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-32",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 33,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "RUNNING",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-34",
+      "sequence": 34,
+      "event_type": "ReconciliationStepChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-33",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 34,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "RUNNING",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ],
+          "effects": [
+            {
+              "effect_id": "sha256:45d9e044cda90512b4c54ff28c3e5eb16db84e78e16d8eed378aa756172f9a1d",
+              "logical_action_id": "sha256:ed8265fc26bedef824b741167c12356c294e97b4ac376a7c7a77e4de1315768a",
+              "operation_id": "33109fa0639f2d7e8b0d750c0a617b91ef6f6a662c8c63fcfdce38f1373de80e",
+              "provider_effect_id": "fake-booking-b087a94aea53f31ef8f465fe4402a48f",
+              "effect_type": "appointment.booking",
+              "subject": {
+                "resource": "appointment",
+                "provider_booking_id": "fake-booking-b087a94aea53f31ef8f465fe4402a48f",
+                "center_id": "ctr-01"
+              },
+              "parameters": {
+                "requested_slot": "2030-01-15T11:00:00+05:30",
+                "confirmed_slot": "2030-01-15T11:00:00+05:30"
+              },
+              "state": "COMPENSATED",
+              "observed_at": "2026-10-04T23:05:20.555116Z",
+              "authority": "AUTHORITATIVE",
+              "evidence_ids": [
+                "sha256:336cce424b264e8737126a2f4e19d6376e3ff085658826e45c10736f19e7ee9f"
+              ],
+              "schema_version": 1,
+              "supersedes_effect_id": null
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-35",
+      "sequence": 35,
+      "event_type": "ReconciliationStepChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-34",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 35,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "RUNNING",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-36",
+      "sequence": 36,
+      "event_type": "ReconciliationStepChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-35",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 36,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "RUNNING",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-37",
+      "sequence": 37,
+      "event_type": "ReconciliationStepChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-36",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 37,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "PENDING",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "RUNNING",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ],
+          "effects": [
+            {
+              "effect_id": "sha256:45d9e044cda90512b4c54ff28c3e5eb16db84e78e16d8eed378aa756172f9a1d",
+              "logical_action_id": "sha256:ed8265fc26bedef824b741167c12356c294e97b4ac376a7c7a77e4de1315768a",
+              "operation_id": "33109fa0639f2d7e8b0d750c0a617b91ef6f6a662c8c63fcfdce38f1373de80e",
+              "provider_effect_id": "fake-booking-b087a94aea53f31ef8f465fe4402a48f",
+              "effect_type": "appointment.booking",
+              "subject": {
+                "resource": "appointment",
+                "provider_booking_id": "fake-booking-b087a94aea53f31ef8f465fe4402a48f",
+                "center_id": "ctr-01"
+              },
+              "parameters": {
+                "requested_slot": "2030-01-15T11:00:00+05:30",
+                "confirmed_slot": "2030-01-15T11:00:00+05:30"
+              },
+              "state": "COMPENSATED",
+              "observed_at": "2026-10-04T23:05:20.555116Z",
+              "authority": "AUTHORITATIVE",
+              "evidence_ids": [
+                "sha256:336cce424b264e8737126a2f4e19d6376e3ff085658826e45c10736f19e7ee9f"
+              ],
+              "schema_version": 1,
+              "supersedes_effect_id": null
+            },
+            {
+              "effect_id": "eff-apt-12-confirmed",
+              "logical_action_id": "act-book-12",
+              "operation_id": "op-reconcile-commit",
+              "provider_effect_id": "cal-12-confirmed",
+              "effect_type": "APPOINTMENT",
+              "subject": {
+                "patient": "demo-user"
+              },
+              "parameters": {
+                "confirmed_slot": "2030-01-15T12:00:00+05:30"
+              },
+              "state": "COMMITTED",
+              "observed_at": "2030-01-15T12:00:00Z",
+              "authority": "AUTHORITATIVE",
+              "evidence_ids": [
+                "ev-apt-12-auth"
+              ],
+              "schema_version": 1,
+              "supersedes_effect_id": null
+            }
+          ],
+          "evidence": [
+            {
+              "evidence_id": "http-2d769c26c32a40326d40435f641902684897c231329d9447834bb10395e20cb5",
+              "source": "USER",
+              "kind": "text",
+              "captured_at": "2026-10-04T23:05:18.530373Z",
+              "content_ref": "Book 11:00.",
+              "content_hash": "sha256:08daae3d1c852f3220f8ae9c5e1414aaf2a1aaf52aa5222a1cde31622e731dd0",
+              "authority": "AUTHORITATIVE",
+              "provenance": {
+                "event_id": "01a1092a-21c2-71cf-a0d9-27936fdb055a",
+                "sequence": 2
+              },
+              "schema_version": 1,
+              "expires_at": null,
+              "derived_from": null
+            },
+            {
+              "evidence_id": "http-ee691a37d83132a4a2a6e5f1e2065eeda9f82b82e529c85466be7b3cf7b1a3b0",
+              "source": "USER",
+              "kind": "text",
+              "captured_at": "2026-10-04T23:05:18.835024Z",
+              "content_ref": "Actually, make it 12:00.",
+              "content_hash": "sha256:ea8ed6b08879d112f833626ae07894faee7146aa9e4bc0bb2a2092443981951a",
+              "authority": "AUTHORITATIVE",
+              "provenance": {
+                "event_id": "01a1092a-22f3-7606-a270-edf59bbdd3b5",
+                "sequence": 12
+              },
+              "schema_version": 1,
+              "expires_at": null,
+              "derived_from": null
+            },
+            {
+              "evidence_id": "sha256:336cce424b264e8737126a2f4e19d6376e3ff085658826e45c10736f19e7ee9f",
+              "source": "TOOL",
+              "kind": "booking_confirmation",
+              "captured_at": "2026-10-04T23:05:20.555116Z",
+              "content_ref": "event:01a1092a-29ab-7e8f-8278-e8a93e753884",
+              "content_hash": "sha256:57cf61e6c91f70992f5ceb4941e308dc0bb01913924e60090686586d77e01a33",
+              "authority": "AUTHORITATIVE",
+              "provenance": {
+                "event_id": "01a1092a-29ab-7e8f-8278-e8a93e753884",
+                "sequence": 22,
+                "operation_id": "33109fa0639f2d7e8b0d750c0a617b91ef6f6a662c8c63fcfdce38f1373de80e",
+                "tool_name": "appointment.book",
+                "provider_request_id": "fake-request-db7b09125ba3013ca2cd53ff3915e087",
+                "causation_id": "01a1092a-21d2-7d07-9eb3-44f9b27e84f5",
+                "provider_effect_id": "fake-booking-b087a94aea53f31ef8f465fe4402a48f"
+              },
+              "schema_version": 1,
+              "expires_at": null,
+              "derived_from": null
+            },
+            {
+              "evidence_id": "ev-apt-12-auth",
+              "source": "TOOL",
+              "kind": "CONFIRMED_RESERVATION",
+              "captured_at": "2030-01-15T12:00:00Z",
+              "content_ref": "cal://booking/12-confirmed",
+              "content_hash": "hash12",
+              "authority": "AUTHORITATIVE",
+              "provenance": {},
+              "schema_version": 1,
+              "expires_at": null,
+              "derived_from": null
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-38",
+      "sequence": 38,
+      "event_type": "ReconciliationStepChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-37",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 38,
+        "changed": {
+          "plans": [
+            {
+              "plan_id": "plan-01a1092a",
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "based_on_intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "steps": [
+                {
+                  "step_id": "plan-01a1092a-step-1",
+                  "kind": "VERIFY_OBSERVED",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T11:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-1"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-2",
+                  "kind": "COMPENSATE_OBSOLETE",
+                  "tool_name": "appointment.cancel",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-2"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-3",
+                  "kind": "VERIFY_COMPENSATION",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "appointment_id": "apt-11"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-3"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-4",
+                  "kind": "PREPARE_DESIRED",
+                  "tool_name": "appointment.prepare",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-4"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-5",
+                  "kind": "COMMIT_DESIRED",
+                  "tool_name": "appointment.book",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-5"
+                },
+                {
+                  "step_id": "plan-01a1092a-step-6",
+                  "kind": "VERIFY_FINAL",
+                  "tool_name": "appointment.check",
+                  "arguments": {
+                    "slot": "2030-01-15T12:00:00+05:30"
+                  },
+                  "state": "SUCCEEDED",
+                  "requires_authorization": false,
+                  "idempotency_key": "plan-01a1092a-key-6"
+                }
+              ],
+              "state": "SUCCEEDED",
+              "provider_capability_hash": "cap-reconcile-v1",
+              "schema_version": 1,
+              "authorized_by_evidence_id": "ev-auth-1"
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-39",
+      "sequence": 39,
+      "event_type": "ClaimStateChanged",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-38",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 39,
+        "changed": {
+          "claims": [
+            {
+              "claim_id": "06a659532713bd72a4056a7f0ed55022e6539d7b09069ba45381a18fdd3da4ad",
+              "predicate": "appointment_booked",
+              "subject": {
+                "center_id": "ctr-01"
+              },
+              "object": {
+                "requested_slot": "2030-01-15T12:00:00+05:30"
+              },
+              "state": "CONFIRMED",
+              "required_evidence_rule": "appointment_booked",
+              "supporting_evidence_ids": [
+                "ev-apt-12-auth"
+              ],
+              "intent_revision_id": "2db573ef1d893a0b7cf3d753d16fbab4ffd3c00da0967ce4d7e7b618d3a77ea2",
+              "updated_by_event_id": "01a1092a-2303-7414-998f-43e02a0dc466",
+              "schema_version": 1
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-40",
+      "sequence": 40,
+      "event_type": "DivergenceResolved",
+      "correlation_id": "corr-reconcile-1",
+      "causation_id": "evt-01a1092a-39",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 40,
+        "changed": {
+          "divergences": [
+            {
+              "divergence_id": "365ad4e4d088314468ad0e91a2e1b9f254c3efa4d4b3ac36b0d789e2cb021065",
+              "desired_fingerprint": "sha256:071c7a9a6d6aa01a937cc496c52270cbfdcabba1c6046584e0d54a37fdc9ce5d",
+              "observed_effect_ids": [
+                "sha256:45d9e044cda90512b4c54ff28c3e5eb16db84e78e16d8eed378aa756172f9a1d"
+              ],
+              "kind": "DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT",
+              "state": "RESOLVED",
+              "detected_by_event_id": "01a1092a-29af-7c3d-af87-a4b06a58c2fe",
+              "authorization_required": true,
+              "schema_version": 1
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-reconcile-1"
+      }
+    },
+    {
+      "origin": "SCRIPTED_CONTINUATION",
+      "event_id": "evt-01a1092a-41",
+      "sequence": 41,
+      "event_type": "SpeechActApproved",
+      "correlation_id": "corr-speech-final",
+      "causation_id": "evt-01a1092a-40",
+      "schema_version": 1,
+      "projection_delta": {
+        "through_sequence": 41,
+        "changed": {
+          "speech": [
+            {
+              "speech_id": "b35ea8f55803936a7d6f72e72ea009d1ca2bc8b5a159915b0bfe3e61b7b3ff44",
+              "act_type": "UNCERTAINTY",
+              "template_id": "tmpl_outcome_unknown",
+              "slots": {},
+              "claim_ids": [],
+              "requested_certainty": "UNCERTAIN",
+              "state": "EMITTED",
+              "created_by_event_id": "01a1092a-29b2-75eb-b83b-bc9057bfcafa",
+              "schema_version": 1,
+              "supersedes_speech_id": null,
+              "rendered_text": "I can\u2019t yet verify whether the booking completed.",
+              "approved_policy_id": "truthlock.v1",
+              "approved_through_sequence": 26,
+              "approved_claim_versions": {},
+              "heard": false,
+              "cancellation_pending": false,
+              "correction_pending": false
+            },
+            {
+              "speech_id": "speech-01a1092a-final",
+              "act_type": "RESULT",
+              "template_id": "tmpl-booking-confirmed",
+              "slots": {
+                "slot": "2030-01-15T12:00:00+05:30"
+              },
+              "claim_ids": [
+                "06a659532713bd72a4056a7f0ed55022e6539d7b09069ba45381a18fdd3da4ad"
+              ],
+              "requested_certainty": "CONFIRMED",
+              "state": "EMITTED",
+              "created_by_event_id": "evt-01a1092a-41",
+              "schema_version": 1,
+              "supersedes_speech_id": null,
+              "rendered_text": "Confirmed \u2014 your 12:00 appointment is booked.",
+              "approved_policy_id": "truthlock-default-policy",
+              "approved_through_sequence": 41,
+              "approved_claim_versions": {
+                "06a659532713bd72a4056a7f0ed55022e6539d7b09069ba45381a18fdd3da4ad": "1"
+              },
+              "heard": false,
+              "cancellation_pending": false,
+              "correction_pending": false
+            }
+          ]
+        },
+        "removed": {}
+      },
+      "type": "event",
+      "session_id": "01a1092a-21be-7e8a-bced-0584da056667",
+      "trace": {
+        "correlation_id": "corr-speech-final"
+      }
+    }
+  ]
+}

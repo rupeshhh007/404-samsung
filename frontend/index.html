@@ -3,19 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>INTERLOCK</title>
-    <script>
-      try {
-        const t = localStorage.getItem('interlock-theme');
-        if (t === 'light') {
-          document.documentElement.classList.remove('dark');
-        } else {
-          document.documentElement.classList.add('dark');
-        }
-      } catch {}
-    </script>
+    <meta name="theme-color" content="#0A0908" />
+    <meta name="color-scheme" content="dark" />
+    <title>INTERLOCK — Consistency Runtime</title>
   </head>
-  <body class="bg-[#0e0d0c] text-stone-100 antialiased selection:bg-stone-700 selection:text-white">
+  <body class="bg-[#0A0908] text-[#F4EFE6] antialiased selection:bg-[#38332E] selection:text-[#F4EFE6]">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

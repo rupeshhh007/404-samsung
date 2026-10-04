@@ -1,7 +1,21 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
+
+// Typography (Self-hosted via Fontsource)
+import '@fontsource-variable/bricolage-grotesque/wdth.css';
+import '@fontsource/instrument-serif/400.css';
+import '@fontsource/instrument-serif/400-italic.css';
+import '@fontsource-variable/jetbrains-mono/wght.css';
+
+// Design Tokens & Styles
+import './styles/tokens.css';
+import './styles/grain.css';
 import './styles/index.css';
+
+// Motion & GSAP Initialization
+import './ui/motion/gsap';
+
+import App from './App';
 
 const rootElement = document.getElementById('root');
 
@@ -12,10 +26,7 @@ if (rootElement) {
     </React.StrictMode>
   );
 } else {
-  // In environments without index.html or before HTML mounting,
-  // report an informative diagnostic without throwing unhandled exceptions.
   console.warn(
-    '[INTERLOCK UI-001] Target DOM element with ID "root" was not found in document. ' +
-    'Standard browser hosts require frontend/index.html to mount this entrypoint.'
+    '[INTERLOCK UI-001] Target DOM element with ID "root" was not found in document.'
   );
 }
