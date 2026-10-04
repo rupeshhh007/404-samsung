@@ -37,8 +37,18 @@ from interlock.execution.tools import (
 )
 
 
-_TOOLS = frozenset({"appointment.book", "appointment.get", "appointment.cancel"})
+_TOOLS = frozenset({
+    "device.lookup_error",
+    "service.find_centers",
+    "appointment.availability",
+    "appointment.book",
+    "appointment.get",
+    "appointment.cancel",
+})
 _WIRE_TOOL = {
+    "device.lookup_error": "LOOKUP_DEVICE_ERROR",
+    "service.find_centers": "FIND_SERVICE_CENTERS",
+    "appointment.availability": "GET_APPOINTMENT_AVAILABILITY",
     "appointment.book": "BOOK_APPOINTMENT",
     "appointment.get": "GET_APPOINTMENT",
     "appointment.cancel": "CANCEL_APPOINTMENT",
@@ -49,8 +59,13 @@ _REQUEST_FIELDS = frozenset({
 })
 _RESPONSE_FIELDS = frozenset({
     "schemaVersion", "requestId", "operationId", "idempotencyKey", "state",
-    "booking", "error", "retryCategory", "callbackId",
+    "diagnostic", "query", "serviceCenters", "availability", "booking",
+    "error", "retryCategory", "callbackId",
 })
+_DIAGNOSTIC_FIELDS = frozenset({"deviceId", "errorCode", "title", "summary"})
+_QUERY_FIELDS = frozenset({"deviceId", "errorCode"})
+_CENTER_FIELDS = frozenset({"serviceCenterId", "name", "timezone"})
+_AVAILABILITY_FIELDS = frozenset({"serviceCenterId", "availableStarts"})
 _BOOKING_FIELDS = frozenset({
     "bookingId", "serviceCenterId", "requestedStart", "confirmedStart",
     "cancelledAt",
@@ -153,8 +168,17 @@ class SamsungShapedToolAdapter:
             raise AdapterProtocolError(
                 AdapterErrorCode.IDENTITY_MISMATCH, "idempotency identity differs"
             )
-        payload: dict[str, Any] = {}
-        if invocation.tool_name == "appointment.book":
+        payload: dict[str, Any]
+        if invocation.tool_name in {"device.lookup_error", "service.find_centers"}:
+            payload = {
+                "deviceId": require_safe_text(args["device_id"], "device_id"),
+                "errorCode": require_safe_text(args["error_code"], "error_code"),
+            }
+        elif invocation.tool_name == "appointment.availability":
+            payload = {
+                "serviceCenterId": require_safe_text(args["center_id"], "center_id")
+            }
+        elif invocation.tool_name == "appointment.book":
             payload = {
                 "serviceCenterId": require_safe_text(args["center_id"], "center_id"),
                 "requestedStart": require_rfc3339(args["requested_slot"], "requested_slot"),
@@ -267,6 +291,10 @@ class SamsungShapedToolAdapter:
 
 
 def _argument_fields(tool_name: str) -> frozenset[str]:
+    if tool_name in {"device.lookup_error", "service.find_centers"}:
+        return frozenset({"device_id", "error_code", "idempotency_key"})
+    if tool_name == "appointment.availability":
+        return frozenset({"center_id", "idempotency_key"})
     if tool_name == "appointment.book":
         return frozenset({"center_id", "requested_slot", "idempotency_key"})
     if tool_name == "appointment.get":
@@ -280,12 +308,89 @@ def _normalize_result(
     state: str,
     provider_id: str,
 ) -> tuple[dict[str, Any], ToolOutcome, str | None]:
+    if state == "ERROR_LOOKUP_SUCCEEDED":
+        if invocation.tool_name != "device.lookup_error":
+            raise AdapterProtocolError(
+                AdapterErrorCode.INVALID_RESPONSE, "diagnostic result is for another tool"
+            )
+        _forbid(response, "error", "retryCategory", "query", "serviceCenters",
+                "availability", "booking")
+        diagnostic = strict_object(
+            response.get("diagnostic"),
+            field="diagnostic",
+            allowed=_DIAGNOSTIC_FIELDS,
+            required=_DIAGNOSTIC_FIELDS,
+        )
+        result = {
+            "phase": "FINAL",
+            "status": state,
+            "provider_request_id": provider_id,
+            "device_id": require_safe_text(diagnostic["deviceId"], "diagnostic.deviceId"),
+            "error_code": require_safe_text(diagnostic["errorCode"], "diagnostic.errorCode"),
+            "title": require_safe_text(diagnostic["title"], "diagnostic.title"),
+            "summary": require_safe_text(diagnostic["summary"], "diagnostic.summary"),
+        }
+        _match_request(invocation, result)
+        return result, ToolOutcome.SUCCEEDED, None
+
+    if state == "SERVICE_CENTERS_FOUND":
+        if invocation.tool_name != "service.find_centers":
+            raise AdapterProtocolError(
+                AdapterErrorCode.INVALID_RESPONSE, "service-center result is for another tool"
+            )
+        _forbid(response, "error", "retryCategory", "diagnostic", "availability", "booking")
+        query = strict_object(
+            response.get("query"), field="query", allowed=_QUERY_FIELDS,
+            required=_QUERY_FIELDS,
+        )
+        centers = _service_centers(response.get("serviceCenters"))
+        result = {
+            "phase": "FINAL",
+            "status": state,
+            "provider_request_id": provider_id,
+            "device_id": require_safe_text(query["deviceId"], "query.deviceId"),
+            "error_code": require_safe_text(query["errorCode"], "query.errorCode"),
+            "centers": centers,
+        }
+        _match_request(invocation, result)
+        return result, ToolOutcome.SUCCEEDED, None
+
+    if state == "AVAILABILITY_FOUND":
+        if invocation.tool_name != "appointment.availability":
+            raise AdapterProtocolError(
+                AdapterErrorCode.INVALID_RESPONSE, "availability result is for another tool"
+            )
+        _forbid(response, "error", "retryCategory", "diagnostic", "query",
+                "serviceCenters", "booking")
+        availability = strict_object(
+            response.get("availability"),
+            field="availability",
+            allowed=_AVAILABILITY_FIELDS,
+            required=_AVAILABILITY_FIELDS,
+        )
+        starts = _safe_list(availability["availableStarts"], "availability.availableStarts")
+        result = {
+            "phase": "FINAL",
+            "status": state,
+            "provider_request_id": provider_id,
+            "center_id": require_safe_text(
+                availability["serviceCenterId"], "availability.serviceCenterId"
+            ),
+            "available_slots": [
+                require_rfc3339(slot, f"availability.availableStarts[{index}]")
+                for index, slot in enumerate(starts)
+            ],
+        }
+        _match_request(invocation, result)
+        return result, ToolOutcome.SUCCEEDED, None
+
     if state == "REQUEST_RECEIVED":
         if invocation.tool_name != "appointment.book":
             raise AdapterProtocolError(
                 AdapterErrorCode.INVALID_RESPONSE, "acknowledgement is unsupported for this tool"
             )
-        _forbid(response, "error", "retryCategory")
+        _forbid(response, "error", "retryCategory", "diagnostic", "query",
+                "serviceCenters", "availability")
         booking = _booking(response, required={"serviceCenterId", "requestedStart"})
         result = {
             "phase": "ACKNOWLEDGEMENT",
@@ -302,7 +407,8 @@ def _normalize_result(
             raise AdapterProtocolError(
                 AdapterErrorCode.INVALID_RESPONSE, "booking result is for another tool"
             )
-        _forbid(response, "error", "retryCategory")
+        _forbid(response, "error", "retryCategory", "diagnostic", "query",
+                "serviceCenters", "availability")
         booking = _booking(response, required={
             "bookingId", "serviceCenterId", "requestedStart", "confirmedStart"
         })
@@ -323,7 +429,8 @@ def _normalize_result(
             raise AdapterProtocolError(
                 AdapterErrorCode.INVALID_RESPONSE, "cancellation result is for another tool"
             )
-        _forbid(response, "error", "retryCategory")
+        _forbid(response, "error", "retryCategory", "diagnostic", "query",
+                "serviceCenters", "availability")
         booking = _booking(
             response,
             required={"bookingId", "serviceCenterId", "cancelledAt"},
@@ -339,7 +446,20 @@ def _normalize_result(
         _match_request(invocation, result)
         return result, ToolOutcome.SUCCEEDED, booking["bookingId"]
 
-    if state in {"BOOKING_FAILED", "LOOKUP_FAILED", "CANCELLATION_FAILED"}:
+    failure_states = {
+        "device.lookup_error": "ERROR_LOOKUP_FAILED",
+        "service.find_centers": "CENTER_SEARCH_FAILED",
+        "appointment.availability": "AVAILABILITY_FAILED",
+        "appointment.book": "BOOKING_FAILED",
+        "appointment.get": "LOOKUP_FAILED",
+        "appointment.cancel": "CANCELLATION_FAILED",
+    }
+    if state == failure_states[invocation.tool_name]:
+        _forbid(response, "diagnostic", "query", "serviceCenters", "availability")
+        if invocation.tool_name in {
+            "device.lookup_error", "service.find_centers", "appointment.availability"
+        }:
+            _forbid(response, "booking")
         error = strict_object(
             response.get("error"),
             field="error",
@@ -363,7 +483,12 @@ def _normalize_result(
         return result, ToolOutcome.FAILED, effect_id
 
     if state == "OUTCOME_UNKNOWN":
-        _forbid(response, "error", "retryCategory")
+        _forbid(response, "error", "retryCategory", "diagnostic", "query",
+                "serviceCenters", "availability")
+        if invocation.tool_name in {
+            "device.lookup_error", "service.find_centers", "appointment.availability"
+        }:
+            _forbid(response, "booking")
         result = {
             "phase": "FINAL",
             "status": "OUTCOME_UNKNOWN",
@@ -396,6 +521,45 @@ def _booking(
     return booking
 
 
+def _service_centers(value: Any) -> list[dict[str, str]]:
+    centers = _safe_list(value, "serviceCenters")
+    normalized: list[dict[str, str]] = []
+    identities: set[str] = set()
+    for index, raw in enumerate(centers):
+        center = strict_object(
+            raw,
+            field=f"serviceCenters[{index}]",
+            allowed=_CENTER_FIELDS,
+            required=_CENTER_FIELDS,
+        )
+        center_id = require_safe_text(
+            center["serviceCenterId"], f"serviceCenters[{index}].serviceCenterId"
+        )
+        if center_id in identities:
+            raise AdapterProtocolError(
+                AdapterErrorCode.INVALID_RESPONSE,
+                "service center identities must be unique",
+            )
+        identities.add(center_id)
+        normalized.append({
+            "center_id": center_id,
+            "name": require_safe_text(center["name"], f"serviceCenters[{index}].name"),
+            "timezone": require_safe_text(
+                center["timezone"], f"serviceCenters[{index}].timezone"
+            ),
+        })
+    return normalized
+
+
+def _safe_list(value: Any, field: str, *, maximum: int = 256) -> list[Any]:
+    if type(value) is not list or len(value) > maximum:
+        raise AdapterProtocolError(
+            AdapterErrorCode.INVALID_RESPONSE,
+            f"{field} must be a bounded array",
+        )
+    return value
+
+
 def _forbid(response: Mapping[str, Any], *fields: str) -> None:
     if any(field in response for field in fields):
         raise AdapterProtocolError(
@@ -415,6 +579,19 @@ def _optional_booking_identity(response: Mapping[str, Any]) -> str | None:
 
 def _match_request(invocation: ToolInvocation, result: Mapping[str, Any]) -> None:
     args = invocation.arguments
+    if invocation.tool_name in {"device.lookup_error", "service.find_centers"} and (
+        result.get("device_id") != args.get("device_id")
+        or result.get("error_code") != args.get("error_code")
+    ):
+        raise AdapterProtocolError(
+            AdapterErrorCode.IDENTITY_MISMATCH, "result targets another device/error"
+        )
+    if invocation.tool_name == "appointment.availability" and (
+        result.get("center_id") != args.get("center_id")
+    ):
+        raise AdapterProtocolError(
+            AdapterErrorCode.IDENTITY_MISMATCH, "result targets another service center"
+        )
     if invocation.tool_name == "appointment.book" and (
         result.get("center_id") != args.get("center_id")
         or result.get("requested_slot") != args.get("requested_slot")
