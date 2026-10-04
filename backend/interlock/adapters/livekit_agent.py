@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from time import monotonic_ns
 from typing import Any, Protocol, cast
@@ -34,6 +34,11 @@ class _LiveKitSession(Protocol):
         self, text: str, *, allow_interruptions: bool, add_to_chat_ctx: bool
     ) -> SpeechHandle: ...
     async def aclose(self) -> None: ...
+    @property
+    def current_speech(self) -> Any: ...
+    @property
+    def agent_state(self) -> str: ...
+
 
 
 ApplicationFactory = Callable[[OutputPort], Application]
@@ -81,6 +86,9 @@ class LiveKitSessionAdapter(OutputPort):
             "transcript_accept": deque(maxlen=max_background_tasks),
             "barge_in_request": deque(maxlen=max_background_tasks),
         }
+        self._start_timeout_s = 5.0
+        self._start_waiters: dict[str, asyncio.Event] = {}
+        self._agent_state_listener: Callable[[Any], None] = self._on_agent_state
         factory = application_factory or (
             lambda output: Application(
                 settings=Settings(), dependencies=RuntimeDependencies(output=output)
@@ -96,6 +104,10 @@ class LiveKitSessionAdapter(OutputPort):
         )
         self._livekit.on("user_input_transcribed", self._transcript_listener)
         self._livekit.on("user_state_changed", self._user_state_listener)
+        try:
+            self._livekit.on("agent_state_changed", self._agent_state_listener)
+        except Exception:
+            pass
         self._listeners_bound = True
         self._accepting = True
         self._started = True
@@ -137,6 +149,24 @@ class LiveKitSessionAdapter(OutputPort):
     def _on_user_state(self, event: UserStateChangedEvent | Any) -> None:
         if getattr(event, "new_state", None) == "speaking":
             self._spawn(self.request_barge_in())
+
+    def _on_agent_state(self, event: Any) -> None:
+        if getattr(event, "new_state", None) == "speaking":
+            current = getattr(self._livekit, "current_speech", None)
+            if current is not None:
+                for speech_id, waiter in tuple(self._start_waiters.items()):
+                    handle = self._handles.get(speech_id)
+                    if handle is not None and (
+                        current is handle
+                        or (
+                            getattr(current, "id", None) is not None
+                            and getattr(current, "id", None) == getattr(handle, "id", None)
+                        )
+                    ):
+                        if not waiter.is_set():
+                            waiter.set()
+
+
 
     async def accept_transcript(
         self,
@@ -215,6 +245,7 @@ class LiveKitSessionAdapter(OutputPort):
             raise OutputPortFailure("LIVEKIT_OUTPUT_LINEAGE_MISSING", heard=False)
         if len(self._tasks) >= self._max_background_tasks:
             raise OutputPortFailure("LIVEKIT_OUTPUT_CAPACITY", heard=False)
+
         # ``say`` receives exactly the persisted TRUTHLOCK text.  Disabling chat
         # insertion also prevents a LiveKit LLM from treating it as rewrite input.
         handle = self._livekit.say(
@@ -222,7 +253,109 @@ class LiveKitSessionAdapter(OutputPort):
         )
         self._handles[speech_id] = handle
         self._output_origins[speech_id] = origins[-1]
+
+        start_event = asyncio.Event()
+        self._start_waiters[speech_id] = start_event
+
+        # Check if this specific handle is already established as the active speech
+        current = getattr(self._livekit, "current_speech", None)
+        if current is not None and (
+            current is handle
+            or (
+                getattr(current, "id", None) is not None
+                and getattr(current, "id", None) == getattr(handle, "id", None)
+            )
+        ):
+            if getattr(self._livekit, "agent_state", None) in ("speaking", None):
+                start_event.set()
+
         self._spawn(self._observe_full_playout(speech_id, handle))
+
+        try:
+            await self._wait_for_start_signal(speech_id, handle, start_event)
+        finally:
+            self._start_waiters.pop(speech_id, None)
+
+    async def _wait_for_start_signal(
+        self, speech_id: str, handle: SpeechHandle, start_event: asyncio.Event
+    ) -> None:
+        if start_event.is_set():
+            return
+
+        wait_tasks: list[asyncio.Task[Any]] = [
+            asyncio.create_task(start_event.wait())
+        ]
+        if hasattr(handle, "wait_for_start"):
+            async def _from_handle() -> None:
+                try:
+                    await handle.wait_for_start()
+                    start_event.set()
+                except Exception:
+                    pass
+            wait_tasks.append(asyncio.create_task(_from_handle()))
+
+        async def _from_session() -> None:
+            while not start_event.is_set():
+                cur = getattr(self._livekit, "current_speech", None)
+                if cur is not None and (
+                    cur is handle
+                    or (
+                        getattr(cur, "id", None) is not None
+                        and getattr(cur, "id", None) == getattr(handle, "id", None)
+                    )
+                ):
+                    state = getattr(self._livekit, "agent_state", None)
+                    if state in ("speaking", None):
+                        start_event.set()
+                        break
+                await asyncio.sleep(0.01)
+        wait_tasks.append(asyncio.create_task(_from_session()))
+
+
+        early_finish = asyncio.Event()
+        async def _watch_early_finish() -> None:
+            try:
+                if hasattr(handle, "wait_for_playout"):
+                    await handle.wait_for_playout()
+                elif hasattr(handle, "done"):
+                    while not handle.done():
+                        await asyncio.sleep(0.01)
+                early_finish.set()
+            except (asyncio.CancelledError, Exception):
+                pass
+        wait_tasks.append(asyncio.create_task(_watch_early_finish()))
+
+        done, pending = await asyncio.wait(
+            wait_tasks,
+            timeout=self._start_timeout_s,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if start_event.is_set():
+            return
+
+        if early_finish.is_set():
+            exception = handle.exception() if hasattr(handle, "exception") else None
+            interrupted = getattr(handle, "interrupted", False)
+            if exception is None and not interrupted:
+                # Early successful playout completion proves output started and played.
+                start_event.set()
+                return
+            # Ambiguous playout failure or interruption before start was confirmed.
+            # Successful playout is not evidence of unheard audio, and interrupted
+            # speech may have been partially heard; do not invent heard=False.
+            self._handles.pop(speech_id, None)
+            self._output_origins.pop(speech_id, None)
+            raise RuntimeError("voice output playout failed or was interrupted before start")
+
+        self._handles.pop(speech_id, None)
+        self._output_origins.pop(speech_id, None)
+        if hasattr(handle, "interrupt") and not (hasattr(handle, "done") and handle.done()):
+            handle.interrupt(force=False)
+        raise OutputPortFailure("LIVEKIT_OUTPUT_START_TIMEOUT", heard=False)
 
     async def _observe_full_playout(
         self, speech_id: str, handle: SpeechHandle
@@ -299,15 +432,49 @@ class LiveKitSessionAdapter(OutputPort):
 
         return tuple(self._task_failures)
 
-    async def close(self) -> SessionState:
+    async def close(
+        self,
+        *,
+        terminal_observations: Mapping[str, bool | OutputPortFailure] | None = None,
+    ) -> SessionState:
         """Stop intake, detach LiveKit, quiesce tasks, then retire runtime state."""
 
         if not self._started or self._closed:
             raise RuntimeError("voice conversation is not active")
+
+        # Accept explicit truthful terminal observations before teardown.
+        if terminal_observations:
+            for speech_id, obs in terminal_observations.items():
+                if speech_id in self._output_origins:
+                    if isinstance(obs, OutputPortFailure):
+                        await self.output_failed(
+                            speech_id=speech_id,
+                            error_code=obs.error_code,
+                            heard=obs.heard,
+                            retryable=obs.retryable,
+                        )
+                    elif isinstance(obs, bool):
+                        if obs:
+                            await self.output_finished(speech_id=speech_id, heard=True)
+                        else:
+                            await self.output_failed(
+                                speech_id=speech_id,
+                                error_code="LIVEKIT_INTERRUPTED",
+                                heard=False,
+                            )
+
+        # Must not irreversibly destroy transport while output truth remains unresolved.
+        if self._output_origins:
+            raise RuntimeError("voice output terminal status is unresolved")
+
         self._accepting = False
         if self._listeners_bound:
             self._livekit.off("user_input_transcribed", self._transcript_listener)
             self._livekit.off("user_state_changed", self._user_state_listener)
+            try:
+                self._livekit.off("agent_state_changed", self._agent_state_listener)
+            except Exception:
+                pass
             self._listeners_bound = False
         for handle in tuple(self._handles.values()):
             if not handle.done():
@@ -321,10 +488,7 @@ class LiveKitSessionAdapter(OutputPort):
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-        # Active speech with unknown audible status is deliberately not guessed.
-        # The caller must provide output_finished/output_failed before teardown.
-        if self._output_origins:
-            raise RuntimeError("voice output terminal status is unresolved")
+
         final = await self.application.close_session(self.session_id)
         self._handles.clear()
         self._closed = True
