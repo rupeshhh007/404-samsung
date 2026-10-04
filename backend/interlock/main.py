@@ -17,9 +17,13 @@ from typing import Any
 
 from interlock.config import Settings
 from interlock.domain.enums import (
-    ControlKind, EventSource, OperationState, RuntimeMode, SpeechState,
+    ClaimCertainty, ControlKind, EventSource, OperationState, RuntimeMode,
+    SpeechActType, SpeechState,
 )
-from interlock.domain.models import EvidenceRecord, EventEnvelope, MetricsSnapshot, OperationRecord, SessionState
+from interlock.domain.models import (
+    EvidenceRecord, EventEnvelope, MetricsSnapshot, OperationRecord, SessionState,
+    SpeechAct,
+)
 from interlock.execution.descriptors import ToolRegistry
 from interlock.execution.effects import EffectInterpretationError, EffectInterpreter, VerificationScope
 from interlock.execution.safepoint import SafePointPolicy
@@ -31,7 +35,8 @@ from interlock.providers.base import StructuredProvider
 from interlock.runtime.commands import (
     BaseCommand, CancelSpeech, DispatchTool, EmitOutput, InterpretInput,
     PrepareOperation, PublishProjection, RecordProtocolViolation,
-    RequestSpeechCorrection, RequestToolCancellation, ValidateSpeech,
+    RequestClarification, RequestSpeechCorrection, RequestToolCancellation,
+    ValidateSpeech,
 )
 from interlock.runtime.dispatcher import (
     CommandDispatcher, CommandHandler, DispatchContext, DispatchResult, HandlerResult,
@@ -132,6 +137,7 @@ class _Session:
         for kind, handler in (
             (InterpretInput, self._interpret), (ValidateSpeech, self._validate_speech),
             (EmitOutput, self._emit), (CancelSpeech, self._cancel),
+            (RequestClarification, self._clarify),
             (RequestSpeechCorrection, self._correct),
             (RecordProtocolViolation, self._violation),
             (PublishProjection, self._projection),
@@ -377,16 +383,55 @@ class _Session:
                                      {"control": result.control.model_dump(mode="json")},
                                      source=EventSource.MODEL)]
         if result.intent_delta is not None:
-            # A delta is only a proposal. No partial/final transcript grants
-            # action authorization, and unsupported goal lifecycle is not invented.
-            IntentGraph(state.intents, state.revisions).apply_delta(
+            # Reducer model_copy transitions can retain enum instances despite
+            # wire models using enum values. Normalize through canonical JSON at
+            # this policy boundary before INTEL-002's strict JSON snapshot.
+            graph = IntentGraph(
+                {
+                    key: type(value).model_validate_json(value.model_dump_json())
+                    for key, value in state.intents.items()
+                },
+                {
+                    key: type(value).model_validate_json(value.model_dump_json())
+                    for key, value in state.revisions.items()
+                },
+            )
+            proposal = graph.apply_delta(
                 result.intent_delta, revision_id=_identity(context.origin_event_id or "", "revision"),
                 created_by_event_id=context.origin_event_id or result.control.control_id,
             )
             candidates.append(_candidate(self.session_id, context, "IntentRevisionProposed",
                                           {"intent_delta": result.intent_delta.model_dump(mode="json")},
                                           source=EventSource.MODEL))
+            if not result.provisional:
+                # Reducer remains the sole writer. This policy fact carries the
+                # exact validated proposal and starts NOT_REQUESTED; it grants
+                # no authorization to dispatch consequential work.
+                candidates.append(_candidate(
+                    self.session_id, context, "IntentRevisionCommitted",
+                    {"revision": proposal.proposed_revision.model_dump(mode="json")},
+                    identity=_identity(context.origin_event_id or "", "revision-commit"),
+                ))
         return candidates
+
+    async def _clarify(self, command: BaseCommand, context: DispatchContext) -> EventCandidate:
+        """Turn a reducer clarification request into truth-gated output."""
+        assert isinstance(command, RequestClarification)
+        speech = SpeechAct(
+            speech_id=_identity(command.control_id, context.origin_event_id or "", "clarification"),
+            act_type=SpeechActType.CLARIFICATION,
+            template_id="tmpl_clarification",
+            slots={},
+            claim_ids=[],
+            requested_certainty=ClaimCertainty.PROGRESS,
+            state=SpeechState.PROPOSED,
+            created_by_event_id=context.origin_event_id or command.control_id,
+        )
+        return _candidate(
+            self.session_id, context, "SpeechActProposed",
+            {"speech_act": speech.model_dump(mode="json")},
+            identity=speech.speech_id,
+        )
 
     async def _validate_speech(self, command: BaseCommand, context: DispatchContext) -> HandlerResult:
         assert isinstance(command, ValidateSpeech)
