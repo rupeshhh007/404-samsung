@@ -1,9 +1,7 @@
-"""TRU-004: output lifecycle boundary and corrective-speech policy.
+"""TRU-004: runtime-agnostic output boundary and corrective-speech policy.
 
-``OutputRuntime`` consumes reducer-issued output commands and delegates the
-external action to an injected ``OutputPort``.  It resolves only detached
-reducer-owned snapshots and returns canonical lifecycle facts for journalling;
-neither the runtime nor the port mutates authoritative ``SpeechAct`` state.
+``OutputPort`` is the inward boundary implemented by text/TTS adapters.  It
+contains no dispatcher, journal, command, or authoritative-state machinery.
 
 The reducer owns correction lifecycle transitions and emits
 ``RequestSpeechCorrection`` only after audible output has reached
@@ -14,12 +12,9 @@ performs no I/O and never mutates reducer state.
 
 from __future__ import annotations
 
-import asyncio
-from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import inspect
 from typing import Any, Dict, Optional, Protocol
 
 from pydantic import Field
@@ -27,20 +22,11 @@ from pydantic import Field
 from interlock.domain.enums import (
     ClaimCertainty,
     ClaimState,
-    EventSource,
-    RuntimeMode,
     SpeechActType,
     SpeechState,
 )
 from interlock.domain.models import ClaimRecord, DomainBaseModel, SessionState, SpeechAct
-from interlock.runtime.commands import (
-    BaseCommand,
-    CancelSpeech,
-    EmitOutput,
-    RequestSpeechCorrection,
-)
-from interlock.runtime.dispatcher import DispatchContext
-from interlock.runtime.journal import EventCandidate
+from interlock.runtime.commands import RequestSpeechCorrection
 from interlock.truth.claims import (
     RULE_APPOINTMENT_BOOKED,
     RULE_APPOINTMENT_CANCELLED,
@@ -73,32 +59,6 @@ class OutputPort(Protocol):
         """Request an output stop without manufacturing a terminal fact."""
 
 
-class SpeechSnapshotResolver(Protocol):
-    """Injected read-only access to a detached reducer-owned speech snapshot."""
-
-    def __call__(self, session_id: str, speech_id: str) -> SpeechAct | None:
-        """Return the current detached speech act, or ``None`` when unknown."""
-
-
-class OutputRuntimeErrorCode(str, Enum):
-    """Stable fail-closed categories for the TRU-004 output boundary."""
-
-    INVALID_COMMAND = "INVALID_COMMAND"
-    UNKNOWN_SPEECH = "UNKNOWN_SPEECH"
-    INVALID_SPEECH_SNAPSHOT = "INVALID_SPEECH_SNAPSHOT"
-    EMISSION_NOT_AUTHORIZED = "EMISSION_NOT_AUTHORIZED"
-    CANCELLATION_NOT_AUTHORIZED = "CANCELLATION_NOT_AUTHORIZED"
-    COMMAND_CAPACITY_EXHAUSTED = "COMMAND_CAPACITY_EXHAUSTED"
-
-
-class OutputRuntimeError(ValueError):
-    """An output command failed before a trustworthy lifecycle fact existed."""
-
-    def __init__(self, code: OutputRuntimeErrorCode, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
 class OutputPortFailure(Exception):
     """Typed adapter terminal failure with explicit heard semantics.
 
@@ -124,266 +84,6 @@ class OutputPortFailure(Exception):
         self.error_code = error_code
         self.heard = heard
         self.retryable = retryable
-
-
-class OutputRuntime:
-    """Dispatcher handlers for reducer-authorized output commands.
-
-    Reservations use the dispatcher's originating event identity, matching the
-    existing command identity convention.  They prevent handler re-entry from
-    repeating an external call while leaving all authoritative lifecycle state
-    in the reducer.
-    """
-
-    def __init__(
-        self,
-        *,
-        speech_resolver: SpeechSnapshotResolver,
-        port: OutputPort,
-        retained_command_limit: int = 1024,
-    ) -> None:
-        if not callable(speech_resolver):
-            raise TypeError("speech_resolver must be callable")
-        if not callable(getattr(port, "emit", None)) or not callable(
-            getattr(port, "cancel", None)
-        ):
-            raise TypeError("port must implement emit and cancel")
-        if type(retained_command_limit) is not int or retained_command_limit < 1:
-            raise ValueError("retained_command_limit must be at least 1")
-        self._speech_resolver = speech_resolver
-        self._port = port
-        self._retained_command_limit = retained_command_limit
-        self._reservations: OrderedDict[
-            tuple[str, str, str, str], bool
-        ] = OrderedDict()
-        self._reservations_lock = asyncio.Lock()
-
-    async def handle_emit_output(
-        self,
-        command: BaseCommand,
-        context: DispatchContext,
-    ) -> EventCandidate | None:
-        """Emit only reducer-queued, persisted approved text exactly once."""
-
-        if not isinstance(command, EmitOutput):
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.INVALID_COMMAND,
-                "expected EmitOutput",
-            )
-        if context.runtime_mode == RuntimeMode.REPLAY:
-            return None
-
-        speech = self._resolve(command.session_id, command.speech_id)
-        identity = self._command_identity(command, context)
-        if not await self._reserve(identity):
-            return None
-        try:
-            self._validate_emit_snapshot(speech)
-        except Exception:
-            await self._release(identity)
-            raise
-
-        try:
-            await self._port.emit(
-                session_id=command.session_id,
-                speech_id=speech.speech_id,
-                rendered_text=speech.rendered_text or "",
-            )
-        except OutputPortFailure as failure:
-            return self._failure_candidate(command, context, failure)
-        finally:
-            await self._complete(identity)
-
-        return self._candidate(
-            command,
-            context,
-            event_type="SpeechEmissionStarted",
-            payload={"speech_id": speech.speech_id},
-            identity="started",
-        )
-
-    async def handle_cancel_speech(
-        self,
-        command: BaseCommand,
-        context: DispatchContext,
-    ) -> EventCandidate | None:
-        """Request cooperative cancellation without claiming terminal state."""
-
-        if not isinstance(command, CancelSpeech):
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.INVALID_COMMAND,
-                "expected CancelSpeech",
-            )
-        if context.runtime_mode == RuntimeMode.REPLAY:
-            return None
-
-        speech = self._resolve(command.session_id, command.speech_id)
-
-        # The current reducer may emit CancelSpeech after cancelling an APPROVED
-        # act before dispatch.  No adapter action is needed because no output was
-        # started; accepting this as a no-op preserves the canonical boundary.
-        if speech.state == SpeechState.CANCELLED:
-            return None
-        if speech.state not in (SpeechState.QUEUED, SpeechState.EMITTING) or not (
-            speech.cancellation_pending
-        ):
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.CANCELLATION_NOT_AUTHORIZED,
-                "speech is not reducer-authorized for cooperative cancellation",
-            )
-
-        identity = self._command_identity(command, context)
-        if not await self._reserve(identity):
-            return None
-        try:
-            await self._port.cancel(
-                session_id=command.session_id,
-                speech_id=speech.speech_id,
-            )
-        except OutputPortFailure as failure:
-            return self._failure_candidate(command, context, failure)
-        finally:
-            await self._complete(identity)
-        return None
-
-    def _resolve(self, session_id: str, speech_id: str) -> SpeechAct:
-        try:
-            resolved = self._speech_resolver(session_id, speech_id)
-        except Exception as exc:
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.UNKNOWN_SPEECH,
-                "speech snapshot could not be resolved",
-            ) from exc
-        if inspect.isawaitable(resolved):
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.INVALID_SPEECH_SNAPSHOT,
-                "speech resolver must be synchronous and read-only",
-            )
-        if resolved is None:
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.UNKNOWN_SPEECH,
-                "speech is unknown",
-            )
-        if not isinstance(resolved, SpeechAct):
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.INVALID_SPEECH_SNAPSHOT,
-                "resolver returned an invalid speech snapshot",
-            )
-        speech = resolved.model_copy(deep=True)
-        if speech.speech_id != speech_id:
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.INVALID_SPEECH_SNAPSHOT,
-                "resolved speech does not match command",
-            )
-        return speech
-
-    @staticmethod
-    def _validate_emit_snapshot(speech: SpeechAct) -> None:
-        approval_is_complete = bool(
-            speech.rendered_text
-            and speech.approved_policy_id
-            and speech.approved_through_sequence is not None
-            and set(speech.approved_claim_versions) == set(speech.claim_ids)
-        )
-        if (
-            speech.state != SpeechState.QUEUED
-            or speech.heard is not None
-            or speech.cancellation_pending
-            or speech.correction_pending
-            or not approval_is_complete
-        ):
-            raise OutputRuntimeError(
-                OutputRuntimeErrorCode.EMISSION_NOT_AUTHORIZED,
-                "speech is not a current reducer-queued approved output",
-            )
-
-    @staticmethod
-    def _command_identity(
-        command: EmitOutput | CancelSpeech,
-        context: DispatchContext,
-    ) -> tuple[str, str, str, str]:
-        origin = context.origin_event_id or f"unscoped:{command.speech_id}"
-        return (
-            command.command_type,
-            command.session_id,
-            command.speech_id,
-            origin,
-        )
-
-    async def _reserve(self, identity: tuple[str, str, str, str]) -> bool:
-        async with self._reservations_lock:
-            if identity in self._reservations:
-                self._reservations.move_to_end(identity)
-                return False
-            while len(self._reservations) >= self._retained_command_limit:
-                removable = next(
-                    (
-                        candidate
-                        for candidate, active in self._reservations.items()
-                        if not active
-                    ),
-                    None,
-                )
-                if removable is None:
-                    raise OutputRuntimeError(
-                        OutputRuntimeErrorCode.COMMAND_CAPACITY_EXHAUSTED,
-                        "output command reservation capacity is exhausted",
-                    )
-                self._reservations.pop(removable)
-            self._reservations[identity] = True
-            return True
-
-    async def _release(self, identity: tuple[str, str, str, str]) -> None:
-        async with self._reservations_lock:
-            self._reservations.pop(identity, None)
-
-    async def _complete(self, identity: tuple[str, str, str, str]) -> None:
-        async with self._reservations_lock:
-            if identity in self._reservations:
-                self._reservations[identity] = False
-                self._reservations.move_to_end(identity)
-
-    @staticmethod
-    def _candidate(
-        command: EmitOutput | CancelSpeech,
-        context: DispatchContext,
-        *,
-        event_type: str,
-        payload: Dict[str, Any],
-        identity: str,
-    ) -> EventCandidate:
-        origin = context.origin_event_id or "unscoped"
-        return EventCandidate(
-            event_type=event_type,
-            session_id=command.session_id,
-            source=EventSource.OUTPUT_ADAPTER,
-            payload=payload,
-            logical_time=context.logical_time,
-            correlation_id=context.correlation_id,
-            causation_id=context.origin_event_id,
-            dedupe_key=(
-                f"output-runtime:{event_type}:{command.speech_id}:{origin}:{identity}"
-            ),
-        )
-
-    def _failure_candidate(
-        self,
-        command: EmitOutput | CancelSpeech,
-        context: DispatchContext,
-        failure: OutputPortFailure,
-    ) -> EventCandidate:
-        return self._candidate(
-            command,
-            context,
-            event_type="SpeechEmissionFailed",
-            payload={
-                "speech_id": command.speech_id,
-                "error_code": failure.error_code,
-                "heard": failure.heard,
-                "retryable": failure.retryable,
-            },
-            identity=f"failed:{failure.error_code}",
-        )
 
 
 _CORRECTION_STATE_TEXT = {
