@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "scenario_id": "post-dispatch-unknown",
+  "fixture": "samsung-demo-v1",
+  "initial_state": {"session_id": "unknown-outcome", "mode": "TEST"},
+  "tools": {
+    "appointment.book": [{
+      "match": {"args.center_id": "ctr-01", "args.requested_slot": "2030-01-15T11:00:00+05:30"},
+      "callback_at_ms": 500,
+      "result": {"phase": "FINAL", "status": "OUTCOME_UNKNOWN", "provider_request_id": "req-unknown-book"}
+    }]
+  },
+  "faults": [{"id": "ambiguous-booking", "type": "UNKNOWN_OUTCOME", "match": {"operation_id": "op-unknown-book"}, "after_dispatch": true}],
+  "steps": [
+    {"input": {"at_ms": 0, "text": "Book 11:00.", "final": true, "authorize": true}},
+    {"advance_to": 500},
+    {"assert": {"operation_effect": "OUTCOME_UNKNOWN", "blind_retry_count": 0, "verification": "REQUIRED"}}
+  ],
+  "expect": {"operation_effect": "OUTCOME_UNKNOWN", "blind_retry_count": 0, "verification": "REQUIRED", "success_claim": false}
+}

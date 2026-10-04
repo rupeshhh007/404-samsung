@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scenario_id": "correction-before-dispatch",
+  "fixture": "samsung-demo-v1",
+  "initial_state": {"session_id": "correction-before", "mode": "TEST"},
+  "tools": {
+    "appointment.book": [{
+      "match": {"args.center_id": "ctr-01", "args.requested_slot": "2030-01-15T12:00:00+05:30"},
+      "callback_at_ms": 300,
+      "result": {"phase": "FINAL", "status": "BOOKING_CONFIRMED", "provider_request_id": "req-new-book", "provider_booking_id": "apt-new-12", "center_id": "ctr-01", "requested_slot": "2030-01-15T12:00:00+05:30", "confirmed_slot": "2030-01-15T12:00:00+05:30"}
+    }]
+  },
+  "faults": [],
+  "steps": [
+    {"input": {"at_ms": 0, "text": "Book 11:00.", "final": true, "authorize": true}},
+    {"input": {"at_ms": 50, "text": "Correction: book 12:00 instead.", "final": true, "authorize": true}},
+    {"advance_to": 100},
+    {"assert": {"old_operation": "CANCELLED_BEFORE_DISPATCH", "old_provider_calls": 0}},
+    {"advance_to": 300}
+  ],
+  "expect": {"old_provider_calls": 0, "world": {"absent_old_slot": "2030-01-15T11:00:00+05:30", "confirmed_booking": "apt-new-12"}}
+}

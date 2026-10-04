@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "scenario_id": "failed-cancellation-preserves-world",
+  "fixture": "samsung-demo-v1",
+  "initial_state": {"session_id": "compensation-failure", "mode": "TEST"},
+  "tools": {
+    "appointment.book": [{
+      "match": {"args.center_id": "ctr-01", "args.requested_slot": "2030-01-15T11:00:00+05:30"},
+      "callback_at_ms": 100,
+      "result": {"phase": "FINAL", "status": "BOOKING_CONFIRMED", "provider_request_id": "req-original-book", "provider_booking_id": "apt-original-11", "center_id": "ctr-01", "requested_slot": "2030-01-15T11:00:00+05:30", "confirmed_slot": "2030-01-15T11:00:00+05:30"}
+    }],
+    "appointment.cancel": [{
+      "match": {"provider_booking_id": "apt-original-11"},
+      "callback_at_ms": 400,
+      "result": {"phase": "FINAL", "status": "CANCELLATION_FAILED", "provider_request_id": "req-failed-cancel", "provider_booking_id": "apt-original-11", "error": {"code": "SIMULATED_FAILURE", "message": "Simulated cancellation failure", "retryable": false}}
+    }]
+  },
+  "faults": [{"id": "cancel-repair-fails", "type": "COMPENSATION_FAILURE", "match": {"operation_id": "op-cancel-original"}, "code": "SIMULATED_FAILURE"}],
+  "steps": [
+    {"input": {"at_ms": 0, "text": "Book 11:00.", "final": true, "authorize": true}},
+    {"advance_to": 100},
+    {"input": {"at_ms": 200, "text": "Correction: I need 12:00.", "final": true, "authorize": true}},
+    {"input": {"at_ms": 250, "text": "Cancel the obsolete 11:00 booking.", "final": true, "authorize": true}},
+    {"advance_to": 400},
+    {"assert": {"cancellation": "FAILED", "world": {"contains_booking": "apt-original-11"}, "repair_success": false}}
+  ],
+  "expect": {"cancellation": "FAILED", "world": {"contains_booking": "apt-original-11"}, "repair_success": false, "false_success_speech": false}
+}
