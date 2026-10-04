@@ -8,8 +8,9 @@ from typing import Any
 import pytest
 
 from interlock.config import Settings
-from interlock.domain.enums import ControlKind
+from interlock.domain.enums import ControlKind, EventSource, OperationState
 from interlock.intelligence.control import ControlInterpreter, InterpretationRequest
+from interlock.main import create_demo_asgi_app
 from interlock.providers.base import (
     ProviderFailure,
     ProviderFailureKind,
@@ -17,6 +18,7 @@ from interlock.providers.base import (
     ProviderTask,
 )
 from interlock.providers.llm import StructuredModelProvider
+from interlock.runtime.journal import EventCandidate
 
 
 class SequenceTransport:
@@ -410,3 +412,73 @@ def test_non_json_model_output_fails_closed_without_repair(bad_value: Any) -> No
     assert result.kind == ProviderFailureKind.INVALID_OUTPUT
     assert result.repair_attempted is False
     assert transport.calls == [False]
+
+
+def test_ext001_demo_retains_late_world_effect_after_correction() -> None:
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=150,
+        ))
+        application = host.application
+        session_id = "ext001-regression"
+        await application.start_session(session_id)
+        try:
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+            for _ in range(100):
+                operations = application.snapshot(session_id).operations.values()
+                if any(operation.state == OperationState.DISPATCHED for operation in operations):
+                    break
+                await asyncio.sleep(0.005)
+            else:
+                pytest.fail("demo operation did not cross SAFEPOINT")
+
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-12",
+                    "modality": "text",
+                    "content_ref": "Actually, make it 12:00.",
+                },
+                correlation_id="input-12",
+                dedupe_key="test:input-12",
+            ))
+            await asyncio.sleep(0.2)
+            await application.drain(session_id)
+            await asyncio.sleep(0)
+            await application.drain(session_id)
+            state = application.snapshot(session_id)
+            active = state.revisions[state.intents[state.active_intent_id].active_revision_id]
+            assert active.values["requested_slot"] == "2030-01-15T12:00:00+05:30"
+            assert any(
+                effect.parameters["confirmed_slot"] == "2030-01-15T11:00:00+05:30"
+                for effect in state.effects.values()
+            )
+            assert any(operation.cancellation_state == "TOO_LATE"
+                       for operation in state.operations.values())
+            assert len(state.divergences) == 1
+            assert any(
+                claim.intent_revision_id == active.revision_id and claim.state == "PENDING"
+                for claim in state.claims.values()
+            )
+            assert all(speech.heard is False for speech in state.speech.values())
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())

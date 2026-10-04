@@ -1,4 +1,4 @@
-"""RUN-004 application composition; no HTTP, voice, or demo-provider adapter.
+"""RUN-004 application composition and the deterministic EXT-001 DEMO host.
 
 Each session owns one journal, one reducer task, and fresh worker bookkeeping.
 Only the reducer creates the next authoritative state. Application policy glue
@@ -9,31 +9,38 @@ Missing provider/output/planner integrations fail explicitly, not as successes.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 import re
-from typing import Any
+import sys
+from typing import Any, Protocol
 
 from interlock.config import Settings
 from interlock.domain.enums import (
-    ClaimCertainty, ControlKind, EventSource, OperationState, RuntimeMode,
+    Authorization, CancellationState, ClaimCertainty, ClaimState, ControlKind,
+    DivergenceState, EventSource, IntentMaturity, OperationState, RuntimeMode,
     SpeechActType, SpeechState,
 )
 from interlock.domain.models import (
-    EvidenceRecord, EventEnvelope, MetricsSnapshot, OperationRecord, SessionState,
-    SpeechAct,
+    ClaimRecord, DivergenceCase, EvidenceRecord, EventEnvelope, IntentRevision,
+    MetricsSnapshot, OperationRecord, SessionState, SpeechAct,
 )
 from interlock.execution.descriptors import ToolRegistry
 from interlock.execution.effects import EffectInterpretationError, EffectInterpreter, VerificationScope
+from interlock.execution.operations import OperationManager
 from interlock.execution.safepoint import SafePointPolicy
-from interlock.execution.tools import ProviderObservation, ToolProviderTransport, ToolRuntime
+from interlock.execution.tools import (
+    ProviderCancellationRequest, ProviderCancellationResult, ProviderObservation,
+    ProviderResponse, ToolInvocation, ToolProviderTransport, ToolRuntime,
+)
 from interlock.intelligence.control import ControlInterpreter, InterpretationRequest
-from interlock.intelligence.intent_graph import IntentGraph
+from interlock.intelligence.intent_graph import IntentGraph, bind_dependencies, dependency_fingerprint
 from interlock.metrics import derive_metrics
 from interlock.providers.base import StructuredProvider
 from interlock.runtime.commands import (
-    BaseCommand, CancelSpeech, DispatchTool, EmitOutput, InterpretInput,
+    BaseCommand, BuildReconciliationPlan, CancelSpeech, DispatchTool, EmitOutput, InterpretInput,
     PrepareOperation, PublishProjection, RecordProtocolViolation,
     RequestClarification, RequestSpeechCorrection, RequestToolCancellation,
     ValidateSpeech,
@@ -107,6 +114,7 @@ class _Session:
         self.dispatcher = CommandDispatcher(self.journal)
         self.control = ControlInterpreter(settings, configured_provider=dependencies.model)
         self.effects = EffectInterpreter(registry=registry)
+        self.operations = OperationManager(registry)
         self.claims = ClaimEvaluator()
         self.truthlock = Truthlock()
         self.corrections = CorrectionPolicy()
@@ -144,6 +152,10 @@ class _Session:
             (PublishProjection, dependencies.projection or self._projection),
         ):
             self.dispatcher.register(kind, handler)
+        if settings.INTERLOCK_MODE == RuntimeMode.DEMO:
+            # EXE-006 owns repair planning.  EXT-001 only surfaces the canonical
+            # divergence and deliberately leaves it unresolved.
+            self.dispatcher.register(BuildReconciliationPlan, self._defer_reconciliation)
         for kind, handler in (dependencies.extra_handlers or {}).items():
             self.dispatcher.register(kind, handler)
         self.task = asyncio.create_task(self._run(), name=f"interlock-reducer:{session_id}")
@@ -290,6 +302,144 @@ class _Session:
                             self.session_id, context, "SpeechCancellationRequested",
                             {"speech_id": speech_id}, identity=_identity(event.event_id, speech_id),
                         ))
+        if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO:
+            await self._demo_policies(event, previous, state, context)
+
+    async def _demo_policies(
+        self, event: EventEnvelope, previous: SessionState | None,
+        state: SessionState, context: DispatchContext,
+    ) -> None:
+        """Minimal scripted appointment policy for the credential-free demo.
+
+        It creates only canonical journal facts.  The reducer remains the sole
+        state writer and every provider write still crosses SAFEPOINT and
+        ToolRuntime.  A corrected goal is intentionally not auto-repaired.
+        """
+        if event.event_type == "IntentAuthorizationChanged":
+            revision = state.revisions.get(event.payload["revision_id"])
+            if revision is None or revision.authorization != Authorization.AUTHORIZED:
+                return
+            if revision.values.get("goal_type") != "appointment_booking":
+                return
+            await self._propose_demo_claim(event, revision, context)
+            if revision.parent_revision_id is not None:
+                return
+            bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
+            known = {
+                item.idempotency_key: item.fingerprint
+                for item in state.operations.values() if item.idempotency_key
+            }
+            operation_id = _identity(revision.revision_id, "appointment.book")
+            if operation_id in state.operations:
+                return
+            operation = self.operations.create_operation(
+                operation_id=operation_id,
+                session_id=self.session_id,
+                intent_goal_id=revision.intent_id,
+                intent_revision=revision,
+                bindings=bindings,
+                tool_name="appointment.book",
+                arguments={
+                    "center_id": revision.values["center_id"],
+                    "requested_slot": revision.values["requested_slot"],
+                },
+                existing_operation_ids=set(state.operations),
+                known_idempotency_digests=known,
+            )
+            await self.journal.append(_candidate(
+                self.session_id, context, "OperationCreated",
+                {"operation": operation.model_dump(mode="json")},
+                identity=operation.operation_id,
+            ))
+            return
+
+        if event.event_type == "IntentRevisionCommitted" and previous is not None:
+            revision = state.revisions.get(event.payload["revision"]["revision_id"])
+            if revision is None or revision.parent_revision_id is None:
+                return
+            for operation in sorted(state.operations.values(), key=lambda item: item.operation_id):
+                if (operation.intent_revision_id == revision.parent_revision_id
+                        and operation.state not in {
+                            OperationState.SUCCEEDED, OperationState.FAILED,
+                            OperationState.CANCELLED, OperationState.SUPERSEDED,
+                        }
+                        and operation.cancellation_state == CancellationState.NONE):
+                    await self.journal.append(_candidate(
+                        self.session_id, context, "CancellationRequested",
+                        {"operation_id": operation.operation_id,
+                         "reason": "intent revision was superseded"},
+                        identity=_identity(revision.revision_id, operation.operation_id),
+                    ))
+                    return
+
+        if event.event_type == "WorldEffectObserved":
+            effect = state.effects.get(event.payload["effect"]["effect_id"])
+            node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
+            revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
+            if effect is None or revision is None:
+                return
+            desired = revision.values.get("requested_slot")
+            observed = effect.parameters.get("confirmed_slot") or effect.parameters.get("requested_slot")
+            if desired is None or observed is None or desired == observed:
+                return
+            divergence_id = _identity(revision.revision_id, effect.effect_id, "divergence")
+            if divergence_id in state.divergences:
+                return
+            case = DivergenceCase(
+                divergence_id=divergence_id,
+                desired_fingerprint=revision.dependency_fingerprint,
+                observed_effect_ids=[effect.effect_id],
+                kind="DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT",
+                state=DivergenceState.OPEN,
+                detected_by_event_id=event.event_id,
+                authorization_required=True,
+            )
+            await self.journal.append(_candidate(
+                self.session_id, context, "DivergenceDetected",
+                {"case": case.model_dump(mode="json")}, identity=divergence_id,
+            ))
+            return
+
+        if event.event_type == "DivergenceDetected":
+            speech = SpeechAct(
+                speech_id=_identity(event.event_id, "unresolved-divergence"),
+                act_type=SpeechActType.UNCERTAINTY,
+                template_id="tmpl_outcome_unknown",
+                slots={}, claim_ids=[], requested_certainty=ClaimCertainty.UNCERTAIN,
+                state=SpeechState.PROPOSED, created_by_event_id=event.event_id,
+            )
+            await self.journal.append(_candidate(
+                self.session_id, context, "SpeechActProposed",
+                {"speech_act": speech.model_dump(mode="json")}, identity=speech.speech_id,
+            ))
+
+    async def _propose_demo_claim(
+        self, event: EventEnvelope, revision: IntentRevision, context: DispatchContext,
+    ) -> None:
+        claim_id = _identity(revision.revision_id, "appointment-booked")
+        if claim_id in self.snapshot().claims:
+            return
+        claim = ClaimRecord(
+            claim_id=claim_id,
+            predicate="appointment_booked",
+            subject={"center_id": revision.values["center_id"]},
+            object={"requested_slot": revision.values["requested_slot"]},
+            state=ClaimState.PROPOSED,
+            required_evidence_rule="appointment_booked",
+            supporting_evidence_ids=[],
+            intent_revision_id=revision.revision_id,
+            updated_by_event_id=event.event_id,
+        )
+        await self.journal.append(_candidate(
+            self.session_id, context, "ClaimProposed",
+            {"claim": claim.model_dump(mode="json")}, identity=claim_id,
+        ))
+
+    async def _defer_reconciliation(
+        self, command: BaseCommand, context: DispatchContext,
+    ) -> None:
+        assert isinstance(command, BuildReconciliationPlan)
+        return None
 
     async def _settled_policies(self, event: EventEnvelope, context: DispatchContext) -> None:
         """Evaluate fresh state only after accepted facts have been consumed.
@@ -358,6 +508,25 @@ class _Session:
         # Media references are not transcript text and are never fetched here.
         if command.modality not in ("text", "transcript"):
             raise RuntimeError("input text resolver is not configured for this modality")
+        demo_root = (
+            _demo_root_booking(evidence.content_ref, command.evidence_id, context)
+            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO and state.active_intent_id is None
+            else None
+        )
+        if demo_root is not None:
+            control, revision = demo_root
+            return [
+                _candidate(self.session_id, context, "ControlIntentInterpreted",
+                           {"control": control}, source=EventSource.MODEL),
+                _candidate(self.session_id, context, "IntentRevisionCommitted",
+                           {"revision": revision.model_dump(mode="json")},
+                           identity=_identity(revision.revision_id, "commit")),
+                _candidate(self.session_id, context, "IntentAuthorizationChanged", {
+                    "revision_id": revision.revision_id,
+                    "authorization": Authorization.AUTHORIZED.value,
+                    "evidence_id": command.evidence_id,
+                }, identity=_identity(revision.revision_id, "authorization")),
+            ]
         result = await self.control.interpret(InterpretationRequest(
             control_id=_identity(context.origin_event_id or "", command.evidence_id),
             raw_evidence_id=command.evidence_id, text=evidence.content_ref,
@@ -413,6 +582,15 @@ class _Session:
                     {"revision": proposal.proposed_revision.model_dump(mode="json")},
                     identity=_identity(context.origin_event_id or "", "revision-commit"),
                 ))
+                if (self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+                        and proposal.proposed_revision.values.get("goal_type") == "appointment_booking"):
+                    candidates.append(_candidate(
+                        self.session_id, context, "IntentAuthorizationChanged", {
+                            "revision_id": proposal.proposed_revision.revision_id,
+                            "authorization": Authorization.AUTHORIZED.value,
+                            "evidence_id": command.evidence_id,
+                        }, identity=_identity(proposal.proposed_revision.revision_id, "authorization"),
+                    ))
         return candidates
 
     async def _clarify(self, command: BaseCommand, context: DispatchContext) -> EventCandidate:
@@ -757,3 +935,244 @@ class Application:
     async def close(self) -> None:
         for session_id in tuple(self._sessions):
             await self.close_session(session_id)
+
+
+_DEMO_SLOT_ALIASES = {
+    "11": "2030-01-15T11:00:00+05:30",
+    "11:00": "2030-01-15T11:00:00+05:30",
+    "12": "2030-01-15T12:00:00+05:30",
+    "12:00": "2030-01-15T12:00:00+05:30",
+}
+
+
+def _demo_root_booking(
+    text: str, evidence_id: str, context: DispatchContext,
+) -> tuple[dict[str, Any], IntentRevision] | None:
+    """Recognize only the documented deterministic demo's root booking phrase."""
+    normalized = " ".join(text.strip().lower().split())
+    match = re.fullmatch(r"book\s+(11(?::00)?)(?:\.)?", normalized)
+    if match is None:
+        return None
+    slot = _DEMO_SLOT_ALIASES[match.group(1)]
+    intent_id = _identity(context.origin_event_id or evidence_id, "appointment-intent")
+    revision_id = _identity(context.origin_event_id or evidence_id, "appointment-revision")
+    values = {
+        "goal_type": "appointment_booking",
+        "center_id": "ctr-01",
+        "requested_slot": slot,
+    }
+    fingerprint = dependency_fingerprint(bind_dependencies(values, sorted(values)))
+    revision = IntentRevision(
+        revision_id=revision_id,
+        intent_id=intent_id,
+        values=values,
+        maturity=IntentMaturity.COMMITTED,
+        authorization=Authorization.NOT_REQUESTED,
+        created_by_event_id=context.origin_event_id or evidence_id,
+        dependency_fingerprint=fingerprint,
+    )
+    return ({
+        "control_id": _identity(context.origin_event_id or evidence_id, "root-control"),
+        "kind": ControlKind.ADD_GOAL.value,
+        "confidence": 1.0,
+        "consequential": True,
+        "target_refs": [],
+        "raw_evidence_id": evidence_id,
+        "clarification": None,
+    }, revision)
+
+
+def _demo_input_context(
+    state: SessionState, evidence: EvidenceRecord,
+) -> dict[str, Any]:
+    del state, evidence
+    return {
+        "correction_field": "requested_slot",
+        "value_aliases": dict(_DEMO_SLOT_ALIASES),
+    }
+
+
+def _demo_bindings(
+    state: SessionState, operation: OperationRecord,
+) -> Mapping[str, Sequence[str]]:
+    del state
+    return {binding.path: tuple(binding.evidence_ids) for binding in operation.bindings}
+
+
+class _DelayedDemoTransport:
+    """SCRIPTED response delay after the SIMULATED provider has acted."""
+
+    def __init__(self, delegate: ToolProviderTransport, delay_ms: int) -> None:
+        self._delegate = delegate
+        self._delay_s = delay_ms / 1000
+
+    async def invoke(self, invocation: ToolInvocation) -> ProviderResponse:
+        response = await self._delegate.invoke(invocation)
+        if self._delay_s:
+            await asyncio.sleep(self._delay_s)
+        return response
+
+    async def cancel(
+        self, request: ProviderCancellationRequest,
+    ) -> ProviderCancellationResult:
+        return await self._delegate.cancel(request)
+
+
+class DemoTextOutput(OutputPort):
+    """Deterministic console sink for exact TRUTHLOCK-approved text.
+
+    Completion records ``heard=False`` because console rendering is real output
+    but is not audible output.  That distinction is exposed in projections.
+    """
+
+    def __init__(self) -> None:
+        self._application: Application | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def bind(self, application: Application) -> None:
+        if self._application is not None and self._application is not application:
+            raise RuntimeError("demo output is already bound")
+        self._application = application
+
+    async def emit(
+        self, *, session_id: str, speech_id: str, rendered_text: str,
+    ) -> None:
+        application = self._require_application()
+        origins = [
+            event.event_id for event in application.events(session_id)
+            if event.event_type == "SpeechQueued"
+            and event.payload.get("speech_id") == speech_id
+        ]
+        if not origins:
+            raise OutputPortFailure("DEMO_OUTPUT_LINEAGE_MISSING", heard=False)
+        # This line is the text adapter's actual output behavior.  JSON encoding
+        # preserves the exact approved string without terminal-control ambiguity.
+        print(json.dumps({
+            "label": "REAL INTERLOCK / DEMO TEXT OUTPUT",
+            "session_id": session_id,
+            "speech_id": speech_id,
+            "rendered_text": rendered_text,
+        }, ensure_ascii=False), file=sys.stdout, flush=True)
+
+        async def finish() -> None:
+            await asyncio.sleep(0)
+            await application.output_finished(
+                session_id, speech_id, heard=False, logical_time=0,
+                origin_event_id=origins[-1],
+            )
+
+        task = asyncio.create_task(finish(), name=f"demo-output:{speech_id}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def cancel(self, *, session_id: str, speech_id: str) -> None:
+        # Console rendering is atomic.  The already scheduled terminal fact
+        # records heard=False; reducer cancellation_pending decides whether the
+        # lifecycle ends CANCELLED or EMITTED.
+        return None
+
+    async def shutdown(self) -> None:
+        if self._tasks:
+            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
+    def _require_application(self) -> Application:
+        if self._application is None:
+            raise RuntimeError("demo output must be bound before use")
+        return self._application
+
+
+class _ASGIApplication(Protocol):
+    async def __call__(
+        self, scope: Mapping[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None: ...
+
+
+class _DemoASGI:
+    def __init__(
+        self, http: _ASGIApplication, websocket: _ASGIApplication,
+        application: Application, hub: Any, output: DemoTextOutput,
+    ) -> None:
+        self.http = http
+        self.websocket = websocket
+        self.application = application
+        self.hub = hub
+        self.output = output
+
+    async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "websocket":
+            await self.websocket(scope, receive, send)
+            return
+        if scope.get("type") != "lifespan":
+            await self.http(scope, receive, send)
+            return
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await self.application.close()
+                await self.output.shutdown()
+                await self.hub.shutdown()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+
+def create_demo_asgi_app(settings: Settings | None = None) -> _DemoASGI:
+    """Compose the real runtime with SIMULATED provider and SCRIPTED delay."""
+    from fastapi.middleware.cors import CORSMiddleware
+    from interlock.adapters.http import create_http_app
+    from interlock.adapters.websocket import ProjectionHub, WebSocketProjectionASGI
+    from interlock.providers.fake_tools import create_fake_tool_transport
+    from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+
+    effective = settings or Settings()
+    if effective.INTERLOCK_MODE != RuntimeMode.DEMO:
+        raise RuntimeError("the EXT-001 local ASGI host requires INTERLOCK_MODE=DEMO")
+    fixture = load_demo_fixture()
+    if fixture.fixture_id != "samsung-demo-v1":
+        raise RuntimeError("unexpected demo fixture")
+    registry = ToolRegistry(default_timeout_ms=effective.INTERLOCK_TOOL_TIMEOUT_MS)
+    register_tool_manifests(registry)
+    transport, _provider = create_fake_tool_transport(fixture)
+    output = DemoTextOutput()
+    hub = ProjectionHub(max_sessions=128)
+    dependencies = RuntimeDependencies(
+        tool_transport=_DelayedDemoTransport(transport, effective.INTERLOCK_FAKE_LATENCY_MS),
+        output=output,
+        bindings=_demo_bindings,
+        input_context=_demo_input_context,
+        projection=hub.handle_publish,
+    )
+    application = Application(effective, registry=registry, dependencies=dependencies)
+    output.bind(application)
+    hub.bind(application)
+    http = create_http_app(application, hub=hub)
+    cors = CORSMiddleware(
+        http,
+        allow_origins=effective.frontend_origins_list,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["content-type"],
+    )
+    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output)
+
+
+class _LazyDemoASGI:
+    """Keep imports side-effect free while exposing ``interlock.main:app``."""
+
+    def __init__(self) -> None:
+        self._application: _DemoASGI | None = None
+        self._lock: asyncio.Lock | None = None
+
+    async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        if self._application is None:
+            if self._lock is None:
+                self._lock = asyncio.Lock()
+            async with self._lock:
+                if self._application is None:
+                    self._application = create_demo_asgi_app()
+        await self._application(scope, receive, send)
+
+
+app = _LazyDemoASGI()
