@@ -465,9 +465,9 @@ export const App: React.FC = () => {
         /* Active session views */
         <>
           {view === 'console' ? (
-            <div className="flex-1 flex flex-col min-[1100px]:flex-row min-h-0 overflow-hidden">
-              {/* Voice column (left) */}
-              <div className="w-full min-[1100px]:w-[420px] min-[1300px]:w-[480px] flex-shrink-0 h-[45vh] min-[1100px]:h-full border-b min-[1100px]:border-b-0 min-[1100px]:border-r border-ink-600 bg-ink-950/60 flex flex-col">
+            <div className="flex-1 flex flex-col min-[1000px]:flex-row min-h-0 overflow-hidden max-w-7xl mx-auto w-full">
+              {/* Region 1: Conversation Column (Left) */}
+              <div className="w-full min-[1000px]:w-[52%] min-[1200px]:w-[50%] flex-shrink-0 h-[50vh] min-[1000px]:h-full border-b min-[1000px]:border-b-0 min-[1000px]:border-r border-ink-800/80 flex flex-col">
                 <VoiceColumn
                   stage={stage}
                   projection={state.projection}
@@ -478,18 +478,13 @@ export const App: React.FC = () => {
                 />
               </div>
 
-              {/* Consistency Runtime Deck (right) */}
-              <div className="flex-1 min-w-0 h-[55vh] min-[1100px]:h-full p-6 overflow-y-auto">
+              {/* Regions 2 & 3: Current Action + Intent vs Reality (Right) */}
+              <div className="flex-1 min-w-0 h-[50vh] min-[1000px]:h-full p-4 sm:p-6 lg:p-8 overflow-y-auto flex flex-col justify-center">
                 <Deck
                   stage={stage}
                   gapPx={gapPx}
                   projection={state.projection}
-                  traceEvents={effectiveEvents}
-                  onSelectSequence={() => {
-                    setView('blackbox');
-                  }}
-                  onAuthorizePlan={authorizePlan}
-                  actionPending={actionPending}
+                  onOpenBlackBox={() => setView('blackbox')}
                 />
               </div>
             </div>

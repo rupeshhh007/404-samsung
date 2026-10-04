@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useLayoutEffect } from 'react';
+import React, { useRef, useState, useLayoutEffect } from 'react';
 import { UserLine } from './UserLine';
 import { AssistantLine } from './AssistantLine';
 import { LockedLine } from './LockedLine';
@@ -7,16 +7,14 @@ import type { ClaimProjection, EvidenceProjection } from '../../api/types';
 
 interface TranscriptProps {
   readonly items: readonly TranscriptItem[];
-  readonly allClaims: readonly ClaimProjection[];
-  readonly allEvidence: readonly EvidenceProjection[];
+  readonly allClaims?: readonly ClaimProjection[];
+  readonly allEvidence?: readonly EvidenceProjection[];
   readonly pendingClaim?: ClaimProjection | null;
   readonly onRetryUserPrompt?: (text: string) => void;
 }
 
 export const Transcript: React.FC<TranscriptProps> = ({
   items,
-  allClaims,
-  allEvidence,
   pendingClaim,
   onRetryUserPrompt,
 }) => {
@@ -61,12 +59,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onScroll={handleScroll}
         role="log"
         aria-live="off"
-        className="flex-1 overflow-y-auto pr-3 space-y-1"
+        className="flex-1 overflow-y-auto pr-2 space-y-1"
       >
         {items.length === 0 && !pendingClaim && (
-          <div className="flex flex-col items-center justify-center h-full text-center p-8 text-bone-500 font-mono text-xs">
-            <span className="text-bone-600 mb-1">// TRANSCRIPT EMPTY</span>
-            <span>Issue an instruction below to begin interaction.</span>
+          <div className="flex flex-col items-center justify-center h-full text-center p-8 text-bone-500 font-sans text-sm">
+            <span>Ask INTERLOCK to book an appointment or test a mid-flight correction.</span>
           </div>
         )}
 
@@ -85,14 +82,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
             <AssistantLine
               key={`assistant-${item.id}`}
               speech={item.speech}
-              allClaims={allClaims}
-              allEvidence={allEvidence}
             />
           );
         })}
 
-        {/* Tail Locked Words Line */}
-        {pendingClaim && <LockedLine pendingClaim={pendingClaim} />}
+        {/* Tail Pending Status Line */}
+        {pendingClaim && <LockedLine />}
       </div>
 
       {/* Floating '↓ New' Chip */}
@@ -100,9 +95,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
         <button
           type="button"
           onClick={() => scrollToBottom('smooth')}
-          className="absolute bottom-3 right-6 z-20 px-2.5 py-1 bg-ink-800 border border-sig-active text-sig-active font-mono text-[11px] uppercase tracking-wider slab-shadow animate-bounce flex items-center gap-1 focus-visible:outline-sig-active"
+          className="absolute bottom-3 right-4 px-3 py-1 bg-ink-800 border border-ink-600 text-bone-200 font-mono text-xs shadow-lg hover:bg-ink-700"
         >
-          <span>↓ NEW</span>
+          ↓ New
         </button>
       )}
     </div>

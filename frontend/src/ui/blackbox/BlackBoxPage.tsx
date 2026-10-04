@@ -2,7 +2,12 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Recorder } from './Recorder';
 import { Scrubber } from './Scrubber';
 import { EventInspector } from './EventInspector';
-import { InterlockBridge } from '../deck/InterlockBridge';
+import { IntentRealityHero } from '../deck/IntentRealityHero';
+import { LedgerOperations } from '../deck/LedgerOperations';
+import { LedgerClaims } from '../deck/LedgerClaims';
+import { LedgerReconcile } from '../deck/LedgerReconcile';
+import { Strands } from '../deck/Strands';
+import { MetricsBar } from '../deck/MetricsBar';
 import { Odometer } from '../primitives/Odometer';
 import { CopyButton } from '../primitives/CopyButton';
 import { useTimeTravel } from './useTimeTravel';
@@ -19,6 +24,8 @@ interface BlackBoxPageProps {
   readonly error: string | null;
 }
 
+type BlackBoxTab = 'state' | 'operations' | 'claims' | 'reconcile' | 'strands' | 'metrics';
+
 export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
   sessionId,
   liveProjection,
@@ -32,6 +39,7 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
   );
 
   const [selectedSequence, setSelectedSequence] = useState<number>(() => maxSequence || 1);
+  const [activeTab, setActiveTab] = useState<BlackBoxTab>('state');
 
   // Sync selectedSequence to latest when new events arrive and user is at live
   useEffect(() => {
@@ -76,10 +84,20 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
     );
   }
 
+  const operations = activeProjection?.operations ?? [];
+  const effects = activeProjection?.effects ?? [];
+  const claims = activeProjection?.claims ?? [];
+  const evidence = activeProjection?.evidence ?? [];
+  const plans = activeProjection?.plans ?? [];
+  const divergences = activeProjection?.divergences ?? [];
+  const metrics = activeProjection?.metrics ?? null;
+  const activePlan = plans[plans.length - 1] ?? null;
+  const activeDivergence = divergences[divergences.length - 1] ?? null;
+
   return (
-    <div className="flex-1 p-6 space-y-4 max-w-7xl mx-auto w-full select-none">
+    <div className="flex-1 p-4 sm:p-6 space-y-4 max-w-7xl mx-auto w-full select-none">
       {/* 1. Header Strip with Odometer Counters */}
-      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-ink-900 border border-ink-600 font-mono text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-ink-900 border border-ink-700 font-mono text-xs">
         <div className="flex items-center gap-3">
           <span className="font-bold text-bone-50 uppercase tracking-wider text-sm">
             BLACK BOX FORENSICS
@@ -121,7 +139,7 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
 
       {/* History Notice if loading, incomplete, or error */}
       {loading && (
-        <div className="p-2 bg-ink-850 border border-ink-600 font-mono text-xs text-bone-500 animate-pulse">
+        <div className="p-2 bg-ink-850 border border-ink-700 font-mono text-xs text-bone-500 animate-pulse">
           Streaming retained events from server…
         </div>
       )}
@@ -153,7 +171,7 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
         disabled={isHistoryIncomplete || events.length === 0}
       />
 
-      {/* 4. Bottom Split: Left Inspector | Right State at #N */}
+      {/* 4. Bottom Split: Left Event Inspector | Right Forensic Workbench */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Left: Event Inspector */}
         <EventInspector
@@ -162,25 +180,75 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
           onSelectSequence={setSelectedSequence}
         />
 
-        {/* Right: State at Sequence #N */}
-        <div className="space-y-3 bg-ink-900 border border-ink-600 p-4">
-          <div className="flex items-center justify-between border-b border-ink-600 pb-2 font-mono text-xs">
-            <span className="font-bold text-bone-50 tracking-wider uppercase">
-              STATE AT SEQUENCE #{selectedSequence}
-            </span>
+        {/* Right: Technical Workbench Tabs */}
+        <div className="space-y-3 bg-ink-900 border border-ink-700 p-4 flex flex-col">
+          {/* Tab Navigation */}
+          <div className="flex items-center justify-between border-b border-ink-700 pb-2 flex-wrap gap-2">
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  { id: 'state', label: `State #${selectedSequence}` },
+                  { id: 'operations', label: `Operations (${operations.length})` },
+                  { id: 'claims', label: `Claims (${claims.length})` },
+                  { id: 'reconcile', label: 'Reconciliation' },
+                  { id: 'strands', label: 'Journal' },
+                  { id: 'metrics', label: 'Metrics' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider transition-colors border ${
+                    activeTab === tab.id
+                      ? 'bg-ink-800 text-bone-50 border-ink-600 font-bold'
+                      : 'bg-transparent text-bone-500 border-transparent hover:text-bone-300'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
             {!isLive && (
-              <span className="text-sig-pending font-bold text-[10px] uppercase">
-                [REWOUND TIMELINE]
+              <span className="text-sig-pending font-mono font-bold text-[10px] uppercase">
+                [REWOUND]
               </span>
             )}
           </div>
 
-          <InterlockBridge
-            stage={stageInfo.stage}
-            gapPx={stageInfo.gapPx}
-            projection={activeProjection}
-            readOnly
-          />
+          {/* Tab Panes */}
+          <div className="flex-1 overflow-y-auto min-h-[340px]">
+            {activeTab === 'state' && (
+              <IntentRealityHero
+                stage={stageInfo.stage}
+                gapPx={stageInfo.gapPx}
+                projection={activeProjection}
+              />
+            )}
+
+            {activeTab === 'operations' && (
+              <LedgerOperations operations={operations} effects={effects} />
+            )}
+
+            {activeTab === 'claims' && (
+              <LedgerClaims claims={claims} evidence={evidence} />
+            )}
+
+            {activeTab === 'reconcile' && (
+              <LedgerReconcile plan={activePlan} divergence={activeDivergence} />
+            )}
+
+            {activeTab === 'strands' && (
+              <Strands events={events} onSelectSequence={setSelectedSequence} />
+            )}
+
+            {activeTab === 'metrics' && (
+              <div className="pt-2">
+                <MetricsBar metrics={metrics} />
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
