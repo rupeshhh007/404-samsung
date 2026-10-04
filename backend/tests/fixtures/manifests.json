@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "manifests": [
+    {
+      "tool_name": "appointment.cancel",
+      "manifest_version": 1,
+      "argument_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider_booking_id", "center_id", "idempotency_key"],
+        "properties": {
+          "provider_booking_id": {"type": "string", "minLength": 1},
+          "center_id": {"type": "string", "minLength": 1},
+          "idempotency_key": {"type": "string", "minLength": 1}
+        }
+      },
+      "result_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "provider_booking_id", "center_id", "cancelled_at"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "CANCELLATION_CONFIRMED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1},
+              "center_id": {"type": "string", "minLength": 1},
+              "cancelled_at": {"type": "string", "format": "date-time"}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "error"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "CANCELLATION_FAILED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1},
+              "error": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "message", "retryable"],
+                "properties": {
+                  "code": {"type": "string", "minLength": 1},
+                  "message": {"type": "string", "minLength": 1},
+                  "retryable": {"type": "boolean"}
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "OUTCOME_UNKNOWN"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1}
+            }
+          }
+        ]
+      },
+      "effect_classification": "EXTERNAL_STATE_CHANGE",
+      "action_type": "REVERSIBLE",
+      "cancellation_policy": "AT_SAFEPOINT",
+      "safe_points": ["BEFORE_PROVIDER_DISPATCH"],
+      "timeout_ms": 5000,
+      "retry_policy": {"max_attempts": 1, "retry_on": []},
+      "idempotency": {"supported": true, "scope": "PROVIDER", "key_field": "idempotency_key"},
+      "compensation": {"supported": false},
+      "confirmation_semantics": {
+        "commit": "CANCELLATION_CONFIRMED",
+        "unknown": "OUTCOME_UNKNOWN",
+        "authoritative_fields": ["provider_request_id", "provider_booking_id", "center_id", "cancelled_at"]
+      }
+    },
+    {
+      "tool_name": "appointment.get",
+      "manifest_version": 1,
+      "argument_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider_booking_id", "center_id", "idempotency_key"],
+        "properties": {
+          "provider_booking_id": {"type": "string", "minLength": 1},
+          "center_id": {"type": "string", "minLength": 1},
+          "idempotency_key": {"type": "string", "minLength": 1}
+        }
+      },
+      "result_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "provider_booking_id", "center_id", "requested_slot", "confirmed_slot"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "BOOKING_CONFIRMED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1},
+              "center_id": {"type": "string", "minLength": 1},
+              "requested_slot": {"type": "string", "format": "date-time"},
+              "confirmed_slot": {"type": "string", "format": "date-time"}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "error"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "LOOKUP_FAILED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1},
+              "error": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "message", "retryable"],
+                "properties": {
+                  "code": {"type": "string", "minLength": 1},
+                  "message": {"type": "string", "minLength": 1},
+                  "retryable": {"type": "boolean"}
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "OUTCOME_UNKNOWN"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1}
+            }
+          }
+        ]
+      },
+      "effect_classification": "NONE",
+      "action_type": "READ_ONLY",
+      "cancellation_policy": "IMMEDIATE",
+      "safe_points": [],
+      "timeout_ms": 5000,
+      "retry_policy": {"max_attempts": 2, "retry_on": ["TRANSIENT"]},
+      "idempotency": {"supported": true, "scope": "PROVIDER", "key_field": "idempotency_key"},
+      "compensation": {"supported": false},
+      "confirmation_semantics": {
+        "commit": "BOOKING_CONFIRMED",
+        "unknown": "OUTCOME_UNKNOWN",
+        "authoritative_fields": ["provider_request_id", "provider_booking_id", "center_id", "requested_slot", "confirmed_slot"]
+      }
+    },
+    {
+      "tool_name": "appointment.book",
+      "manifest_version": 1,
+      "argument_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["center_id", "requested_slot", "idempotency_key"],
+        "properties": {
+          "center_id": {"type": "string", "minLength": 1},
+          "requested_slot": {"type": "string", "format": "date-time"},
+          "idempotency_key": {"type": "string", "minLength": 1}
+        }
+      },
+      "result_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "center_id", "requested_slot"],
+            "properties": {
+              "phase": {"const": "ACKNOWLEDGEMENT"},
+              "status": {"const": "REQUEST_RECEIVED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "center_id": {"type": "string", "minLength": 1},
+              "requested_slot": {"type": "string", "format": "date-time"}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "provider_booking_id", "center_id", "requested_slot", "confirmed_slot"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "BOOKING_CONFIRMED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "provider_booking_id": {"type": "string", "minLength": 1},
+              "center_id": {"type": "string", "minLength": 1},
+              "requested_slot": {"type": "string", "format": "date-time"},
+              "confirmed_slot": {"type": "string", "format": "date-time"}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id", "error"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "BOOKING_FAILED"},
+              "provider_request_id": {"type": "string", "minLength": 1},
+              "error": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "message", "retryable"],
+                "properties": {
+                  "code": {"type": "string", "minLength": 1},
+                  "message": {"type": "string", "minLength": 1},
+                  "retryable": {"type": "boolean"}
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["phase", "status", "provider_request_id"],
+            "properties": {
+              "phase": {"const": "FINAL"},
+              "status": {"const": "OUTCOME_UNKNOWN"},
+              "provider_request_id": {"type": "string", "minLength": 1}
+            }
+          }
+        ]
+      },
+      "effect_classification": "EXTERNAL_STATE_CHANGE",
+      "action_type": "REVERSIBLE",
+      "cancellation_policy": "AT_SAFEPOINT",
+      "safe_points": ["BEFORE_PROVIDER_DISPATCH"],
+      "timeout_ms": 5000,
+      "retry_policy": {"max_attempts": 1, "retry_on": []},
+      "idempotency": {"supported": true, "scope": "PROVIDER", "key_field": "idempotency_key"},
+      "compensation": {"supported": true, "tool_name": "appointment.cancel", "requires_authorization": true},
+      "confirmation_semantics": {
+        "acknowledgement": "REQUEST_RECEIVED",
+        "commit": "BOOKING_CONFIRMED",
+        "unknown": "OUTCOME_UNKNOWN",
+        "authoritative_fields": ["provider_request_id", "provider_booking_id", "center_id", "requested_slot", "confirmed_slot"]
+      }
+    }
+  ]
+}

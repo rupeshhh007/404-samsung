@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "fixture_id": "samsung-demo-v1",
+  "label": "SIMULATED local appointment provider",
+  "centers": [
+    {
+      "center_id": "ctr-01",
+      "name": "Demo Service Center A",
+      "timezone": "Asia/Kolkata"
+    }
+  ],
+  "availability": {
+    "ctr-01": [
+      "2030-01-15T11:00:00+05:30",
+      "2030-01-15T12:00:00+05:30"
+    ]
+  },
+  "initial_bookings": [],
+  "cancelled_at": "2030-01-15T05:30:01.500Z",
+  "default_outcomes": {
+    "appointment.book": ["SUCCEEDED"],
+    "appointment.get": ["SUCCEEDED"],
+    "appointment.cancel": ["SUCCEEDED"]
+  }
+}
