@@ -10,7 +10,13 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
+import importlib
 import inspect
+import json
+import os
+from pathlib import Path
+import sys
+import time
 from typing import Any, Awaitable, Callable, Collection, Mapping, Sequence
 
 from interlock.config import Settings
@@ -56,6 +62,109 @@ from interlock.runtime.journal import EventCandidate
 
 FdbToolExecutor = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 ApplicationFactory = Callable[[ToolRegistry, ToolProviderTransport], Application]
+
+
+class FdbLiveKitToolBridge:
+    """Expose official LiveKit tool schemas through one INTERLOCK scenario.
+
+    LiveKit remains the model-selection surface.  The selected generic call is
+    then authorized and executed by the existing FDB scenario/ToolRuntime path;
+    this bridge owns no authoritative state and contains no scenario answers.
+    """
+
+    def __init__(
+        self,
+        adapter: "FdbScenarioAdapter",
+        declarations: Sequence[Mapping[str, Any]],
+        *,
+        room_name: str,
+        telemetry_path: Path = Path("/tmp/agent_tool_calls.log"),
+    ) -> None:
+        if not isinstance(adapter, FdbScenarioAdapter):
+            raise TypeError("adapter must be an FdbScenarioAdapter")
+        if not room_name:
+            raise ValueError("room_name must be nonempty")
+        self._adapter = adapter
+        self._declarations = tuple(deepcopy(dict(item)) for item in declarations)
+        self._room_name = room_name
+        self._telemetry_path = telemetry_path
+        self._call_lock = asyncio.Lock()
+        self._next_operation = 0
+
+    def livekit_tools(self) -> list[Any]:
+        """Build raw-schema LiveKit tools without hardcoded benchmark names."""
+
+        from livekit.agents import llm
+
+        tools: list[Any] = []
+        for declaration in self._declarations:
+            function = declaration.get("function")
+            if declaration.get("type") != "function" or not isinstance(function, dict):
+                raise ValueError("official tool declaration must use function format")
+            raw_schema = deepcopy(function)
+            name = raw_schema.get("name")
+            if not isinstance(name, str) or not name:
+                raise ValueError("official tool name must be nonempty")
+
+            async def invoke(
+                raw_arguments: dict[str, object], *, _name: str = name
+            ) -> str:
+                return await self._invoke(_name, raw_arguments)
+
+            tools.append(llm.function_tool(raw_schema=raw_schema)(invoke))
+        return tools
+
+    async def _invoke(self, tool_name: str, arguments: Mapping[str, Any]) -> str:
+        started = time.time()
+        async with self._call_lock:
+            self._next_operation += 1
+            operation_id = f"fdb-livekit-{self._next_operation}"
+            try:
+                event = await self._adapter.execute_tool(
+                    tool_name=tool_name,
+                    arguments=dict(arguments),
+                    operation_id=operation_id,
+                )
+            finally:
+                ended = time.time()
+                self._record_call(tool_name, arguments, started, ended)
+        if event is None:
+            raise RuntimeError("INTERLOCK produced no terminal tool observation")
+        if event.event_type != "ToolResultObserved":
+            raise RuntimeError("INTERLOCK tool outcome is unresolved")
+        return json.dumps(event.payload["result"], sort_keys=True, ensure_ascii=False)
+
+    def _record_call(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        started: float,
+        ended: float,
+    ) -> None:
+        entry = {
+            "room": self._room_name,
+            "call": {
+                "function": tool_name,
+                "args": deepcopy(dict(arguments)),
+                "timestamp_start": started,
+                "timestamp_end": ended,
+            },
+        }
+        self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._telemetry_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+
+
+def official_fdb_tool_declarations(tool_context: Any) -> tuple[dict[str, Any], ...]:
+    """Derive declarations from the pinned benchmark's actual LiveKit tools."""
+
+    from livekit.agents import llm
+    from livekit.agents.llm.utils import build_legacy_openai_schema
+
+    tools = llm.find_function_tools(tool_context)
+    if not tools:
+        raise RuntimeError("official FDB tool surface is empty")
+    return tuple(build_legacy_openai_schema(tool) for tool in tools)
 
 
 def normalize_fdb_tool_declaration(
@@ -540,9 +649,123 @@ class FdbScenarioAdapter:
         return final_state
 
 
+def run_official_fdb_livekit_agent(fdb_v3_dir: Path) -> None:
+    """Run the pinned official FDB voice surface with INTERLOCK-owned tools."""
+
+    directory = fdb_v3_dir.resolve()
+    required = ("lk_agent_tool.py", "mock_apis.py", "benchmark_data_v2.json")
+    if not directory.is_dir() or any(not (directory / name).is_file() for name in required):
+        raise RuntimeError("FDB-v3 directory is incomplete")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    official_agent = importlib.import_module("lk_agent_tool")
+    official_apis = importlib.import_module("mock_apis")
+    for module in (official_agent, official_apis):
+        module_path = Path(getattr(module, "__file__", "")).resolve()
+        if directory not in module_path.parents:
+            raise RuntimeError("official FDB module resolved outside the pinned checkout")
+
+    from livekit import agents
+    from livekit.agents import Agent, AgentServer, AgentSession
+
+    server = AgentServer()
+
+    @server.rtc_session()
+    async def entrypoint(ctx: agents.JobContext) -> None:
+        # Every room is a benchmark example and receives entirely fresh mutable
+        # state: provider registry, model context/session, Application, runtime
+        # correlation, callback dedupe, and idempotency registries.
+        tracker = official_agent.LatencyTracker()
+        official_context = official_agent.AssistantFnc(tracker, ctx.room.name)
+        declarations = official_fdb_tool_declarations(official_context)
+        provider = official_apis.MockAPIRegistry(
+            latency_profile=os.environ.get("FDB_V3_LATENCY_PROFILE", "instant")
+        )
+
+        def execute(tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+            provider_arguments = {
+                key: value for key, value in arguments.items() if key != "idempotency_key"
+            }
+            result = provider.call(tool_name, **provider_arguments)
+            normalized = dict(result) if isinstance(result, Mapping) else {"output": result}
+            provider_status = normalized.pop("status", None)
+            if provider_status == "error":
+                return {
+                    "error": normalized.pop("message", "FDB provider failed"),
+                    "provider_status": provider_status,
+                    **normalized,
+                }
+            if provider_status is not None:
+                normalized["provider_status"] = provider_status
+            return normalized
+
+        model = official_agent.get_realtime_model()
+        session = AgentSession(llm=model)
+        fdb_adapter, livekit_adapter = FdbScenarioAdapter.create_composed(
+            ctx.room.name,
+            tools=declarations,
+            tool_executor=execute,
+            livekit=session,
+            settings=Settings(INTERLOCK_MODE="LIVE"),
+        )
+        await livekit_adapter.start(logical_time=0)
+        await fdb_adapter.start(logical_time=0)
+        bridge = FdbLiveKitToolBridge(
+            fdb_adapter,
+            declarations,
+            room_name=ctx.room.name,
+        )
+        agent = Agent(
+            instructions=official_agent.VoiceAgent().instructions,
+            tools=bridge.livekit_tools(),
+        )
+        closed = False
+
+        async def cleanup(_: str = "") -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            try:
+                await fdb_adapter.close()
+            finally:
+                await livekit_adapter.close()
+
+        ctx.add_shutdown_callback(cleanup)
+        await session.start(room=ctx.room, agent=agent)
+
+    agents.cli.run_app(server)
+
+
+def _command_line(argv: Sequence[str] | None = None) -> int:
+    """Minimal delivery entrypoint; LiveKit owns all trailing CLI arguments."""
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] != "benchmark-agent":
+        raise SystemExit("usage: python -m interlock.adapters.fdb_v3 benchmark-agent --fdb-v3-dir PATH start")
+    try:
+        option = args.index("--fdb-v3-dir")
+        directory = Path(args[option + 1])
+    except (ValueError, IndexError) as exc:
+        raise SystemExit("benchmark-agent requires --fdb-v3-dir PATH") from exc
+    livekit_args = args[1:option] + args[option + 2:]
+    if not livekit_args:
+        livekit_args = ["start"]
+    sys.argv = [sys.argv[0], *livekit_args]
+    run_official_fdb_livekit_agent(directory)
+    return 0
+
+
 __all__ = [
+    "FdbLiveKitToolBridge",
     "FdbScenarioAdapter",
     "FdbToolExecutor",
     "FdbToolTransport",
     "normalize_fdb_tool_declaration",
+    "official_fdb_tool_declarations",
+    "run_official_fdb_livekit_agent",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_command_line())
