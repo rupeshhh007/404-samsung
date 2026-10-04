@@ -61,12 +61,19 @@ class FakeAppointmentProvider:
         *,
         outcome_scripts: Mapping[str, Sequence[ProviderOutcome]] | None = None,
     ) -> None:
-        seed = (fixture or load_demo_fixture()).model_copy(deep=True)
+        self._initial_fixture = fixture or load_demo_fixture()
+        self._initial_outcome_scripts = outcome_scripts
+        self._lock = asyncio.Lock()
+        self.reset(self._initial_fixture)
+
+    def reset(self, fixture: FakeProviderFixture | None = None) -> None:
+        """Reset provider state back to canonical clean fixture state."""
+        seed = (fixture or self._initial_fixture).model_copy(deep=True)
         scripts = {
             tool: tuple(outcomes)
             for tool, outcomes in seed.default_outcomes.items()
         }
-        for tool, outcomes in (outcome_scripts or {}).items():
+        for tool, outcomes in (self._initial_outcome_scripts or {}).items():
             if tool not in _WIRE_TO_TOOL.values():
                 raise ValueError("outcome script targets an unsupported tool")
             sequence = tuple(outcomes)
@@ -98,7 +105,6 @@ class FakeAppointmentProvider:
         self._requests: dict[str, _RequestRecord] = {}
         self._request_by_provider_id: dict[str, _RequestRecord] = {}
         self._physical_action_count = 0
-        self._lock = asyncio.Lock()
 
     @property
     def bookings(self) -> dict[str, dict[str, Any]]:

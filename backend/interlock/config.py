@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     INTERLOCK_HOST: str = Field(default="127.0.0.1", min_length=1)
     INTERLOCK_PORT: int = Field(default=8000, ge=1, le=65535)
-    INTERLOCK_FRONTEND_ORIGINS: str = Field(default="http://localhost:5173")
+    INTERLOCK_FRONTEND_ORIGINS: str = Field(default="http://localhost:5173,http://127.0.0.1:5173")
     INTERLOCK_WS_URL: str = Field(default="ws://localhost:8000/api/v1")
     INTERLOCK_MODE: Literal["DEMO", "LIVE", "TEST"] = Field(default="DEMO")
     INTERLOCK_MODEL_PROVIDER: Literal["fallback", "configured"] = Field(default="fallback")

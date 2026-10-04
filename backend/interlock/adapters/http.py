@@ -259,6 +259,7 @@ def create_http_app(
     application: Application,
     *,
     hub: ProjectionHub | None = None,
+    demo_reset_hook: Callable[[str], Any] | None = None,
     max_input_bytes: int = 65_536,
     max_dedupe_entries: int | None = None,
     event_page_size: int = 256,
@@ -297,7 +298,7 @@ def create_http_app(
         return {"status": "ok", "mode": application.settings.INTERLOCK_MODE}
 
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED)
-    async def create_session(request: SessionCreateRequest) -> dict[str, Any]:
+    async def create_session(request: SessionCreateRequest, raw_request: Request) -> dict[str, Any]:
         async def start() -> dict[str, Any]:
             session_id = generate_uuidv7()
             try:
@@ -306,10 +307,15 @@ def create_http_app(
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid session request") from exc
             except RuntimeError as exc:
                 raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "session capacity reached") from exc
+            ws_base = application.settings.INTERLOCK_WS_URL
+            host = raw_request.headers.get("host")
+            if host and ws_base == "ws://localhost:8000/api/v1":
+                scheme = "wss" if raw_request.url.scheme == "https" else "ws"
+                ws_base = f"{scheme}://{host}/api/v1"
             return {
                 "session_id": session_id,
                 "last_sequence": snapshot.last_sequence,
-                "ws_url": _session_ws_url(application.settings.INTERLOCK_WS_URL, session_id),
+                "ws_url": _session_ws_url(ws_base, session_id),
             }
 
         return await boundary.dedupe(
@@ -475,6 +481,13 @@ def create_http_app(
                 raise HTTPException(status.HTTP_409_CONFLICT, "session could not be safely retired") from exc
             if hub is not None:
                 await hub.retire_session(session_id, reason="RESET")
+            if demo_reset_hook is not None:
+                try:
+                    hook_res = demo_reset_hook(request.fixture_id)
+                    if asyncio.iscoroutine(hook_res):
+                        await hook_res
+                except ValueError as exc:
+                    raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
             new_session_id = generate_uuidv7()
             try:
                 clean = await application.start_session(new_session_id, mode=RuntimeMode.DEMO)
