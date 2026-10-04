@@ -39,8 +39,19 @@ from interlock.runtime.journal import (
     SessionHaltedError,
     UnknownSessionError,
 )
+from interlock.adapters.websocket import (
+    ProjectionHub,
+    event_message,
+    project_state,
+)
 from interlock.runtime.session import generate_uuidv7
 
+
+_CANONICAL_MODALITY: Mapping[str, str] = {
+    "TEXT": "text",
+    "FRAME_REF": "frame_ref",
+    "AUDIO_REF": "audio_ref",
+}
 
 _RequestId = Annotated[
     str,
@@ -247,6 +258,7 @@ class _HttpBoundary:
 def create_http_app(
     application: Application,
     *,
+    hub: ProjectionHub | None = None,
     max_input_bytes: int = 65_536,
     max_dedupe_entries: int | None = None,
     event_page_size: int = 256,
@@ -264,6 +276,7 @@ def create_http_app(
     )
     app = FastAPI(title="INTERLOCK HTTP API", version="1")
     app.state.interlock_application = application
+    app.state.interlock_hub = hub
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -309,7 +322,7 @@ def create_http_app(
         return {
             "session_id": session_id,
             "through_sequence": snapshot.last_sequence,
-            "projection": _projection(snapshot),
+            "projection": project_state(snapshot),
         }
 
     @app.post(
@@ -330,7 +343,7 @@ def create_http_app(
                 source=EventSource.INPUT_ADAPTER,
                 payload={
                     "evidence_id": _stable_id("input", session_id, request.client_request_id),
-                    "modality": request.modality,
+                    "modality": _CANONICAL_MODALITY[request.modality],
                     "content_ref": content_ref,
                 },
                 correlation_id=request.client_request_id,
@@ -460,6 +473,8 @@ def create_http_app(
                 )
             except (asyncio.TimeoutError, RuntimeError) as exc:
                 raise HTTPException(status.HTTP_409_CONFLICT, "session could not be safely retired") from exc
+            if hub is not None:
+                await hub.retire_session(session_id, reason="RESET")
             new_session_id = generate_uuidv7()
             try:
                 clean = await application.start_session(new_session_id, mode=RuntimeMode.DEMO)
@@ -492,7 +507,14 @@ def create_http_app(
         selected = available[:page_limit]
         through_sequence = selected[-1].sequence if selected else after_sequence
         return {
-            "events": [_transport_event(event) for event in selected],
+            "events": _serialize_events(
+                application=application,
+                session_id=session_id,
+                selected=selected,
+                after_sequence=after_sequence,
+                all_retained=retained,
+                hub=hub,
+            ),
             "through_sequence": through_sequence,
             "has_more": len(available) > len(selected),
         }
@@ -541,75 +563,86 @@ def _active_revision_id(state: SessionState) -> str | None:
     return intent.active_revision_id if intent is not None else None
 
 
-def _projection(state: SessionState) -> dict[str, Any]:
-    active_revision_id = _active_revision_id(state)
-    intent: dict[str, Any] | None = None
-    if state.active_intent_id is not None:
-        node = state.intents.get(state.active_intent_id)
-        revision = state.revisions.get(active_revision_id) if active_revision_id else None
-        if node is not None:
-            intent = {
-                "intent_id": node.intent_id,
-                "goal_type": node.goal_type,
-                "active_revision": _sanitize(revision.model_dump(mode="json")) if revision else None,
-            }
+def _serialize_events(
+    application: Application,
+    session_id: str,
+    selected: Sequence[EventEnvelope],
+    after_sequence: int,
+    all_retained: Sequence[EventEnvelope],
+    hub: ProjectionHub | None = None,
+) -> list[dict[str, Any]]:
+    if not selected:
+        return []
 
-    operations = []
-    for operation in state.operations.values():
-        serialized = operation.model_dump(mode="json")
-        error = serialized.get("error")
-        if isinstance(error, dict):
-            serialized["error"] = {
-                "code": error.get("code"),
-                "retryable": bool(error.get("retryable", False)),
-            }
-        operations.append(_sanitize(serialized))
+    # Check canonical ProjectionHub history first when available
+    hub_history: dict[int, dict[str, Any]] = {}
+    if hub is not None:
+        session_proj = hub._sessions.get(session_id)
+        if session_proj is not None:
+            hub_history = {msg["sequence"]: msg for msg in session_proj.history}
 
-    return {
-        "intent": intent,
-        "operations": operations,
-        "effects": [_sanitize(value.model_dump(mode="json")) for value in state.effects.values()],
-        "evidence": [_sanitize(value.model_dump(mode="json")) for value in state.evidence.values()],
-        "claims": [_sanitize(value.model_dump(mode="json")) for value in state.claims.values()],
-        "divergences": [_sanitize(value.model_dump(mode="json")) for value in state.divergences.values()],
-        "plans": [_sanitize(value.model_dump(mode="json")) for value in state.plans.values()],
-        "speech": [_sanitize(value.model_dump(mode="json")) for value in state.speech.values()],
-        "metrics": _sanitize(state.metrics.model_dump(mode="json")),
-    }
+    # If all selected events are retained in hub history, return them directly
+    if all(event.sequence in hub_history for event in selected):
+        return [deepcopy(hub_history[event.sequence]) for event in selected]
 
+    # Otherwise, raw events must be replayed from sequence 1.
+    # If the retained journal slice no longer starts at sequence 1, history cannot be replayed.
+    if not all_retained or all_retained[0].sequence != 1:
+        raise HTTPException(
+            status.HTTP_410_GONE, "requested event history has expired"
+        )
 
-def _transport_event(event: EventEnvelope) -> dict[str, Any]:
-    return {
-        "type": "event",
-        "schema_version": 1,
-        "session_id": event.session_id,
-        "sequence": event.sequence,
-        "event_type": event.event_type,
-        "projection_delta": {
-            "through_sequence": event.sequence,
-            "changed": {"metrics": {"through_sequence": event.sequence}},
-            "removed": {},
-        },
-        "trace": {"correlation_id": event.correlation_id},
-    }
+    prefix_events = [e for e in all_retained if e.sequence <= after_sequence]
+    if prefix_events:
+        try:
+            prev_state = application.replay(prefix_events)
+            prev_proj = project_state(prev_state)
+        except Exception as exc:
+            raise HTTPException(
+                status.HTTP_410_GONE, "requested event history has expired"
+            ) from exc
+    else:
+        prev_proj = {
+            "intent": None,
+            **{
+                name: []
+                for name in (
+                    "operations",
+                    "effects",
+                    "evidence",
+                    "claims",
+                    "divergences",
+                    "plans",
+                    "speech",
+                )
+            },
+            "metrics": {},
+        }
 
+    results: list[dict[str, Any]] = []
+    current_events = list(prefix_events)
+    for event in selected:
+        if event.sequence in hub_history:
+            results.append(deepcopy(hub_history[event.sequence]))
+            current_events.append(event)
+            try:
+                curr_state = application.replay(current_events)
+                prev_proj = project_state(curr_state)
+            except Exception:
+                pass
+        else:
+            current_events.append(event)
+            try:
+                curr_state = application.replay(current_events)
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_410_GONE, "requested event history has expired"
+                ) from exc
+            curr_proj = project_state(curr_state)
+            results.append(event_message(event, prev_proj, curr_proj))
+            prev_proj = curr_proj
 
-def _sanitize(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        sanitized: dict[str, Any] = {}
-        for key, item in value.items():
-            lowered = str(key).lower()
-            if any(
-                marker in lowered
-                for marker in ("api_key", "access_token", "refresh_token", "password", "secret", "credential")
-            ):
-                sanitized[str(key)] = "[REDACTED]"
-            else:
-                sanitized[str(key)] = _sanitize(item)
-        return sanitized
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_sanitize(item) for item in value]
-    return deepcopy(value)
+    return results
 
 
 def _acceptance(event: EventEnvelope) -> dict[str, Any]:

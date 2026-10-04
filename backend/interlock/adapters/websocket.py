@@ -361,6 +361,23 @@ class ProjectionHub:
         async with self._lock:
             self._require_resync_locked(session_id)
 
+    async def retire_session(self, session_id: str, *, reason: str = "RESET") -> None:
+        """Deterministically retire one session's stream and notify its subscribers."""
+        async with self._lock:
+            subscribers = self._subscribers.pop(session_id, set())
+            session = self._sessions.pop(session_id, None)
+            through = session.last_sequence if session is not None else 0
+            message = {
+                "type": "closing",
+                "schema_version": SCHEMA_VERSION,
+                "session_id": session_id,
+                "through_sequence": through,
+                "reason": reason,
+            }
+            for subscriber in tuple(subscribers):
+                self._replace_queue(subscriber, message)
+                subscriber.closed = True
+
     async def shutdown(self) -> None:
         async with self._lock:
             if self._closed:
