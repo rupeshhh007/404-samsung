@@ -4,15 +4,7 @@
 
 @layer base {
   :root {
-    color-scheme: light dark;
-  }
-
-  html.dark {
     color-scheme: dark;
-  }
-
-  html:not(.dark) {
-    color-scheme: light;
   }
 
   html,
@@ -20,41 +12,40 @@
     margin: 0;
     padding: 0;
     min-height: 100%;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--ink-950);
+    color: var(--bone-50);
+    font-family: 'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
   }
 
   #root {
     min-height: 100vh;
     display: flex;
     flex-direction: column;
+    background-color: var(--ink-950);
   }
 
-  /* Accessible visible keyboard focus across both light and dark themes */
+  /* Accessible visible keyboard focus ring (Night Instrument active signal) */
   :focus-visible {
-    outline: 2px solid #0284c7;
-    outline-offset: 2px;
+    outline: 2px solid var(--sig-active);
+    outline-offset: 3px;
   }
 
-  .dark :focus-visible,
-  .dark:focus-visible {
-    outline: 2px solid #38bdf8;
-    outline-offset: 2px;
+  /* Sleek custom scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
   }
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
+  ::-webkit-scrollbar-track {
+    background: var(--ink-950);
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+  ::-webkit-scrollbar-thumb {
+    background: var(--ink-700);
+    border-radius: 0;
   }
-}
-
-.animate-fadeIn {
-  animation: fadeIn 0.25s ease-out forwards;
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--ink-600);
+  }
 }

@@ -5,34 +5,39 @@ import React, {
   useEffect,
   useMemo,
   useSyncExternalStore,
+  lazy,
+  Suspense,
 } from 'react';
 import {
   HttpApplicationError,
   HttpProtocolError,
   InterlockHttpClient,
 } from './api/http';
-import type { FrontendError, ProjectionEventMessage } from './api/types';
+import type {
+  FrontendError,
+  ProjectionEventMessage,
+  SessionProjection,
+} from './api/types';
 import { ProjectionSocketClient } from './api/websocket';
-import { CopilotPage } from './pages/CopilotPage';
-import { TracePage } from './pages/TracePage';
 import { createProjectionStore } from './state/store';
-import { Icons } from './components/Icons';
-import { CopyButton } from './components/CopyButton';
-import { shortenId } from './utils/formatters';
+import { AppShell } from './ui/shell/AppShell';
+import type { ActiveView } from './ui/shell/TopBar';
+import type { ToastMessage } from './ui/shell/Toasts';
+import { IdleScreen } from './ui/idle/IdleScreen';
+import { VoiceColumn } from './ui/voice/VoiceColumn';
+import { Deck } from './ui/deck/Deck';
+import { BlackBoxPage } from './ui/blackbox/BlackBoxPage';
+import { KitchenSink } from './ui/primitives/KitchenSink';
+import { deriveStage } from './ui/viewmodel/stage';
+import type { UserPromptEntry } from './ui/viewmodel/transcript';
+import { useStageDirector } from './ui/motion/director/useStageDirector';
+import type { StoryboardClient } from './dev/storyboard/StoryboardClient';
 
-type View = 'copilot' | 'trace';
-type Theme = 'light' | 'dark';
-
-function initialTheme(): Theme {
-  try {
-    const stored = localStorage.getItem('interlock-theme');
-    if (stored === 'light' || stored === 'dark') return stored;
-    if (window.matchMedia?.('(prefers-color-scheme: light)').matches) return 'light';
-  } catch {
-    // Optional presentation capability
-  }
-  return 'dark';
-}
+// Lazy load Storyboard overlay only when flag is set
+const StoryboardOverlay =
+  import.meta.env.VITE_ENABLE_STORYBOARD === '1'
+    ? lazy(() => import('./dev/storyboard/StoryboardOverlay'))
+    : null;
 
 function frontendError(error: unknown): FrontendError {
   if (error instanceof HttpApplicationError) {
@@ -73,10 +78,22 @@ function streamUrlForSession(currentUrl: string, sessionId: string): string {
   return parsed.toString();
 }
 
+/**
+ * Stage Director bridge component running inside LiveRegionsProvider
+ */
+const DirectorBridge: React.FC<{
+  readonly projection: SessionProjection | null;
+  readonly sessionId: string | null;
+}> = ({ projection, sessionId }) => {
+  useStageDirector(projection, sessionId);
+  return null;
+};
+
 export const App: React.FC = () => {
   const store = useMemo(() => createProjectionStore(), []);
   const http = useMemo(() => new InterlockHttpClient(), []);
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
+
   const socketRef = useRef<ProjectionSocketClient | null>(null);
   const streamUrlRef = useRef<string | null>(null);
   const requestSequence = useRef(0);
@@ -87,28 +104,41 @@ export const App: React.FC = () => {
   const traceTargetSequenceRef = useRef(0);
   const traceEventsRef = useRef<ProjectionEventMessage[]>([]);
 
-  const [view, setView] = useState<View>('copilot');
-  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [view, setView] = useState<ActiveView>('console');
   const [actionPending, setActionPending] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<readonly ToastMessage[]>([]);
   const [traceEvents, setTraceEvents] = useState<readonly ProjectionEventMessage[]>([]);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
-  const [userPrompts, setUserPrompts] = useState<readonly { id: string; text: string; timestamp: number }[]>([]);
-  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [userPrompts, setUserPrompts] = useState<readonly UserPromptEntry[]>([]);
+  const [storyboardClient, setStoryboardClient] = useState<StoryboardClient | null>(null);
 
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-    try {
-      localStorage.setItem('interlock-theme', theme);
-    } catch {
-      // Storage write error ignored
-    }
-  }, [theme]);
+  // Derive stage, tension, and layout gap from pure view-model
+  const { stage, gapPx, tension } = useMemo(() => {
+    return deriveStage(state.projection, state.sessionId, state.connectionStatus);
+  }, [state.projection, state.sessionId, state.connectionStatus]);
 
+  // Storyboard gating check
+  const isStoryboardActive =
+    import.meta.env.VITE_ENABLE_STORYBOARD === '1' &&
+    typeof window !== 'undefined' &&
+    window.location.search.includes('storyboard=samsung-v1');
+
+  // Check for dev kitchen sink route
+  const isKitchenRoute =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('kitchen') === '1';
+
+  // Cleanup websocket on unmount
   useEffect(() => () => socketRef.current?.disconnect(), []);
 
+  // Poll trace history from REST endpoint when sequence advances
   useEffect(() => {
+    // If storyboard is driving, do not poll REST
+    if (isStoryboardActive && storyboardClient) {
+      return;
+    }
+
     const sessionId = state.sessionId;
     if (!sessionId) {
       traceGenerationRef.current += 1;
@@ -142,14 +172,16 @@ export const App: React.FC = () => {
       return;
     }
 
+    const activeSessionId = sessionId;
     const generation = traceGenerationRef.current;
     traceLoadingRef.current = true;
+
     async function loadHistory() {
       setTraceLoading(true);
       setTraceError(null);
       try {
         while (traceCursorRef.current < traceTargetSequenceRef.current) {
-          const page = await http.getEvents(sessionId, traceCursorRef.current);
+          const page = await http.getEvents(activeSessionId, traceCursorRef.current);
           if (traceGenerationRef.current !== generation || traceSessionRef.current !== sessionId) return;
           const next = page.events.filter((event) => event.sequence > traceCursorRef.current);
           if (next.length === 0) break;
@@ -171,8 +203,9 @@ export const App: React.FC = () => {
         }
       }
     }
+
     void loadHistory();
-  }, [http, state.sessionId, state.lastAppliedSequence]);
+  }, [http, state.sessionId, state.lastAppliedSequence, isStoryboardActive, storyboardClient]);
 
   const nextRequestId = useCallback((kind: string) => {
     if (typeof crypto.randomUUID === 'function') {
@@ -182,15 +215,28 @@ export const App: React.FC = () => {
     return `interlock-ui-${kind}-${requestSequence.current}`;
   }, []);
 
-  const startSession = useCallback(async () => {
+  const addToast = useCallback((kind: 'error' | 'warning' | 'info', message: string) => {
+    const id = nextRequestId('toast');
+    setToasts((prev) => [
+      ...prev,
+      {
+        id,
+        kind,
+        message,
+        onDismiss: () => setToasts((curr) => curr.filter((t) => t.id !== id)),
+      },
+    ]);
+  }, [nextRequestId]);
+
+  // E1: startSession returns Promise<boolean> (true on success)
+  const startSession = useCallback(async (): Promise<boolean> => {
     setActionPending(true);
-    setActionError(null);
     socketRef.current?.disconnect();
     socketRef.current = null;
     store.reset();
     setTraceEvents([]);
     setUserPrompts([]);
-    setSessionMenuOpen(false);
+
     try {
       store.beginConnection();
       const created = await http.createSession({
@@ -214,20 +260,26 @@ export const App: React.FC = () => {
       streamUrlRef.current = created.ws_url;
       socketRef.current = socket;
       socket.connect();
+      return true;
     } catch (error) {
       const normalized = frontendError(error);
       store.markError(normalized);
-      setActionError(normalized.message);
+      addToast('error', normalized.message);
+      return false;
     } finally {
       setActionPending(false);
     }
-  }, [http, nextRequestId, store]);
+  }, [http, nextRequestId, store, addToast]);
 
   const resetSession = useCallback(async () => {
+    if (storyboardClient) {
+      storyboardClient.jumpTo(0);
+      return;
+    }
+
     if (!state.sessionId || !streamUrlRef.current) return;
     setActionPending(true);
-    setActionError(null);
-    setSessionMenuOpen(false);
+
     try {
       const reset = await http.resetDemo(state.sessionId, {
         fixture_id: 'samsung-demo-v1',
@@ -259,226 +311,211 @@ export const App: React.FC = () => {
     } catch (error) {
       const normalized = frontendError(error);
       store.markError(normalized);
-      setActionError(normalized.message);
+      addToast('error', normalized.message);
     } finally {
       setActionPending(false);
     }
-  }, [http, nextRequestId, state.sessionId, store]);
+  }, [http, nextRequestId, state.sessionId, store, storyboardClient, addToast]);
 
+  // E2: submitText records acceptedSequence on userPrompts
   const submitText = useCallback(async (content: string) => {
     if (!state.sessionId) return;
-    setActionError(null);
 
-    // Record user prompt in conversational history
     const promptId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : String(Date.now());
-    setUserPrompts((prev) => [...prev, { id: promptId, text: content, timestamp: Date.now() }]);
+    setUserPrompts((prev) => [
+      ...prev,
+      { id: promptId, text: content, acceptedSequence: null },
+    ]);
 
     try {
-      await http.submitInput(state.sessionId, {
+      const res = await http.submitInput(state.sessionId, {
         modality: 'TEXT',
         content,
         client_request_id: nextRequestId('input'),
       });
+      setUserPrompts((prev) =>
+        prev.map((p) => (p.id === promptId ? { ...p, acceptedSequence: res.sequence } : p)),
+      );
     } catch (error) {
-      setActionError(frontendError(error).message);
+      const normalized = frontendError(error);
+      setUserPrompts((prev) =>
+        prev.map((p) => (p.id === promptId ? { ...p, failed: true } : p)),
+      );
+      addToast('error', normalized.message);
     }
-  }, [http, nextRequestId, state.sessionId]);
+  }, [http, nextRequestId, state.sessionId, addToast]);
 
   const cancelSpeech = useCallback(async (speechId: string) => {
     if (!state.sessionId) return;
     setActionPending(true);
-    setActionError(null);
     try {
       await http.cancelSpeech(state.sessionId, speechId, {
         client_request_id: nextRequestId('speech-cancel'),
       });
     } catch (error) {
-      setActionError(frontendError(error).message);
+      const normalized = frontendError(error);
+      addToast('error', normalized.message);
     } finally {
       setActionPending(false);
     }
-  }, [http, nextRequestId, state.sessionId]);
+  }, [http, nextRequestId, state.sessionId, addToast]);
 
+  // E3: authorizePlan and authorizeRevision wrappers
+  const authorizePlan = useCallback(async (planId: string, decision: 'AUTHORIZE' | 'DENY') => {
+    if (!state.sessionId) return;
+    setActionPending(true);
+    try {
+      await http.authorize(state.sessionId, {
+        plan_id: planId,
+        decision,
+        client_request_id: nextRequestId('auth-plan'),
+      });
+    } catch (error) {
+      const normalized = frontendError(error);
+      addToast('error', normalized.message);
+    } finally {
+      setActionPending(false);
+    }
+  }, [http, nextRequestId, state.sessionId, addToast]);
+
+  const authorizeRevision = useCallback(async (revisionId: string, decision: 'AUTHORIZE' | 'DENY') => {
+    if (!state.sessionId) return;
+    setActionPending(true);
+    try {
+      await http.authorize(state.sessionId, {
+        revision_id: revisionId,
+        decision,
+        client_request_id: nextRequestId('auth-rev'),
+      });
+    } catch (error) {
+      const normalized = frontendError(error);
+      addToast('error', normalized.message);
+    } finally {
+      setActionPending(false);
+    }
+  }, [http, nextRequestId, state.sessionId, addToast]);
+
+  // Expose global window.__interlock test helpers
   useEffect(() => {
     (window as unknown as { __interlock?: Record<string, unknown> }).__interlock = {
       startSession,
       resetSession,
       submitText,
       cancelSpeech,
+      authorizePlan,
+      authorizeRevision,
     };
-  }, [startSession, resetSession, submitText, cancelSpeech]);
+  }, [startSession, resetSession, submitText, cancelSpeech, authorizePlan, authorizeRevision]);
 
-  const hasSession = state.sessionId !== null;
-  const isConnected = state.connectionStatus === 'CONNECTED';
-  const isConnecting = state.connectionStatus === 'CONNECTING' || state.connectionStatus === 'RECONNECTING';
+  // Merge prompts and events if StoryboardClient is driving
+  const effectivePrompts = storyboardClient ? storyboardClient.getUserPrompts() : userPrompts;
+  const effectiveEvents = storyboardClient ? storyboardClient.getAllEvents() : traceEvents;
+  const isScriptedReplay = isStoryboardActive && !!storyboardClient;
+  const isScriptedContinuation = storyboardClient?.getIsScriptedContinuation() ?? false;
+
+  // Handle idle screen "Run the correction race" action
+  const handleRunRace = useCallback(async () => {
+    if (storyboardClient) {
+      storyboardClient.play();
+      return;
+    }
+    const started = await startSession();
+    if (started) {
+      // Session started; user can test prompts manually
+    }
+  }, [storyboardClient, startSession]);
 
   return (
-    <div className="min-h-screen bg-[#faf8f5] text-stone-900 transition-colors dark:bg-[#0e0d0c] dark:text-stone-100 flex flex-col font-sans">
-      <a href="#main-content" className="sr-only focus:not-sr-only fixed left-3 top-3 z-50 rounded-lg bg-stone-900 px-3 py-2 text-xs font-semibold text-white dark:bg-white dark:text-stone-900">
-        Skip to main content
-      </a>
+    <AppShell
+      view={view}
+      onViewChange={setView}
+      stage={stage}
+      tension={tension}
+      connectionStatus={state.connectionStatus}
+      sessionId={state.sessionId}
+      lastAppliedSequence={state.lastAppliedSequence}
+      onNewSession={() => void startSession()}
+      onResetDemo={() => void resetSession()}
+      actionPending={actionPending}
+      isScriptedReplay={isScriptedReplay}
+      isScriptedContinuation={isScriptedContinuation}
+      toasts={toasts}
+    >
+      <DirectorBridge projection={state.projection} sessionId={state.sessionId} />
 
-      {/* Bauhaus Top Nav: Clean, Minimal, Non-Dominant */}
-      <header className="sticky top-0 z-30 border-b border-stone-200/80 bg-white/90 backdrop-blur-md dark:border-stone-800/80 dark:bg-[#0e0d0c]/90 transition-colors">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 py-2.5">
-          {/* Left: Bauhaus geometric mark + Wordmark */}
-          <div className="flex items-center gap-2.5">
-            <div className="text-stone-900 dark:text-stone-100 flex items-center">
-              <Icons.Mark className="h-5 w-5" />
+      {/* Dev Kitchen Sink route */}
+      {isKitchenRoute ? (
+        <KitchenSink />
+      ) : state.sessionId === null ? (
+        /* Idle screen */
+        <IdleScreen
+          onBeginSession={startSession}
+          onRunRace={handleRunRace}
+          onHealthCheck={async () => {
+            try {
+              const res = await http.health();
+              return res.status === 'ok';
+            } catch {
+              return false;
+            }
+          }}
+          baseUrl={http.baseUrl}
+        />
+      ) : (
+        /* Active session views */
+        <>
+          {view === 'console' ? (
+            <div className="flex-1 flex flex-col min-[1100px]:flex-row min-h-0 overflow-hidden">
+              {/* Voice column (left) */}
+              <div className="w-full min-[1100px]:w-[420px] min-[1300px]:w-[480px] flex-shrink-0 h-[45vh] min-[1100px]:h-full border-b min-[1100px]:border-b-0 min-[1100px]:border-r border-ink-600 bg-ink-950/60 flex flex-col">
+                <VoiceColumn
+                  stage={stage}
+                  projection={state.projection}
+                  userPrompts={effectivePrompts}
+                  onSendText={submitText}
+                  onCancelSpeech={cancelSpeech}
+                  actionPending={actionPending}
+                />
+              </div>
+
+              {/* Consistency Runtime Deck (right) */}
+              <div className="flex-1 min-w-0 h-[55vh] min-[1100px]:h-full p-6 overflow-y-auto">
+                <Deck
+                  stage={stage}
+                  gapPx={gapPx}
+                  projection={state.projection}
+                  traceEvents={effectiveEvents}
+                  onSelectSequence={() => {
+                    setView('blackbox');
+                  }}
+                  onAuthorizePlan={authorizePlan}
+                  actionPending={actionPending}
+                />
+              </div>
             </div>
-            <div className="flex items-baseline gap-2">
-              <span className="font-mono text-sm font-bold tracking-widest text-stone-950 dark:text-white uppercase">
-                INTERLOCK
-              </span>
-              <span className="hidden sm:inline font-mono text-[9px] uppercase tracking-[0.22em] text-stone-400 dark:text-stone-500">
-                Consistency Runtime
-              </span>
-            </div>
-          </div>
+          ) : (
+            /* Black Box forensic replay */
+            <BlackBoxPage
+              sessionId={state.sessionId}
+              liveProjection={state.projection}
+              events={effectiveEvents}
+              loading={traceLoading}
+              error={traceError}
+            />
+          )}
+        </>
+      )}
 
-          {/* Center: View Switcher */}
-          <nav aria-label="Primary views" className="inline-flex rounded-full border border-stone-200/80 bg-stone-100/70 p-0.5 dark:border-stone-800 dark:bg-stone-900/60">
-            <button
-              type="button"
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
-                view === 'copilot'
-                  ? 'bg-white text-stone-950 shadow-sm dark:bg-stone-800 dark:text-white font-semibold'
-                  : 'text-stone-600 hover:text-stone-950 dark:text-stone-400 dark:hover:text-stone-100'
-              }`}
-              aria-current={view === 'copilot' ? 'page' : undefined}
-              onClick={() => setView('copilot')}
-            >
-              Copilot
-            </button>
-            <button
-              type="button"
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
-                view === 'trace'
-                  ? 'bg-white text-stone-950 shadow-sm dark:bg-stone-800 dark:text-white font-semibold'
-                  : 'text-stone-600 hover:text-stone-950 dark:text-stone-400 dark:hover:text-stone-100'
-              }`}
-              aria-current={view === 'trace' ? 'page' : undefined}
-              onClick={() => setView('trace')}
-            >
-              Trace
-            </button>
-          </nav>
-
-          {/* Right: Status Indicator, Session Popover, and Theme */}
-          <div className="flex items-center gap-2 relative">
-            {/* Subtle Connection Indicator */}
-            <div
-              className="flex items-center gap-1.5 px-1.5 py-0.5 text-xs text-stone-500"
-              title={`Connection status: ${state.connectionStatus}`}
-            >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  isConnected
-                    ? 'bg-emerald-500'
-                    : isConnecting
-                    ? 'bg-amber-500 animate-pulse'
-                    : 'bg-stone-300 dark:bg-stone-700'
-                }`}
-                aria-hidden="true"
-              />
-            </div>
-
-            {/* Session Controller Button / Popover */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setSessionMenuOpen((o) => !o)}
-                className="inline-flex items-center gap-1 rounded-lg border border-stone-200/80 bg-stone-50/70 px-2 py-1 text-[11px] font-mono text-stone-700 hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-300 dark:hover:bg-stone-800 transition-colors"
-                aria-expanded={sessionMenuOpen}
-              >
-                <span>{hasSession ? shortenId(state.sessionId, 4, 3) : 'No session'}</span>
-                <Icons.ChevronDown className="h-3 w-3 opacity-60" />
-              </button>
-
-              {sessionMenuOpen && (
-                <div className="absolute right-0 top-full mt-1.5 w-60 rounded-xl border border-stone-200/90 bg-white p-3 shadow-lg dark:border-stone-800 dark:bg-stone-900 z-50 space-y-2 text-xs">
-                  <div className="border-b border-stone-100 pb-2 dark:border-stone-800">
-                    <p className="text-[10px] uppercase tracking-wider text-stone-400 font-mono">
-                      Session Details
-                    </p>
-                    {hasSession ? (
-                      <div className="mt-1 flex items-center justify-between font-mono text-[11px]">
-                        <span className="truncate">{state.sessionId}</span>
-                        <CopyButton text={state.sessionId ?? ''} label="Copy Session ID" />
-                      </div>
-                    ) : (
-                      <p className="text-stone-500 italic mt-0.5">No active session</p>
-                    )}
-                    {hasSession && (
-                      <p className="text-[10px] font-mono text-stone-400 mt-1">
-                        Applied Sequence: #{state.lastAppliedSequence}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex flex-col gap-1.5 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => void startSession()}
-                      disabled={actionPending}
-                      className="w-full rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-stone-800 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white text-center"
-                    >
-                      {hasSession ? 'New Session' : 'Start Session'}
-                    </button>
-                    {hasSession && (
-                      <button
-                        type="button"
-                        onClick={() => void resetSession()}
-                        disabled={actionPending}
-                        className="w-full rounded-lg border border-stone-200 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 dark:border-stone-800 dark:text-stone-300 dark:hover:bg-stone-800 text-center"
-                      >
-                        Reset Demo State
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Theme Toggle */}
-            <button
-              type="button"
-              className="rounded-lg p-1.5 text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100 transition-colors"
-              onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
-              aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-            >
-              {theme === 'dark' ? (
-                <Icons.Sun className="h-4 w-4" />
-              ) : (
-                <Icons.Moon className="h-4 w-4" />
-              )}
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Primary Canvas */}
-      <div className="flex-1">
-        {view === 'copilot' ? (
-          <CopilotPage
-            state={state}
-            actionPending={actionPending}
-            actionError={actionError}
-            onStartSession={() => void startSession()}
-            onSubmitText={submitText}
-            onCancelSpeech={cancelSpeech}
-            userPrompts={userPrompts}
+      {/* Storyboard overlay if gated and active */}
+      {isStoryboardActive && StoryboardOverlay && (
+        <Suspense fallback={null}>
+          <StoryboardOverlay
+            store={store}
+            onClientReady={setStoryboardClient}
           />
-        ) : (
-          <TracePage
-            state={state}
-            events={traceEvents}
-            loading={traceLoading}
-            error={traceError}
-          />
-        )}
-      </div>
-    </div>
+        </Suspense>
+      )}
+    </AppShell>
   );
 };
 

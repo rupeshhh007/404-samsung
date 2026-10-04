@@ -1,0 +1,126 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { CopyButton } from '../primitives/CopyButton';
+import { Button } from '../primitives/Button';
+import { Icon } from '../primitives/Icon';
+import { shortenId } from '../../utils/formatters';
+
+interface SessionMenuProps {
+  readonly sessionId: string | null;
+  readonly lastAppliedSequence: number;
+  readonly onNewSession: () => void;
+  readonly onResetDemo: () => void;
+  readonly actionPending?: boolean;
+}
+
+export const SessionMenu: React.FC<SessionMenuProps> = ({
+  sessionId,
+  lastAppliedSequence,
+  onNewSession,
+  onResetDemo,
+  actionPending = false,
+}) => {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(e.target as Node) &&
+        triggerRef.current &&
+        !triggerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('click', handleOutsideClick);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('click', handleOutsideClick);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative inline-flex items-center">
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="inline-flex items-center gap-1.5 h-7 px-2 font-mono text-[11px] uppercase border border-ink-600 bg-ink-850 hover:bg-ink-800 text-bone-300 hover:text-bone-50 transition-colors focus-visible:outline-sig-active"
+      >
+        <span>
+          {sessionId ? `SESS:${shortenId(sessionId, 4, 3)}` : 'NO SESSION'}
+        </span>
+        <Icon name="chevron-down" size={10} className={open ? 'rotate-180' : ''} />
+      </button>
+
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          className="absolute top-9 right-0 z-50 w-72 p-3 bg-ink-850 border border-ink-600 slab-shadow text-bone-50 space-y-3 animate-fadeIn"
+        >
+          <div className="space-y-1">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-bone-500">
+              Active Session
+            </div>
+            {sessionId ? (
+              <div className="flex items-center justify-between gap-2 p-1.5 bg-ink-900 border border-ink-600">
+                <span className="font-mono text-[11px] text-bone-300 truncate" title={sessionId}>
+                  {sessionId}
+                </span>
+                <CopyButton text={sessionId} label="Copy session ID" />
+              </div>
+            ) : (
+              <div className="font-mono text-xs text-bone-500">No session active</div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between text-xs font-mono py-1 border-t border-b border-ink-600">
+            <span className="text-bone-500">APPLIED SEQUENCE</span>
+            <span className="text-bone-50 font-bold">#{lastAppliedSequence}</span>
+          </div>
+
+          <div className="flex flex-col gap-2 pt-1">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setOpen(false);
+                onNewSession();
+              }}
+              disabled={actionPending}
+              className="w-full text-xs"
+            >
+              New Session
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                setOpen(false);
+                onResetDemo();
+              }}
+              disabled={actionPending || !sessionId}
+              className="w-full text-xs"
+            >
+              Reset Demo State
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

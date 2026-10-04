@@ -12,78 +12,31 @@ import type {
   IntentProjection,
   IntentRevision,
 } from '../api/types';
+import {
+  formatSlotParts,
+  extractDesiredSlot,
+  extractObservedSlot,
+} from '../ui/viewmodel/slots';
 
 /**
  * Formats appointment slots or arbitrary slot representations.
- * Handles:
- * - Simple time strings: "11:00", "12:00", "14:30" -> "11:00 AM", "12:00 PM", "2:30 PM"
- * - ISO date strings: "2030-01-15T12:00:00Z" -> "Jan 15, 2030 at 12:00 PM"
- * - Fallbacks to clean string representation
+ * Preserves literal wall-clock time and timezone offset without local Date conversion.
  */
 export function formatSlot(value: unknown): string {
-  if (value === null || value === undefined) {
-    return 'Not specified';
-  }
-  const str = String(value).trim();
-  if (!str) return 'Not specified';
-
-  // Check simple 24-hour time format: "11:00", "12:00", "14:30"
-  const timeMatch = /^(\d{1,2}):(\d{2})$/.exec(str);
-  if (timeMatch) {
-    const hours = parseInt(timeMatch[1], 10);
-    const minutes = timeMatch[2];
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    const displayHours = hours % 12 || 12;
-    return `${displayHours}:${minutes} ${ampm}`;
-  }
-
-  // Check ISO date format: "2030-01-15T12:00:00Z" or "2030-01-15"
-  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
-    try {
-      const date = new Date(str);
-      if (!isNaN(date.getTime())) {
-        const hasTime = str.includes('T');
-        if (hasTime) {
-          return date.toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric',
-            hour: 'numeric',
-            minute: '2-digit',
-            hour12: true,
-          });
-        }
-        return date.toLocaleDateString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          year: 'numeric',
-        });
-      }
-    } catch {
-      // Fallback to original string
-    }
-  }
-
-  return str;
+  const parts = formatSlotParts(value);
+  return parts.formatted;
 }
 
 /**
- * Formats ISO timestamps into human-readable local time.
+ * Formats ISO timestamps into human-readable representation.
  */
 export function formatTimestamp(isoString: string | null | undefined): string {
   if (!isoString) return 'Not recorded';
-  try {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return isoString;
-    return date.toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: true,
-    });
-  } catch {
-    return isoString;
+  const parts = formatSlotParts(isoString);
+  if (!parts.unknown && parts.formatted !== '—') {
+    return parts.formatted;
   }
+  return isoString;
 }
 
 /**
@@ -123,10 +76,7 @@ export function formatGoalType(goal: string): string {
     'appointment.cancel': 'Cancel Appointment',
     'inquiry': 'General Inquiry',
   };
-  if (map[goal]) return map[goal];
-  return goal
-    .replace(/[._]/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
+  return map[goal] ?? goal.replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /**
@@ -173,6 +123,7 @@ export function humanizeEventName(eventType: string): string {
 
 /**
  * Produces a clear, plain-English explanation for an active divergence.
+ * Never invents fallback slot strings when missing.
  */
 export function explainDivergence(
   divergence: DivergenceProjection,
@@ -185,30 +136,11 @@ export function explainDivergence(
   desiredSlot: string;
   observedSlot: string;
 } {
-  const desiredVal = revision?.values?.requested_slot ?? revision?.values?.slot ?? null;
-  const desiredFormatted = desiredVal ? formatSlot(desiredVal) : '12:00 PM';
+  const rawDesired = extractDesiredSlot(intent, revision);
+  const desiredFormatted = rawDesired ? formatSlot(rawDesired) : '—';
 
-  const matchedEffects = effects.filter((effect) =>
-    divergence.observed_effect_ids.includes(effect.effect_id),
-  );
-
-  let observedVal: unknown = null;
-  for (const effect of matchedEffects) {
-    if (effect.parameters?.requested_slot) {
-      observedVal = effect.parameters.requested_slot;
-      break;
-    }
-    if (effect.parameters?.confirmed_slot) {
-      observedVal = effect.parameters.confirmed_slot;
-      break;
-    }
-    if (effect.parameters?.slot) {
-      observedVal = effect.parameters.slot;
-      break;
-    }
-  }
-
-  const observedFormatted = observedVal ? formatSlot(observedVal) : '11:00 AM';
+  const rawObserved = extractObservedSlot(divergence, effects);
+  const observedFormatted = rawObserved ? formatSlot(rawObserved) : '—';
 
   if (divergence.kind === 'DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT') {
     return {
