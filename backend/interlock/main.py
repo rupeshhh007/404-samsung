@@ -20,11 +20,11 @@ from typing import Any, Protocol
 from interlock.config import Settings
 from interlock.domain.enums import (
     Authorization, CancellationState, ClaimCertainty, ClaimState, ControlKind,
-    DivergenceState, EventSource, IntentMaturity, OperationState, RuntimeMode,
+    DivergenceState, EffectState, EventSource, EvidenceAuthority, IntentMaturity, OperationState, RuntimeMode,
     SpeechActType, SpeechState,
 )
 from interlock.domain.models import (
-    ClaimRecord, DivergenceCase, EvidenceRecord, EventEnvelope, IntentRevision,
+    ClaimRecord, DivergenceCase, EffectRecord, EvidenceRecord, EventEnvelope, IntentRevision,
     MetricsSnapshot, OperationRecord, SessionState, SpeechAct,
 )
 from interlock.execution.descriptors import ToolRegistry
@@ -323,6 +323,8 @@ class _Session:
                 return
             await self._propose_demo_claim(event, revision, context)
             if revision.parent_revision_id is not None:
+                for effect in sorted(state.effects.values(), key=lambda item: item.effect_id):
+                    await self._detect_demo_divergence(event, revision, effect, context)
                 return
             bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
             known = {
@@ -355,49 +357,31 @@ class _Session:
 
         if event.event_type == "IntentRevisionCommitted" and previous is not None:
             revision = state.revisions.get(event.payload["revision"]["revision_id"])
-            if revision is None or revision.parent_revision_id is None:
+            if revision is None:
                 return
-            for operation in sorted(state.operations.values(), key=lambda item: item.operation_id):
-                if (operation.intent_revision_id == revision.parent_revision_id
-                        and operation.state not in {
-                            OperationState.SUCCEEDED, OperationState.FAILED,
-                            OperationState.CANCELLED, OperationState.SUPERSEDED,
-                        }
-                        and operation.cancellation_state == CancellationState.NONE):
-                    await self.journal.append(_candidate(
-                        self.session_id, context, "CancellationRequested",
-                        {"operation_id": operation.operation_id,
-                         "reason": "intent revision was superseded"},
-                        identity=_identity(revision.revision_id, operation.operation_id),
-                    ))
-                    return
+            if revision.parent_revision_id is not None:
+                for operation in sorted(state.operations.values(), key=lambda item: item.operation_id):
+                    if (operation.intent_revision_id == revision.parent_revision_id
+                            and operation.state not in {
+                                OperationState.SUCCEEDED, OperationState.FAILED,
+                                OperationState.CANCELLED, OperationState.SUPERSEDED,
+                            }
+                            and operation.cancellation_state == CancellationState.NONE):
+                        await self.journal.append(_candidate(
+                            self.session_id, context, "CancellationRequested",
+                            {"operation_id": operation.operation_id,
+                             "reason": "intent revision was superseded"},
+                            identity=_identity(revision.revision_id, operation.operation_id),
+                        ))
+                        break
+            return
 
         if event.event_type == "WorldEffectObserved":
             effect = state.effects.get(event.payload["effect"]["effect_id"])
             node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
             revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
-            if effect is None or revision is None:
-                return
-            desired = revision.values.get("requested_slot")
-            observed = effect.parameters.get("confirmed_slot") or effect.parameters.get("requested_slot")
-            if desired is None or observed is None or desired == observed:
-                return
-            divergence_id = _identity(revision.revision_id, effect.effect_id, "divergence")
-            if divergence_id in state.divergences:
-                return
-            case = DivergenceCase(
-                divergence_id=divergence_id,
-                desired_fingerprint=revision.dependency_fingerprint,
-                observed_effect_ids=[effect.effect_id],
-                kind="DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT",
-                state=DivergenceState.OPEN,
-                detected_by_event_id=event.event_id,
-                authorization_required=True,
-            )
-            await self.journal.append(_candidate(
-                self.session_id, context, "DivergenceDetected",
-                {"case": case.model_dump(mode="json")}, identity=divergence_id,
-            ))
+            if effect is not None and revision is not None:
+                await self._detect_demo_divergence(event, revision, effect, context)
             return
 
         if event.event_type == "DivergenceDetected":
@@ -433,6 +417,46 @@ class _Session:
         await self.journal.append(_candidate(
             self.session_id, context, "ClaimProposed",
             {"claim": claim.model_dump(mode="json")}, identity=claim_id,
+        ))
+
+    async def _detect_demo_divergence(
+        self,
+        event: EventEnvelope,
+        revision: IntentRevision,
+        effect: EffectRecord,
+        context: DispatchContext,
+    ) -> None:
+        state = self.snapshot()
+        if effect.state != EffectState.COMMITTED or effect.authority != EvidenceAuthority.AUTHORITATIVE:
+            return
+        if any(e.supersedes_effect_id == effect.effect_id for e in state.effects.values()):
+            return
+        desired = revision.values.get("requested_slot")
+        observed = effect.parameters.get("confirmed_slot") or effect.parameters.get("requested_slot")
+        if desired is None or observed is None or desired == observed:
+            return
+        divergence_id = _identity(revision.revision_id, effect.effect_id, "divergence")
+        if divergence_id in state.divergences:
+            return
+        if any(
+            d.state == DivergenceState.OPEN
+            and d.desired_fingerprint == revision.dependency_fingerprint
+            and effect.effect_id in d.observed_effect_ids
+            for d in state.divergences.values()
+        ):
+            return
+        case = DivergenceCase(
+            divergence_id=divergence_id,
+            desired_fingerprint=revision.dependency_fingerprint,
+            observed_effect_ids=[effect.effect_id],
+            kind="DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT",
+            state=DivergenceState.OPEN,
+            detected_by_event_id=event.event_id,
+            authorization_required=True,
+        )
+        await self.journal.append(_candidate(
+            self.session_id, context, "DivergenceDetected",
+            {"case": case.model_dump(mode="json")}, identity=divergence_id,
         ))
 
     async def _defer_reconciliation(
@@ -1093,12 +1117,14 @@ class _DemoASGI:
     def __init__(
         self, http: _ASGIApplication, websocket: _ASGIApplication,
         application: Application, hub: Any, output: DemoTextOutput,
+        provider: Any = None,
     ) -> None:
         self.http = http
         self.websocket = websocket
         self.application = application
         self.hub = hub
         self.output = output
+        self.provider = provider
 
     async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") == "websocket":
@@ -1135,7 +1161,7 @@ def create_demo_asgi_app(settings: Settings | None = None) -> _DemoASGI:
         raise RuntimeError("unexpected demo fixture")
     registry = ToolRegistry(default_timeout_ms=effective.INTERLOCK_TOOL_TIMEOUT_MS)
     register_tool_manifests(registry)
-    transport, _provider = create_fake_tool_transport(fixture)
+    transport, provider = create_fake_tool_transport(fixture)
     output = DemoTextOutput()
     hub = ProjectionHub(max_sessions=128)
     dependencies = RuntimeDependencies(
@@ -1148,14 +1174,20 @@ def create_demo_asgi_app(settings: Settings | None = None) -> _DemoASGI:
     application = Application(effective, registry=registry, dependencies=dependencies)
     output.bind(application)
     hub.bind(application)
-    http = create_http_app(application, hub=hub)
+
+    def _reset_demo_provider(fixture_id: str) -> None:
+        if fixture_id != "samsung-demo-v1":
+            raise ValueError(f"unexpected demo fixture '{fixture_id}'")
+        provider.reset(load_demo_fixture())
+
+    http = create_http_app(application, hub=hub, demo_reset_hook=_reset_demo_provider)
     cors = CORSMiddleware(
         http,
         allow_origins=effective.frontend_origins_list,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["content-type"],
     )
-    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output)
+    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output, provider)
 
 
 class _LazyDemoASGI:

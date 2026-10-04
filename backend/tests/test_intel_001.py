@@ -482,3 +482,144 @@ def test_ext001_demo_retains_late_world_effect_after_correction() -> None:
             await host.hub.shutdown()
 
     run(scenario())
+
+
+def test_ext001_demo_divergence_detected_when_correction_arrives_after_world_effect() -> None:
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        application = host.application
+        session_id = "ext001-case-b-regression"
+        await application.start_session(session_id)
+        try:
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+            state1 = application.snapshot(session_id)
+            assert any(
+                effect.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+                for effect in state1.effects.values()
+            )
+            assert len(state1.divergences) == 0
+
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-12",
+                    "modality": "text",
+                    "content_ref": "Actually, make it 12:00.",
+                },
+                correlation_id="input-12",
+                dedupe_key="test:input-12",
+            ))
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+            state2 = application.snapshot(session_id)
+            active = state2.revisions[state2.intents[state2.active_intent_id].active_revision_id]
+            assert active.values["requested_slot"] == "2030-01-15T12:00:00+05:30"
+            assert any(
+                effect.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+                for effect in state2.effects.values()
+            )
+            assert len(state2.divergences) == 1
+            divergence = next(iter(state2.divergences.values()))
+            assert divergence.state == "OPEN"
+            assert any(
+                claim.intent_revision_id == active.revision_id and claim.state == "PENDING"
+                for claim in state2.claims.values()
+            )
+            assert any(
+                speech.act_type == "UNCERTAINTY"
+                for speech in state2.speech.values()
+            )
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())
+
+
+def test_ext001_demo_reset_clears_provider_state_and_allows_rebooking() -> None:
+    async def scenario() -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        transport = ASGITransport(app=host)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            res = await client.post("/api/v1/sessions", json={"mode": "DEMO", "client_request_id": "req-a"})
+            assert res.status_code == 201
+            session_a_id = res.json()["session_id"]
+
+            res = await client.post(
+                f"/api/v1/sessions/{session_a_id}/inputs",
+                json={"modality": "TEXT", "content": "Book 11:00.", "client_request_id": "in-a-1"},
+            )
+            assert res.status_code == 202
+            await asyncio.sleep(0.1)
+            await host.application.drain(session_a_id)
+
+            assert any(
+                b.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+                for b in host.provider.bookings.values()
+            )
+
+            res = await client.post(
+                f"/api/v1/sessions/{session_a_id}/demo/reset",
+                json={"fixture_id": "samsung-demo-v1", "client_request_id": "reset-1"},
+            )
+            assert res.status_code == 200
+            session_b_id = res.json()["session_id"]
+            assert session_b_id != session_a_id
+
+            assert len(host.provider.bookings) == 0
+
+            res = await client.post(
+                f"/api/v1/sessions/{session_b_id}/inputs",
+                json={"modality": "TEXT", "content": "Book 11:00.", "client_request_id": "in-b-1"},
+            )
+            assert res.status_code == 202
+            await asyncio.sleep(0.1)
+            await host.application.drain(session_b_id)
+
+            state_b = host.application.snapshot(session_b_id)
+            assert any(
+                op.tool_name == "appointment.book" and op.state == OperationState.SUCCEEDED
+                for op in state_b.operations.values()
+            )
+            assert any(
+                effect.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+                for effect in state_b.effects.values()
+            )
+
+            bad_reset = await client.post(
+                f"/api/v1/sessions/{session_b_id}/demo/reset",
+                json={"fixture_id": "unknown-fixture", "client_request_id": "bad-reset-1"},
+            )
+            assert bad_reset.status_code == 422
+
+        await host.application.close()
+        await host.output.shutdown()
+        await host.hub.shutdown()
+
+    run(scenario())

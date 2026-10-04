@@ -259,6 +259,7 @@ def create_http_app(
     application: Application,
     *,
     hub: ProjectionHub | None = None,
+    demo_reset_hook: Callable[[str], Any] | None = None,
     max_input_bytes: int = 65_536,
     max_dedupe_entries: int | None = None,
     event_page_size: int = 256,
@@ -475,6 +476,13 @@ def create_http_app(
                 raise HTTPException(status.HTTP_409_CONFLICT, "session could not be safely retired") from exc
             if hub is not None:
                 await hub.retire_session(session_id, reason="RESET")
+            if demo_reset_hook is not None:
+                try:
+                    hook_res = demo_reset_hook(request.fixture_id)
+                    if asyncio.iscoroutine(hook_res):
+                        await hook_res
+                except ValueError as exc:
+                    raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
             new_session_id = generate_uuidv7()
             try:
                 clean = await application.start_session(new_session_id, mode=RuntimeMode.DEMO)
