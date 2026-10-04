@@ -32,8 +32,8 @@ export function InputPanel({
     event.preventDefault();
     const normalized = content.trim();
     if (!normalized) return;
-    await onSubmitText(normalized);
     setContent('');
+    await onSubmitText(normalized);
   }
 
   return (

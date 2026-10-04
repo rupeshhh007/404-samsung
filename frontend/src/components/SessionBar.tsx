@@ -5,6 +5,7 @@ interface SessionBarProps {
   readonly state: ProjectionStoreState;
   readonly actionPending: boolean;
   readonly onStartSession: () => void;
+  readonly onResetSession: () => void;
 }
 
 const CONNECTION_LABELS: Readonly<Record<ConnectionStatus, string>> = {
@@ -22,7 +23,12 @@ function connectionTone(status: ConnectionStatus): string {
   return 'status-neutral';
 }
 
-export function SessionBar({ state, actionPending, onStartSession }: SessionBarProps) {
+export function SessionBar({
+  state,
+  actionPending,
+  onStartSession,
+  onResetSession,
+}: SessionBarProps) {
   const hasSession = state.sessionId !== null;
 
   return (
@@ -49,6 +55,14 @@ export function SessionBar({ state, actionPending, onStartSession }: SessionBarP
           disabled={actionPending || state.connectionStatus === 'CONNECTING'}
         >
           {actionPending ? 'Starting…' : hasSession ? 'Start new session' : 'Start session'}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onResetSession}
+          disabled={!hasSession || actionPending}
+        >
+          Reset demo
         </button>
       </div>
     </section>

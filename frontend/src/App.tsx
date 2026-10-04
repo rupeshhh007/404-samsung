@@ -633,12 +633,33 @@ function frontendError(error: unknown): FrontendError {
   };
 }
 
+function streamUrlForSession(currentUrl: string, sessionId: string): string {
+  const parsed = new URL(currentUrl, window.location.href);
+  const nextPath = parsed.pathname.replace(
+    /\/sessions\/[^/]+\/stream$/,
+    `/sessions/${encodeURIComponent(sessionId)}/stream`,
+  );
+  if (nextPath === parsed.pathname) {
+    throw new Error('The backend returned an unsupported WebSocket session URL.');
+  }
+  parsed.pathname = nextPath;
+  parsed.search = '';
+  return parsed.toString();
+}
+
 export const App: React.FC = () => {
   const store = useMemo(() => createProjectionStore(), []);
   const http = useMemo(() => new InterlockHttpClient(), []);
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
   const socketRef = useRef<ProjectionSocketClient | null>(null);
+  const streamUrlRef = useRef<string | null>(null);
   const requestSequence = useRef(0);
+  const traceSessionRef = useRef<string | null>(null);
+  const traceGenerationRef = useRef(0);
+  const traceLoadingRef = useRef(false);
+  const traceCursorRef = useRef(0);
+  const traceTargetSequenceRef = useRef(0);
+  const traceEventsRef = useRef<ProjectionEventMessage[]>([]);
 
   const [view, setView] = useState<View>('copilot');
   const [theme, setTheme] = useState<Theme>(initialTheme);
@@ -662,48 +683,73 @@ export const App: React.FC = () => {
   useEffect(() => {
     const sessionId = state.sessionId;
     if (!sessionId) {
+      traceGenerationRef.current += 1;
+      traceSessionRef.current = null;
+      traceLoadingRef.current = false;
+      traceCursorRef.current = 0;
+      traceTargetSequenceRef.current = 0;
+      traceEventsRef.current = [];
       setTraceEvents([]);
       setTraceLoading(false);
       setTraceError(null);
       return;
     }
 
-    let cancelled = false;
+    if (traceSessionRef.current !== sessionId) {
+      traceGenerationRef.current += 1;
+      traceSessionRef.current = sessionId;
+      traceLoadingRef.current = false;
+      traceCursorRef.current = 0;
+      traceTargetSequenceRef.current = 0;
+      traceEventsRef.current = [];
+      setTraceEvents([]);
+      setTraceError(null);
+    }
+
+    traceTargetSequenceRef.current = Math.max(
+      traceTargetSequenceRef.current,
+      state.lastAppliedSequence,
+    );
+    if (traceLoadingRef.current || traceCursorRef.current >= traceTargetSequenceRef.current) {
+      return;
+    }
+
+    const generation = traceGenerationRef.current;
+    traceLoadingRef.current = true;
     async function loadHistory() {
       setTraceLoading(true);
       setTraceError(null);
       try {
-        const collected: ProjectionEventMessage[] = [];
-        let afterSequence = 0;
-        let hasMore = true;
-        while (hasMore) {
-          const page = await http.getEvents(sessionId, afterSequence);
-          if (cancelled) return;
-          const next = page.events.filter((event) => event.sequence > afterSequence);
-          collected.push(...next);
+        while (traceCursorRef.current < traceTargetSequenceRef.current) {
+          const page = await http.getEvents(sessionId, traceCursorRef.current);
+          if (traceGenerationRef.current !== generation || traceSessionRef.current !== sessionId) return;
+          const next = page.events.filter((event) => event.sequence > traceCursorRef.current);
           if (next.length === 0) break;
-          afterSequence = next[next.length - 1].sequence;
-          hasMore = page.has_more;
-        }
-        if (!cancelled) {
-          setTraceEvents([...collected].sort((left, right) => left.sequence - right.sequence));
+          traceEventsRef.current = [...traceEventsRef.current, ...next]
+            .sort((left, right) => left.sequence - right.sequence);
+          traceCursorRef.current = next[next.length - 1].sequence;
+          setTraceEvents(traceEventsRef.current);
+          if (!page.has_more && traceCursorRef.current >= traceTargetSequenceRef.current) break;
         }
       } catch (error) {
-        if (!cancelled) {
+        if (traceGenerationRef.current === generation && traceSessionRef.current === sessionId) {
           const normalized = frontendError(error);
           setTraceError(`Trace history unavailable: ${normalized.message}`);
         }
       } finally {
-        if (!cancelled) setTraceLoading(false);
+        if (traceGenerationRef.current === generation && traceSessionRef.current === sessionId) {
+          traceLoadingRef.current = false;
+          setTraceLoading(false);
+        }
       }
     }
     void loadHistory();
-    return () => {
-      cancelled = true;
-    };
   }, [http, state.sessionId, state.lastAppliedSequence]);
 
   const nextRequestId = useCallback((kind: string) => {
+    if (typeof crypto.randomUUID === 'function') {
+      return `interlock-ui-${kind}-${crypto.randomUUID()}`;
+    }
     requestSequence.current += 1;
     return `interlock-ui-${kind}-${requestSequence.current}`;
   }, []);
@@ -735,6 +781,7 @@ export const App: React.FC = () => {
         store,
         loadSnapshot: (url) => http.getSnapshotUrl(url),
       });
+      streamUrlRef.current = created.ws_url;
       socketRef.current = socket;
       socket.connect();
     } catch (error) {
@@ -746,9 +793,48 @@ export const App: React.FC = () => {
     }
   }, [http, nextRequestId, store]);
 
+  const resetSession = useCallback(async () => {
+    if (!state.sessionId || !streamUrlRef.current) return;
+    setActionPending(true);
+    setActionError(null);
+    try {
+      const reset = await http.resetDemo(state.sessionId, {
+        fixture_id: 'samsung-demo-v1',
+        client_request_id: nextRequestId('reset'),
+      });
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      store.reset();
+      setTraceEvents([]);
+      const snapshot = await http.getSession(reset.session_id);
+      store.applySnapshot({
+        type: 'snapshot',
+        schema_version: 1,
+        session_id: snapshot.session_id,
+        through_sequence: snapshot.through_sequence,
+        projection: snapshot.projection,
+      });
+      const nextStreamUrl = streamUrlForSession(streamUrlRef.current, reset.session_id);
+      streamUrlRef.current = nextStreamUrl;
+      const socket = new ProjectionSocketClient({
+        url: nextStreamUrl,
+        sessionId: reset.session_id,
+        store,
+        loadSnapshot: (url) => http.getSnapshotUrl(url),
+      });
+      socketRef.current = socket;
+      socket.connect();
+    } catch (error) {
+      const normalized = frontendError(error);
+      store.markError(normalized);
+      setActionError(normalized.message);
+    } finally {
+      setActionPending(false);
+    }
+  }, [http, nextRequestId, state.sessionId, store]);
+
   const submitText = useCallback(async (content: string) => {
     if (!state.sessionId) return;
-    setActionPending(true);
     setActionError(null);
     try {
       await http.submitInput(state.sessionId, {
@@ -758,8 +844,6 @@ export const App: React.FC = () => {
       });
     } catch (error) {
       setActionError(frontendError(error).message);
-    } finally {
-      setActionPending(false);
     }
   }, [http, nextRequestId, state.sessionId]);
 
@@ -820,7 +904,12 @@ export const App: React.FC = () => {
       </header>
 
       <div className="mx-auto w-full max-w-7xl px-4 pt-4">
-        <SessionBar state={state} actionPending={actionPending} onStartSession={() => void startSession()} />
+        <SessionBar
+          state={state}
+          actionPending={actionPending}
+          onStartSession={() => void startSession()}
+          onResetSession={() => void resetSession()}
+        />
       </div>
 
       {view === 'copilot' ? (
