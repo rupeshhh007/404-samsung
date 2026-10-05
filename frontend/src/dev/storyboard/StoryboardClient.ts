@@ -83,11 +83,11 @@ export class StoryboardClient {
         acceptedSequence: 1,
       });
     }
-    if (this.currentSequence >= 8) {
+    if (this.currentSequence >= 12) {
       prompts.push({
         id: 'prompt-2',
         text: 'Actually, make it 12:00.',
-        acceptedSequence: 8,
+        acceptedSequence: 12,
       });
     }
     return prompts;

@@ -72,10 +72,10 @@ export const Composer: React.FC<ComposerProps> = ({
   const isSendDisabled = disabled || sending || !content.trim();
 
   return (
-    <div className="relative bg-ink-800 border border-ink-600 notch-tl p-2.5 slab-shadow">
+    <div className="editorial-composer relative">
       <div className="flex items-end gap-3">
         {/* Left Mono Prompt */}
-        <span className="font-mono text-base font-bold text-bone-500 pb-2 pl-1 select-none">
+        <span className="select-none pb-2 pl-1 font-mono text-base font-bold text-[var(--console-muted)]">
           ›
         </span>
 
@@ -89,7 +89,7 @@ export const Composer: React.FC<ComposerProps> = ({
           onKeyDown={handleKeyDown}
           disabled={disabled}
           placeholder="Tell it what to do…"
-          className="flex-1 bg-transparent text-bone-50 placeholder:font-voice placeholder:italic placeholder:text-bone-500 text-sm font-sans resize-none py-2 px-1 focus:outline-none min-h-[38px] max-h-[120px] leading-relaxed"
+          className="min-h-[38px] max-h-[120px] flex-1 resize-none bg-transparent px-1 py-2 font-sans text-sm leading-relaxed focus:outline-none placeholder:font-voice placeholder:italic"
         />
 
         {/* Barge-In Button (If Assistant is speaking) */}
@@ -97,7 +97,7 @@ export const Composer: React.FC<ComposerProps> = ({
           <button
             type="button"
             onClick={onBargeIn}
-            className="h-10 px-3 bg-sig-pending/15 border border-sig-pending text-sig-pending hover:bg-sig-pending/25 transition-colors font-mono text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 focus-visible:outline-sig-active"
+            className="flex h-10 items-center gap-1.5 border border-[var(--console-ink)] px-3 font-mono text-[10px] font-bold uppercase tracking-wider"
             title="Interrupt assistant speech emission"
           >
             <Icon name="pause" size={12} />
@@ -111,7 +111,7 @@ export const Composer: React.FC<ComposerProps> = ({
           onClick={handleSend}
           disabled={isSendDisabled}
           aria-label="Send instruction"
-          className="w-10 h-10 bg-bone-50 text-ink-950 hover:bg-white active:scale-95 transition-all flex items-center justify-center flex-shrink-0 disabled:opacity-30 disabled:pointer-events-none focus-visible:outline-sig-active"
+          className="flex h-10 w-10 flex-shrink-0 items-center justify-center bg-[var(--console-ink)] text-[var(--console-paper)] transition-opacity disabled:pointer-events-none disabled:opacity-25"
         >
           {sending ? (
             <span className="w-4 h-4 border-2 border-ink-950 border-t-transparent animate-spin" />

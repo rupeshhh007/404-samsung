@@ -16,7 +16,10 @@ export const StoryboardOverlay: React.FC<StoryboardOverlayProps> = ({
 
   useEffect(() => {
     const sc = new StoryboardClient(store);
-    sc.init(0);
+    const requestedSequence = Number(
+      new URLSearchParams(window.location.search).get('sequence') ?? '0',
+    );
+    sc.init(Number.isFinite(requestedSequence) ? requestedSequence : 0);
     setClient(sc);
     onClientReady(sc);
 

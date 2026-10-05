@@ -96,12 +96,12 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
   const activeDivergence = selectActiveDivergence(activeProjection);
 
   return (
-    <div className="flex-1 p-4 sm:p-6 space-y-4 max-w-7xl mx-auto w-full select-none">
+    <div className="blackbox-surface mx-auto w-full max-w-[1500px] flex-1 space-y-4 p-4 select-none sm:p-6">
       {/* 1. Header Strip with Odometer Counters */}
       <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-ink-900 border border-ink-700 font-mono text-xs">
         <div className="flex items-center gap-3">
-          <span className="font-bold text-bone-50 uppercase tracking-wider text-sm">
-            BLACK BOX FORENSICS
+            <span className="font-bold text-bone-50 uppercase tracking-[0.16em] text-sm">
+            BLACK BOX / CAUSAL RECORD
           </span>
           <span className="text-bone-500">
             SESS:{shortenId(sessionId, 6, 4)}

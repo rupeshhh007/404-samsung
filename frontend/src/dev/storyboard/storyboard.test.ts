@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import realP0 from './fixtures/real-p0.json';
 import { createProjectionStore } from '../../state/store';
 import type { ProjectionEventMessage, SessionProjection } from '../../api/types';
+import { StoryboardClient } from './StoryboardClient';
 
 const INITIAL_PROJECTION: SessionProjection = {
   intent: null,
@@ -22,6 +23,18 @@ const INITIAL_PROJECTION: SessionProjection = {
 };
 
 describe('Storyboard Fixtures and Playback', () => {
+  it('does not surface the correction before its observed input event', () => {
+    const client = new StoryboardClient(createProjectionStore());
+    client.init(11);
+    expect(client.getUserPrompts().map((prompt) => prompt.text)).toEqual(['Book 11:00.']);
+
+    client.jumpTo(12);
+    expect(client.getUserPrompts().map((prompt) => prompt.text)).toEqual([
+      'Book 11:00.',
+      'Actually, make it 12:00.',
+    ]);
+  });
+
   it('has 31 real P0 events', () => {
     expect(realP0.events.length).toBe(31);
     expect(realP0.session_id).toBe('01a1092a-21be-7e8a-bced-0584da056667');

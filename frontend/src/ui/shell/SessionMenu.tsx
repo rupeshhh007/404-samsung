@@ -60,7 +60,7 @@ export const SessionMenu: React.FC<SessionMenuProps> = ({
         onClick={() => setOpen((prev) => !prev)}
         aria-expanded={open}
         aria-haspopup="menu"
-        className="inline-flex items-center gap-1.5 h-7 px-2 font-mono text-[11px] uppercase border border-ink-600 bg-ink-850 hover:bg-ink-800 text-bone-300 hover:text-bone-50 transition-colors focus-visible:outline-sig-active"
+        className="session-menu-trigger inline-flex h-7 items-center gap-1.5 border border-current bg-transparent px-2 font-mono text-[9px] uppercase tracking-wider opacity-60 transition-opacity hover:opacity-100"
       >
         <span>
           {sessionId ? `SESS:${shortenId(sessionId, 4, 3)}` : 'NO SESSION'}
@@ -72,7 +72,7 @@ export const SessionMenu: React.FC<SessionMenuProps> = ({
         <div
           ref={menuRef}
           role="menu"
-          className="absolute top-9 right-0 z-50 w-72 p-3 bg-ink-850 border border-ink-600 slab-shadow text-bone-50 space-y-3 animate-fadeIn"
+          className="session-menu-popover absolute right-0 top-9 z-50 w-72 space-y-3 border border-ink-600 bg-ink-850 p-3 text-bone-50 shadow-2xl animate-fadeIn"
         >
           <div className="space-y-1">
             <div className="font-mono text-[10px] uppercase tracking-wider text-bone-500">

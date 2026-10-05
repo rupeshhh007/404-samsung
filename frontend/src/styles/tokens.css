@@ -1,4 +1,11 @@
 :root {
+  /* Editorial console */
+  --console-paper: #F2EFE7;
+  --console-ink: #131211;
+  --console-muted: #6A655C;
+  --console-rule: #C9C4B9;
+  --console-red: #C8321F;
+
   /* Surfaces ("ink") */
   --ink-950: #0A0908;
   --ink-900: #100E0D;
@@ -29,9 +36,9 @@
   --sig-pending-glow: rgba(255, 176, 32, 0.35);
   --sig-pending-wash: rgba(255, 176, 32, 0.10);
 
-  --sig-alarm: #FF4438;
-  --sig-alarm-glow: rgba(255, 68, 56, 0.35);
-  --sig-alarm-wash: rgba(255, 68, 56, 0.10);
+  --sig-alarm: #C8321F;
+  --sig-alarm-glow: rgba(200, 50, 31, 0.28);
+  --sig-alarm-wash: rgba(200, 50, 31, 0.08);
 
   --sig-adapt: #19D3C5;
   --sig-adapt-glow: rgba(25, 211, 197, 0.35);

@@ -1,26 +1,32 @@
 import React, { useMemo, useState } from 'react';
 import { Transcript } from './Transcript';
-import { SuggestionChips } from './SuggestionChips';
 import { Composer } from './Composer';
+import { IntentRealityHero } from '../deck/IntentRealityHero';
+import { CurrentActionStrip } from '../deck/CurrentActionStrip';
+import { extractDesiredSlot, formatSlotParts } from '../viewmodel/slots';
 import { mergeTranscript, type UserPromptEntry } from '../viewmodel/transcript';
 import type { Stage } from '../viewmodel/stage';
-import type { SessionProjection, OperationProjection } from '../../api/types';
+import type { SessionProjection } from '../../api/types';
 
 interface VoiceColumnProps {
   readonly stage: Stage;
+  readonly gapPx: number;
   readonly projection: SessionProjection | null;
   readonly userPrompts: readonly UserPromptEntry[];
   readonly onSendText: (text: string) => Promise<void> | void;
   readonly onCancelSpeech?: (speechId: string) => void;
+  readonly onOpenBlackBox: () => void;
   readonly actionPending?: boolean;
 }
 
 export const VoiceColumn: React.FC<VoiceColumnProps> = ({
   stage,
+  gapPx,
   projection,
   userPrompts,
   onSendText,
   onCancelSpeech,
+  onOpenBlackBox,
   actionPending = false,
 }) => {
   const speechList = projection?.speech ?? [];
@@ -63,39 +69,38 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
     return speechList.find((s) => s.state === 'EMITTING' || s.state === 'QUEUED') ?? null;
   }, [speechList]);
 
-  // Interrupt flight check for quick suggestion prompt
-  const hasInterruptableFlight = useMemo(() => {
-    const ops = projection?.operations ?? [];
-    return ops.some(
-      (op: OperationProjection) =>
-        !op.speculative &&
-        (op.state === 'DISPATCHED' || op.state === 'WAITING'),
-    );
-  }, [projection]);
+  const desiredSlot = extractDesiredSlot(
+    projection?.intent ?? null,
+    projection?.intent?.active_revision ?? null,
+  );
+  const requestedTime = desiredSlot ? formatSlotParts(desiredSlot).numerals : null;
+  const hasOpenDivergence = projection?.divergences.some(
+    (divergence) => divergence.state === 'OPEN' || divergence.state === 'ESCALATED',
+  ) ?? false;
+  const supportingLine = hasOpenDivergence && requestedTime
+    ? `${requestedTime} has not been confirmed.`
+    : null;
 
   return (
-    <section
-      aria-label="Conversation"
-      className="flex flex-col h-full bg-ink-950/70 p-4 sm:p-6 min-w-0 select-text"
-    >
-      {/* Transcript feed */}
-      <Transcript
-        items={transcriptItems}
-        pendingClaim={pendingClaim}
-        onRetryUserPrompt={(text) => onSendText(text)}
-      />
-
-      {/* Suggested Quick Prompts */}
-      <div className="pt-2">
-        <SuggestionChips
-          stage={stage}
-          hasInterruptableFlight={hasInterruptableFlight}
-          onSelect={(text) => onSendText(text)}
+    <section aria-label="Conversation" className="editorial-console flex min-w-0 flex-1 flex-col select-text">
+      <div className="flex-1">
+        <Transcript
+          items={transcriptItems}
+          pendingClaim={hasOpenDivergence ? null : pendingClaim}
+          supportingLine={supportingLine}
+          interlude={(
+            <IntentRealityHero stage={stage} gapPx={gapPx} projection={projection} />
+          )}
+          onRetryUserPrompt={(text) => onSendText(text)}
         />
+
+        <CurrentActionStrip projection={projection} />
+        <button type="button" onClick={onOpenBlackBox} className="editorial-inspect">
+          Inspect what happened →
+        </button>
       </div>
 
-      {/* Input Composer */}
-      <div className="pt-2">
+      <div>
         <Composer
           disabled={actionPending}
           onSend={(text) => onSendText(text)}
