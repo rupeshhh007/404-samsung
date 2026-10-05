@@ -1,13 +1,13 @@
 import React from 'react';
 import type { SessionProjection } from '../../api/types';
+import { selectActiveOperation } from '../viewmodel/slots';
 
 interface CurrentActionStripProps {
   readonly projection: SessionProjection | null;
 }
 
 export const CurrentActionStrip: React.FC<CurrentActionStripProps> = ({ projection }) => {
-  const operations = projection?.operations ?? [];
-  const activeOp = operations[operations.length - 1] ?? null;
+  const activeOp = selectActiveOperation(projection);
 
   let text = 'System ready';
   let colorClass = 'text-bone-400';

@@ -6,7 +6,6 @@ import { useFontsReady } from '../motion/useFontsReady';
 
 interface IdleScreenProps {
   readonly onBeginSession: () => Promise<boolean>;
-  readonly onRunRace?: () => void;
   readonly onHealthCheck: () => Promise<boolean>;
   readonly baseUrl: string;
 }

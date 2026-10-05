@@ -14,11 +14,15 @@ export const Receipt: React.FC<ReceiptProps> = ({ proof, onClose }) => {
   const isApproved = proof.state === 'APPROVED' || proof.state === 'EMITTED' || proof.state === 'EMITTING';
   const isCancelled = proof.state === 'CANCELLED';
   const isBlocked = proof.state === 'BLOCKED';
+  const isCorrectionRequired = proof.state === 'CORRECTION_REQUIRED';
 
   let stampText = 'APPROVED';
   let stampColor = 'text-sig-verify border-sig-verify';
 
-  if (isCancelled) {
+  if (isCorrectionRequired) {
+    stampText = 'INVALIDATED / CORRECTION REQUIRED';
+    stampColor = 'text-sig-alarm border-sig-alarm';
+  } else if (isCancelled) {
     stampText = 'CANCELLED';
     stampColor = 'text-sig-pending border-sig-pending';
   } else if (isBlocked) {
@@ -45,7 +49,7 @@ export const Receipt: React.FC<ReceiptProps> = ({ proof, onClose }) => {
           initial={{ scale: 1.6, opacity: 0, rotate: -8 }}
           animate={{ scale: 1, opacity: 0.85, rotate: -8 }}
           transition={{ duration: 0.18, ease: 'easeOut' }}
-          className={`absolute top-4 right-5 border-2 border-dashed px-3 py-1 font-mono font-extrabold text-sm uppercase tracking-widest pointer-events-none mix-blend-multiply ${stampColor}`}
+          className={`absolute top-4 right-5 border-2 border-dashed px-2.5 py-1 font-mono font-extrabold text-[11px] sm:text-xs uppercase tracking-wider pointer-events-none mix-blend-multiply ${stampColor}`}
         >
           {stampText}
         </motion.div>

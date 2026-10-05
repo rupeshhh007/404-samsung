@@ -110,7 +110,7 @@ export const EventInspector: React.FC<EventInspectorProps> = ({
       {causalChain.length > 1 && (
         <div className="space-y-1.5 pt-2 border-t border-ink-600">
           <div className="text-[10px] text-bone-500 uppercase tracking-wider">
-            CAUSAL CHAIN ({causalChain.length} EVENTS)
+            CORRELATION GROUP ({causalChain.length} EVENTS)
           </div>
           <div className="flex flex-wrap gap-1.5">
             {causalChain.map((chainEvt) => (

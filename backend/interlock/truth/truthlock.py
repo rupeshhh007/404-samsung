@@ -330,7 +330,11 @@ def _render_template(
 
     if "{slot}" in pattern:
         # Only render factual slot if supported by the claim snapshot
-        slot_val = supported_slot or slots.get("slot") or slots.get("confirmed_slot") or slots.get("requested_slot")
+        speech_slot = slots.get("slot") or slots.get("confirmed_slot") or slots.get("requested_slot")
+        if speech_slot and supported_slot is not None and _match_slot(speech_slot, supported_slot):
+            slot_val = speech_slot
+        else:
+            slot_val = supported_slot or speech_slot
         if slot_val:
             pattern = pattern.replace("{slot}", str(slot_val))
         elif template.fallback_pattern:

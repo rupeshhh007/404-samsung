@@ -12,6 +12,7 @@ import { Odometer } from '../primitives/Odometer';
 import { CopyButton } from '../primitives/CopyButton';
 import { useTimeTravel } from './useTimeTravel';
 import { deriveStage } from '../viewmodel/stage';
+import { selectActivePlan, selectActiveDivergence } from '../viewmodel/slots';
 import { selectSessionSummary } from '../../state/projections';
 import { shortenId } from '../../utils/formatters';
 import type { ProjectionEventMessage, SessionProjection } from '../../api/types';
@@ -91,8 +92,8 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
   const plans = activeProjection?.plans ?? [];
   const divergences = activeProjection?.divergences ?? [];
   const metrics = activeProjection?.metrics ?? null;
-  const activePlan = plans[plans.length - 1] ?? null;
-  const activeDivergence = divergences[divergences.length - 1] ?? null;
+  const activePlan = selectActivePlan(activeProjection);
+  const activeDivergence = selectActiveDivergence(activeProjection);
 
   return (
     <div className="flex-1 p-4 sm:p-6 space-y-4 max-w-7xl mx-auto w-full select-none">

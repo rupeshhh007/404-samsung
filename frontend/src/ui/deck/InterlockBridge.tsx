@@ -6,9 +6,10 @@ import { Details } from '../primitives/Details';
 import {
   formatSlotParts,
   extractDesiredSlot,
-  extractObservedSlot,
+  selectObservedWorld,
+  selectActiveOperation,
 } from '../viewmodel/slots';
-import { formatCancellationState, shortenId } from '../../utils/formatters';
+import { formatCancellationState } from '../../utils/formatters';
 import type { Stage } from '../viewmodel/stage';
 import type { SessionProjection } from '../../api/types';
 
@@ -26,32 +27,16 @@ export const InterlockBridge: React.FC<InterlockBridgeProps> = ({
 }) => {
   const intent = projection?.intent ?? null;
   const revision = intent?.active_revision ?? null;
-  const effects = projection?.effects ?? [];
-  const divergences = projection?.divergences ?? [];
-  const operations = projection?.operations ?? [];
 
-  const activeDivergence = useMemo(() => {
-    return (
-      divergences.find((d) => d.state === 'OPEN' || d.state === 'ESCALATED') ??
-      divergences.find((d) => d.state === 'RECONCILING' || d.state === 'PLANNED') ??
-      divergences[divergences.length - 1] ??
-      null
-    );
-  }, [divergences]);
+  // Pure semantic selectors
+  const observed = useMemo(() => selectObservedWorld(projection), [projection]);
+  const activeDivergence = observed.divergence;
+  const activeOp = useMemo(() => selectActiveOperation(projection), [projection]);
 
   // Extract desired & observed slots cleanly using pure viewmodels
   const rawDesired = useMemo(() => extractDesiredSlot(intent, revision), [intent, revision]);
   const desiredParts = useMemo(() => formatSlotParts(rawDesired), [rawDesired]);
-
-  const rawObserved = useMemo(
-    () => extractObservedSlot(activeDivergence, effects),
-    [activeDivergence, effects],
-  );
-  const observedParts = useMemo(() => formatSlotParts(rawObserved), [rawObserved]);
-
-  // Primary operation
-  const activeOp = operations[operations.length - 1] ?? null;
-  const latestEffect = effects[effects.length - 1] ?? null;
+  const observedParts = useMemo(() => formatSlotParts(observed.rawSlot), [observed.rawSlot]);
 
   const isDiverged = stage === 'DIVERGED';
   const isMeshed = stage === 'ALIGNED' || stage === 'RESOLVED';
@@ -89,7 +74,7 @@ export const InterlockBridge: React.FC<InterlockBridgeProps> = ({
           side="reality"
           eyebrow="REALITY · WHAT THE WORLD SAYS"
           slotParts={observedParts}
-          effectState={latestEffect?.state ?? (rawObserved ? 'COMMITTED' : null)}
+          effectState={observed.state}
           isMeshed={isMeshed}
           isDiverged={isDiverged}
         />
@@ -126,7 +111,7 @@ export const InterlockBridge: React.FC<InterlockBridgeProps> = ({
           items={[
             { label: 'Active Revision ID', value: revision?.revision_id },
             { label: 'Fingerprint', value: revision?.dependency_fingerprint },
-            { label: 'Observed Effect ID', value: latestEffect?.effect_id },
+            { label: 'Observed Effect ID', value: observed.effectId },
             { label: 'Divergence ID', value: activeDivergence?.divergence_id },
           ]}
         />

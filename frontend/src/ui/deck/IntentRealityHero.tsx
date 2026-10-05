@@ -3,7 +3,9 @@ import { Cable } from './Cable';
 import {
   formatSlotParts,
   extractDesiredSlot,
-  extractObservedSlot,
+  selectObservedWorld,
+  selectActiveOperation,
+  matchSlots,
 } from '../viewmodel/slots';
 import type { Stage } from '../viewmodel/stage';
 import type { SessionProjection } from '../../api/types';
@@ -25,35 +27,31 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
 
   const intent = projection?.intent ?? null;
   const revision = intent?.active_revision ?? null;
-  const effects = projection?.effects ?? [];
-  const divergences = projection?.divergences ?? [];
-  const operations = projection?.operations ?? [];
 
-  const activeDivergence = useMemo(() => {
-    return (
-      divergences.find((d) => d.state === 'OPEN' || d.state === 'ESCALATED') ??
-      divergences.find((d) => d.state === 'RECONCILING' || d.state === 'PLANNED') ??
-      divergences[divergences.length - 1] ??
-      null
-    );
-  }, [divergences]);
-
-  const activeOp = operations[operations.length - 1] ?? null;
+  // Pure semantic selectors
+  const observed = useMemo(() => selectObservedWorld(projection), [projection]);
+  const activeDivergence = observed.divergence;
+  const activeOp = useMemo(() => selectActiveOperation(projection), [projection]);
 
   // Extract desired & observed slots cleanly using pure viewmodels
   const rawDesired = useMemo(() => extractDesiredSlot(intent, revision), [intent, revision]);
   const desiredParts = useMemo(() => formatSlotParts(rawDesired), [rawDesired]);
+  const observedParts = useMemo(() => formatSlotParts(observed.rawSlot), [observed.rawSlot]);
 
-  const rawObserved = useMemo(
-    () => extractObservedSlot(activeDivergence, effects),
-    [activeDivergence, effects],
-  );
-  const observedParts = useMemo(() => formatSlotParts(rawObserved), [rawObserved]);
-
-  const isDiverged = stage === 'DIVERGED' || activeDivergence?.state === 'OPEN' || activeDivergence?.state === 'ESCALATED';
-  const isAligned = stage === 'ALIGNED' || stage === 'RESOLVED' || (rawDesired && rawObserved && rawDesired === rawObserved);
-  const isUnknown = !rawObserved || observedParts.unknown;
-
+  const hasObservedSlot = observed.slot !== null && !observedParts.unknown;
+  const isDiverged =
+    stage === 'DIVERGED' ||
+    activeDivergence?.state === 'OPEN' ||
+    activeDivergence?.state === 'ESCALATED';
+  const isAligned =
+    stage === 'ALIGNED' ||
+    stage === 'RESOLVED' ||
+    (observed.state === 'COMMITTED' &&
+      hasObservedSlot &&
+      rawDesired !== null &&
+      observed.rawSlot !== null &&
+      matchSlots(observed.rawSlot, rawDesired));
+  const isOutcomeUnknown = stage === 'UNKNOWN' || observed.state === 'OUTCOME_UNKNOWN';
   const isTooLate = activeOp?.cancellation_state === 'TOO_LATE';
 
   return (
@@ -72,7 +70,7 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
 
           <div className="my-auto py-2">
             <div className="flex items-baseline gap-1.5">
-              <span className="font-display font-extrabold text-[clamp(36px,4vw,64px)] text-bone-50 leading-none tabular">
+              <span className="font-display font-extrabold text-[clamp(28px,3.5vw,56px)] text-bone-50 leading-none tabular tracking-tight">
                 {desiredParts.numerals}
               </span>
               {desiredParts.meridiem && (
@@ -118,15 +116,32 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
               : 'border-ink-700 bg-ink-950/70'
           } flex flex-col justify-between min-h-[170px] relative`}
         >
-          <span className="font-mono text-[11px] uppercase tracking-wider text-bone-500 font-semibold">
-            REALITY
-          </span>
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-bone-500 font-semibold">
+              REALITY
+            </span>
+            {hasObservedSlot && observed.state ? (
+              <span
+                className={`font-mono text-[10px] px-1.5 py-0.5 border ${
+                  observed.state === 'COMMITTED'
+                    ? 'border-sig-verify/60 text-sig-verify bg-sig-verify/10'
+                    : 'border-ink-600 text-bone-400 bg-ink-900'
+                }`}
+              >
+                {observed.state === 'COMMITTED' ? 'COMMITTED' : observed.state}
+              </span>
+            ) : (
+              <span className="font-mono text-[10px] px-1.5 py-0.5 border border-ink-700 text-bone-500 bg-ink-900/50">
+                NOT OBSERVED
+              </span>
+            )}
+          </div>
 
           <div className="my-auto py-2">
             <div className="flex items-baseline gap-1.5">
               <span
-                className={`font-display font-extrabold text-[clamp(36px,4vw,64px)] leading-none tabular ${
-                  isUnknown ? 'text-bone-600' : 'text-bone-50'
+                className={`font-display font-extrabold text-[clamp(28px,3.5vw,56px)] leading-none tabular tracking-tight ${
+                  !hasObservedSlot ? 'text-bone-600' : 'text-bone-50'
                 }`}
               >
                 {observedParts.numerals}
@@ -145,7 +160,11 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
           </div>
 
           <span className="font-mono text-[10px] text-bone-600">
-            {isUnknown ? 'External State' : 'Confirmed Booking'}
+            {!hasObservedSlot
+              ? 'No External Effect'
+              : observed.state === 'COMMITTED'
+              ? 'Confirmed External Booking'
+              : `External State: ${observed.state}`}
           </span>
 
           {/* Bauhaus edge socket */}
@@ -165,18 +184,34 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
               <span>≠ REALITY MISMATCH</span>
             </div>
             <div className="font-sans text-xs text-bone-300">
-              {isTooLate ? 'Cancellation was too late.' : 'Reality does not match your latest request.'}
+              {hasObservedSlot && desiredParts.formatted !== '—'
+                ? `Divergence detected — external ${observedParts.formatted} ≠ desired ${desiredParts.formatted}`
+                : isTooLate
+                ? 'Cancellation was too late.'
+                : 'Reality does not match your latest request.'}
             </div>
           </div>
-        ) : isUnknown ? (
+        ) : isOutcomeUnknown ? (
+          <div className="font-sans text-xs text-sig-pending flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full border border-sig-pending animate-pulse" />
+            <span>Verification in progress</span>
+          </div>
+        ) : !hasObservedSlot ? (
           <div className="font-sans text-xs text-bone-400 flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full border border-bone-500 animate-pulse" />
-            <span>Waiting for external confirmation</span>
+            <span>No external observation recorded</span>
+          </div>
+        ) : !isAligned ? (
+          <div className="font-sans text-xs text-sig-pending flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-sig-pending" />
+            <span>
+              {`External booking confirmed at ${observedParts.formatted}; desired ${desiredParts.formatted} unverified`}
+            </span>
           </div>
         ) : (
           <div className="font-sans text-xs text-sig-verify flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-sig-verify" />
-            <span>In sync</span>
+            <span>In sync — verified booking at {observedParts.formatted}</span>
           </div>
         )}
 
@@ -211,7 +246,7 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
           </div>
           <div className="flex justify-between">
             <span className="text-bone-500">Observed Slot:</span>
-            <span className="text-bone-200">{rawObserved ?? '—'}</span>
+            <span className="text-bone-200">{observed.rawSlot ?? '—'}</span>
           </div>
           {activeOp && (
             <div className="flex justify-between">

@@ -623,3 +623,160 @@ def test_ext001_demo_reset_clears_provider_state_and_allows_rebooking() -> None:
         await host.hub.shutdown()
 
     run(scenario())
+
+
+def test_normal_booking_claim_confirmed_with_canonical_evidence_and_truth_gated_speech() -> None:
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        application = host.application
+        session_id = "normal-booking-p0-regression"
+        await application.start_session(session_id)
+        try:
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+
+            # Wait for operation to execute and settle
+            await asyncio.sleep(0.15)
+            await application.drain(session_id)
+
+            state = application.snapshot(session_id)
+            active_node = state.intents.get(state.active_intent_id)
+            assert active_node is not None
+            active_rev = state.revisions.get(active_node.active_revision_id)
+            assert active_rev is not None
+            assert active_rev.values["requested_slot"] == "2030-01-15T11:00:00+05:30"
+
+            # 1. Operation SUCCEEDED
+            assert any(
+                op.tool_name == "appointment.book" and op.state == OperationState.SUCCEEDED
+                for op in state.operations.values()
+            )
+
+            # 2. Authoritative COMMITTED effect exists for exact 11
+            effects = [
+                eff for eff in state.effects.values()
+                if eff.effect_type == "appointment.booking"
+                and eff.state == "COMMITTED"
+                and eff.authority == "AUTHORITATIVE"
+                and eff.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+            ]
+            assert len(effects) >= 1
+
+            # 3. appointment_booked claim for active revision becomes CONFIRMED with canonical evidence
+            active_claims = [
+                claim for claim in state.claims.values()
+                if claim.intent_revision_id == active_rev.revision_id
+                and claim.predicate == "appointment_booked"
+            ]
+            assert len(active_claims) == 1
+            claim = active_claims[0]
+            assert claim.state == "CONFIRMED"
+            assert len(claim.supporting_evidence_ids) > 0
+            assert all(eid in state.evidence for eid in claim.supporting_evidence_ids)
+
+            # 4. TRUTHLOCK-approved RESULT speech exists with exact template wording
+            result_speeches = [
+                s for s in state.speech.values()
+                if s.act_type == "RESULT" and claim.claim_id in s.claim_ids
+            ]
+            assert len(result_speeches) == 1
+            speech = result_speeches[0]
+            assert speech.state in ("APPROVED", "QUEUED", "EMITTING", "EMITTED")
+            assert speech.rendered_text == "Confirmed — your 11:00 appointment is booked."
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())
+
+
+def test_race_11_to_12_never_produces_confirmed_12_speech() -> None:
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        application = host.application
+        session_id = "race-11-12-regression"
+        await application.start_session(session_id)
+        try:
+            # 1. User requests 11:00
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+
+            # 2. Interruption with 12:00 arrives
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-12",
+                    "modality": "text",
+                    "content_ref": "Actually, make it 12:00.",
+                },
+                correlation_id="input-12",
+                dedupe_key="test:input-12",
+            ))
+
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+
+            state = application.snapshot(session_id)
+            active_node = state.intents.get(state.active_intent_id)
+            assert active_node is not None
+            active_rev = state.revisions.get(active_node.active_revision_id)
+            assert active_rev is not None
+            assert active_rev.values["requested_slot"] == "2030-01-15T12:00:00+05:30"
+
+            # Claim for 12:00 must NEVER be CONFIRMED without 12:00 evidence
+            claim_12 = [
+                c for c in state.claims.values()
+                if c.intent_revision_id == active_rev.revision_id
+                and c.predicate == "appointment_booked"
+            ]
+            assert len(claim_12) == 1
+            assert claim_12[0].state == "PENDING"
+
+            # No speech asserting 12:00 confirmed can exist
+            confirmed_12_speeches = [
+                s for s in state.speech.values()
+                if s.act_type == "RESULT" and "12:00" in (s.rendered_text or "")
+            ]
+            assert len(confirmed_12_speeches) == 0
+
+            # Active divergence exists
+            assert len(state.divergences) >= 1
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())

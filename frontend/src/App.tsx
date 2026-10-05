@@ -411,19 +411,6 @@ export const App: React.FC = () => {
   const effectivePrompts = storyboardClient ? storyboardClient.getUserPrompts() : userPrompts;
   const effectiveEvents = storyboardClient ? storyboardClient.getAllEvents() : traceEvents;
   const isScriptedReplay = isStoryboardActive && !!storyboardClient;
-  const isScriptedContinuation = storyboardClient?.getIsScriptedContinuation() ?? false;
-
-  // Handle idle screen "Run the correction race" action
-  const handleRunRace = useCallback(async () => {
-    if (storyboardClient) {
-      storyboardClient.play();
-      return;
-    }
-    const started = await startSession();
-    if (started) {
-      // Session started; user can test prompts manually
-    }
-  }, [storyboardClient, startSession]);
 
   return (
     <AppShell
@@ -438,7 +425,6 @@ export const App: React.FC = () => {
       onResetDemo={() => void resetSession()}
       actionPending={actionPending}
       isScriptedReplay={isScriptedReplay}
-      isScriptedContinuation={isScriptedContinuation}
       toasts={toasts}
     >
       <DirectorBridge projection={state.projection} sessionId={state.sessionId} />
@@ -450,7 +436,6 @@ export const App: React.FC = () => {
         /* Idle screen */
         <IdleScreen
           onBeginSession={startSession}
-          onRunRace={handleRunRace}
           onHealthCheck={async () => {
             try {
               const res = await http.health();

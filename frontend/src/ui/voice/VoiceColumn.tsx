@@ -42,12 +42,20 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
     );
     if (revisionClaims.length === 0) return null;
 
+    const targetClaim = revisionClaims[0];
+    if (!targetClaim) return null;
+
+    // Only suppress pending claim if an emitted RESULT references that exact claim or current revision
     const hasEmittedResult = speechList.some(
-      (s) => s.act_type === 'RESULT' && s.state === 'EMITTED',
+      (s) =>
+        s.act_type === 'RESULT' &&
+        (s.state === 'EMITTED' || s.state === 'APPROVED' || s.state === 'QUEUED' || s.state === 'EMITTING') &&
+        (s.claim_ids.includes(targetClaim.claim_id) ||
+          allClaims.some((c) => c.intent_revision_id === revId && s.claim_ids.includes(c.claim_id))),
     );
     if (hasEmittedResult) return null;
 
-    return revisionClaims[0] ?? null;
+    return targetClaim;
   }, [projection, allClaims, speechList]);
 
   // Barge-in active when assistant speech is emitting
