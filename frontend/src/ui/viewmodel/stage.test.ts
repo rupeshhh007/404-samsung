@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { deriveStage } from './stage';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { IntentRealityHero } from '../deck/IntentRealityHero';
+import { CurrentActionStrip } from '../deck/CurrentActionStrip';
 import type { SessionProjection, OperationProjection, DivergenceProjection } from '../../api/types';
 
 function createMockOperation(overrides: Partial<OperationProjection> = {}): OperationProjection {
@@ -64,6 +68,28 @@ function createMockProjection(overrides: Partial<SessionProjection> = {}): Sessi
 }
 
 describe('viewmodel/stage', () => {
+  it.each(['FAILED', 'UNKNOWN', 'STALE', 'RESOLVED'] as const)('preserves %s in the hero', (stage) => {
+    const markup = renderToStaticMarkup(createElement(IntentRealityHero, {
+      stage, gapPx: 0, projection: createMockProjection(),
+    }));
+    expect(markup).not.toContain('Aligned · Verified');
+    expect(markup).toContain(`intent-reality--${stage.toLowerCase()}`);
+  });
+
+  it('labels a timed-out action as an unknown outcome', () => {
+    const markup = renderToStaticMarkup(createElement(CurrentActionStrip, {
+      projection: createMockProjection({operations: [createMockOperation({state: 'TIMED_OUT'})]}),
+    }));
+    expect(markup).toContain('Booking appointment · Outcome unknown');
+    expect(markup).not.toContain('Failed');
+  });
+
+  it('does not imply investigation for an open divergence', () => {
+    const markup = renderToStaticMarkup(createElement(CurrentActionStrip, {
+      projection: createMockProjection({divergences: [createMockDivergence()]}),
+    }));
+    expect(markup).toContain('Divergence open · no repair started');
+  });
   it('returns NO_SESSION when sessionId is null', () => {
     const stage = deriveStage(null, null, 'DISCONNECTED');
     expect(stage.stage).toBe('NO_SESSION');
