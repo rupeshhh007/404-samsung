@@ -26,7 +26,7 @@ export const PillarRow: React.FC = () => {
           SAFEPOINT control
         </div>
         <p className="font-sans text-bone-500 text-[12px] leading-relaxed">
-          Traps in-flight cancellations and reconciles late effects.
+          Traps in-flight cancellations and preserves and exposes late real-world effects after interruption.
         </p>
       </div>
 

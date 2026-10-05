@@ -142,26 +142,18 @@ def _match_slot(actual: Any, desired: Any) -> bool:
         try:
             return datetime.fromisoformat(actual.replace("Z", "+00:00")) == datetime.fromisoformat(desired.replace("Z", "+00:00"))
         except (ValueError, TypeError):
-            pass
-        for simple, iso in ((actual, desired), (desired, actual)):
-            try:
-                dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-                if simple in (dt.strftime("%H:%M"), dt.strftime("%-H:%M"), dt.strftime("%H")):
-                    return True
-            except (ValueError, TypeError):
-                pass
-        return False
+            return False
 
     if isinstance(actual, datetime) and isinstance(desired, str):
         try:
             return actual == datetime.fromisoformat(desired.replace("Z", "+00:00"))
         except (ValueError, TypeError):
-            return desired in (actual.strftime("%H:%M"), actual.strftime("%-H:%M"), actual.strftime("%H"))
+            return False
     if isinstance(actual, str) and isinstance(desired, datetime):
         try:
             return datetime.fromisoformat(actual.replace("Z", "+00:00")) == desired
         except (ValueError, TypeError):
-            return actual in (desired.strftime("%H:%M"), desired.strftime("%-H:%M"), desired.strftime("%H"))
+            return False
 
     return False
 

@@ -430,18 +430,17 @@ class _Session:
                                     if isinstance(claim.object, dict)
                                     else None
                                 )
-                                display_slot = "11:00"
-                                if requested_slot:
-                                    try:
-                                        dt = datetime.fromisoformat(str(requested_slot).replace("Z", "+00:00"))
-                                        display_slot = dt.strftime("%H:%M")
-                                    except (ValueError, TypeError):
-                                        display_slot = str(requested_slot)
+                                canonical_slot = (
+                                    claim.object.get("confirmed_slot")
+                                    or claim.object.get("requested_slot")
+                                    if isinstance(claim.object, dict)
+                                    else None
+                                )
                                 speech = SpeechAct(
                                     speech_id=speech_id,
                                     act_type=SpeechActType.RESULT,
                                     template_id="tmpl_booking_confirmed",
-                                    slots={"slot": display_slot},
+                                    slots={"slot": canonical_slot or "11:00"},
                                     claim_ids=[claim.claim_id],
                                     requested_certainty=ClaimCertainty.CONFIRMED,
                                     state=SpeechState.PROPOSED,

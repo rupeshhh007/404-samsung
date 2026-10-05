@@ -320,6 +320,32 @@ def _matching_claims_disagree(
     return None
 
 
+def _format_display_slot(slot: Any) -> str:
+    """Format an approved canonical slot for user-facing template display."""
+    if isinstance(slot, datetime):
+        return slot.strftime("%H:%M")
+    if isinstance(slot, str):
+        try:
+            dt = datetime.fromisoformat(slot.replace("Z", "+00:00"))
+            return dt.strftime("%H:%M")
+        except (ValueError, TypeError):
+            return slot
+    return str(slot) if slot is not None else ""
+
+
+def _speech_slot_matches_claim(speech_slot: Any, claim_slot: Any) -> bool:
+    """Validate slot identity at the controlled speech layer.
+
+    Accepts exact canonical match via _match_slot, or human display time matching
+    the canonical claim slot when validating speech against approved claims.
+    """
+    if _match_slot(speech_slot, claim_slot):
+        return True
+    if isinstance(speech_slot, str) and _format_display_slot(claim_slot) == speech_slot:
+        return True
+    return False
+
+
 def _render_template(
     template: ControlledTemplate,
     slots: Mapping[str, Any],
@@ -331,12 +357,12 @@ def _render_template(
     if "{slot}" in pattern:
         # Only render factual slot if supported by the claim snapshot
         speech_slot = slots.get("slot") or slots.get("confirmed_slot") or slots.get("requested_slot")
-        if speech_slot and supported_slot is not None and _match_slot(speech_slot, supported_slot):
+        if speech_slot and supported_slot is not None and _speech_slot_matches_claim(speech_slot, supported_slot):
             slot_val = speech_slot
         else:
             slot_val = supported_slot or speech_slot
         if slot_val:
-            pattern = pattern.replace("{slot}", str(slot_val))
+            pattern = pattern.replace("{slot}", _format_display_slot(slot_val))
         elif template.fallback_pattern:
             pattern = template.fallback_pattern
         else:
@@ -346,7 +372,11 @@ def _render_template(
         obs_slot = slots.get("observed_slot") or slots.get("observed")
         des_slot = slots.get("desired_slot") or slots.get("desired")
         if obs_slot and des_slot:
-            pattern = pattern.replace("{observed_slot}", str(obs_slot)).replace("{desired_slot}", str(des_slot))
+            pattern = pattern.replace(
+                "{observed_slot}", _format_display_slot(obs_slot)
+            ).replace(
+                "{desired_slot}", _format_display_slot(des_slot)
+            )
         elif template.fallback_pattern:
             pattern = template.fallback_pattern
 
@@ -1024,7 +1054,7 @@ class Truthlock:
                             policy_id=pol_ver,
                             through_sequence=resolved_pinned_seq,
                         )
-                    if not _match_slot(speech_slot, claim_slot):
+                    if not _speech_slot_matches_claim(speech_slot, claim_slot):
                         return TruthDecision(
                             status=TruthDecisionStatus.BLOCK,
                             speech_id=speech_id,

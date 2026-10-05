@@ -780,3 +780,94 @@ def test_race_11_to_12_never_produces_confirmed_12_speech() -> None:
             await host.hub.shutdown()
 
     run(scenario())
+
+
+def test_claims_match_slot_strict_canonical_equality() -> None:
+    from interlock.truth.claims import _match_slot, ClaimEvaluator
+    from interlock.domain.models import ClaimRecord, EffectRecord
+    from interlock.domain.enums import ClaimState, EffectState, EvidenceAuthority
+
+    # 1. Bare time string "11:00" must NEVER match full ISO datetime
+    assert not _match_slot("11:00", "2030-01-15T11:00:00+05:30")
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "11:00")
+
+    # 2. Same time-of-day on a different date must NEVER match
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "2030-01-16T11:00:00+05:30")
+    assert not _match_slot("2030-01-16T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+
+    # 3. Same time-of-day on a different timezone offset must NEVER match (different instant)
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00+00:00")
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00-05:00")
+
+    # 4. Offset-naive vs offset-aware must fail closed
+    assert not _match_slot("2030-01-15T11:00:00", "2030-01-15T11:00:00+05:30")
+
+    # 5. Positive canonical controls
+    assert _match_slot("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+    assert _match_slot("2030-01-15T05:30:00Z", "2030-01-15T11:00:00+05:30")
+
+    # 6. Integration: ClaimEvaluator must NOT confirm a claim when world effect has same time on different date
+    evaluator = ClaimEvaluator()
+    claim = ClaimRecord(
+        claim_id="claim-test-slot-mismatch",
+        predicate="appointment_booked",
+        subject={"center_id": "center-1"},
+        object={
+            "requested_slot": "2030-01-15T11:00:00+05:30",
+            "provider_booking_id": "booking-99",
+        },
+        state=ClaimState.PROPOSED,
+        required_evidence_rule="appointment_booked",
+        intent_revision_id="rev-1",
+        updated_by_event_id="ev-1",
+    )
+    from datetime import datetime, timezone
+
+    mismatched_effect = EffectRecord(
+        effect_id="eff-slot-mismatch",
+        operation_id="op-1",
+        logical_action_id="action-1",
+        provider_effect_id="prov-eff-1",
+        effect_type="appointment.booking",
+        subject={"center_id": "center-1"},
+        parameters={
+            "confirmed_slot": "2030-01-16T11:00:00+05:30",
+            "provider_booking_id": "booking-99",
+        },
+        state=EffectState.COMMITTED,
+        observed_at=datetime(2030, 1, 16, 11, 0, tzinfo=timezone.utc),
+        authority=EvidenceAuthority.AUTHORITATIVE,
+        evidence_ids=["ev-1"],
+    )
+    events = evaluator.evaluate(
+        claim,
+        effects={"eff-slot-mismatch": mismatched_effect},
+        evidence={},
+        active_intent_revision_id="rev-1",
+    )
+    assert not any(event.to_state in (ClaimState.CONFIRMED, "CONFIRMED") for event in events)
+    assert any(event.to_state in (ClaimState.PENDING, "PENDING") for event in events)
+
+
+def test_truthlock_controlled_template_slot_formatting_and_identity() -> None:
+    from interlock.truth.truthlock import (
+        _format_display_slot,
+        _speech_slot_matches_claim,
+        _render_template,
+        CONTROLLED_TEMPLATES,
+    )
+
+    # 1. Format canonical ISO slot to human display time
+    assert _format_display_slot("2030-01-15T11:00:00+05:30") == "11:00"
+    assert _format_display_slot("11:00") == "11:00"
+
+    # 2. Speech slot validation accepts canonical identity or display time matching approved claim
+    assert _speech_slot_matches_claim("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+    assert _speech_slot_matches_claim("11:00", "2030-01-15T11:00:00+05:30")
+    assert not _speech_slot_matches_claim("12:00", "2030-01-15T11:00:00+05:30")
+    assert not _speech_slot_matches_claim("2030-01-16T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+
+    # 3. Controlled template renders approved slot formatted for display
+    tmpl = CONTROLLED_TEMPLATES["tmpl_booking_confirmed"]
+    rendered = _render_template(tmpl, {"slot": "2030-01-15T11:00:00+05:30"}, supported_slot="2030-01-15T11:00:00+05:30")
+    assert rendered == "Confirmed — your 11:00 appointment is booked."
