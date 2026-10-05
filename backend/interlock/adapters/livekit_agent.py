@@ -139,6 +139,8 @@ class LiveKitSessionAdapter(OutputPort):
             self._accepting = False
 
     def _on_transcript(self, event: UserInputTranscribedEvent | Any) -> None:
+        if isinstance(event.transcript, str) and not event.transcript.strip():
+            return
         self._spawn(self.accept_transcript(
             transcript=event.transcript,
             final=event.is_final,
@@ -184,8 +186,11 @@ class LiveKitSessionAdapter(OutputPort):
             raise TypeError("final must be a boolean")
         if not isinstance(transcript, str):
             raise TypeError("transcript must be text")
+        if not transcript.strip():
+            raise ValueError("transcript must contain speech text")
         received_ns = monotonic_ns()
-        identity = _stable_id(item_id, transcript, final, created_at)
+        identity = (_stable_id(item_id, transcript, final)
+                    if item_id is not None else _stable_id(transcript, final, created_at))
         evidence_id = f"voice-{identity}"
         event = await self.application.append(EventCandidate(
             session_id=self.session_id,

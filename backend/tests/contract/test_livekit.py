@@ -215,7 +215,7 @@ def test_final_correction_commits_active_arguments_once() -> None:
             transcript="actually make it 12:00",
             final=True,
             item_id="turn-2",
-            created_at=2.0,
+            created_at=2.1,
         )
         await adapter.application.drain(adapter.session_id)
         state = adapter.application.snapshot(adapter.session_id)
@@ -225,6 +225,68 @@ def test_final_correction_commits_active_arguments_once() -> None:
         assert len(state.intents["intent-1"].revisions) == 2
         await adapter.close()
 
+    asyncio.run(case())
+
+
+def test_evolving_partials_keep_original_text_and_one_final_identity() -> None:
+    async def case() -> None:
+        adapter, livekit = await _adapter()
+        first = await adapter.accept_transcript(
+            transcript="book eleven", final=False, item_id="utterance-1", created_at=1.0,
+        )
+        repeated = await adapter.accept_transcript(
+            transcript="book eleven", final=False, item_id="utterance-1", created_at=1.1,
+        )
+        corrected = await adapter.accept_transcript(
+            transcript="book twelve", final=False, item_id="utterance-1", created_at=1.2,
+        )
+        final = await adapter.accept_transcript(
+            transcript="book twelve please", final=True, item_id="utterance-1", created_at=1.3,
+        )
+        duplicate_final = await adapter.accept_transcript(
+            transcript="book twelve please", final=True, item_id="utterance-1", created_at=1.4,
+        )
+        await adapter.application.drain(adapter.session_id)
+        assert repeated.event_id == first.event_id
+        assert duplicate_final.event_id == final.event_id
+        events = [event for event in adapter.application.events(adapter.session_id)
+                  if event.event_type == "TranscriptHypothesisObserved"]
+        assert [(event.payload["text"], event.payload["final"]) for event in events] == [
+            ("book eleven", False), ("book twelve", False),
+            ("book twelve please", True),
+        ]
+        assert len({event.payload["evidence_id"] for event in events}) == 3
+        assert not any(event.event_type in {"IntentAuthorizationChanged", "ToolDispatchRequested"}
+                       for event in adapter.application.events(adapter.session_id))
+        for _ in range(4):
+            if not adapter._output_origins:
+                break
+            for handle in livekit.handles:
+                handle.finish()
+            await asyncio.sleep(0)
+            await adapter.application.drain(adapter.session_id)
+        await adapter.close()
+    asyncio.run(case())
+
+
+def test_empty_transcript_is_not_journaled_or_fatal_to_live_intake() -> None:
+    async def case() -> None:
+        adapter, livekit = await _adapter()
+        with pytest.raises(ValueError, match="speech text"):
+            await adapter.accept_transcript(transcript=" \t ", final=True, item_id="empty")
+        listener = livekit.listeners["user_input_transcribed"][0]
+        listener(type("TranscriptEvent", (), {
+            "transcript": "  ", "is_final": True, "item_id": "empty", "created_at": 1.0,
+        })())
+        assert adapter.application.snapshot(adapter.session_id).last_sequence == 1
+        assert adapter.callback_failures() == ()
+        assert adapter._accepting
+        accepted = await adapter.accept_transcript(
+            transcript="okay", final=True, item_id="next", created_at=2.0,
+        )
+        assert accepted.event_type == "TranscriptHypothesisObserved"
+        await adapter.application.drain(adapter.session_id)
+        await adapter.close()
     asyncio.run(case())
 
 
@@ -258,8 +320,12 @@ def test_barge_in_cancels_speech_without_cancelling_slow_work() -> None:
         slow_work = asyncio.create_task(asyncio.Event().wait())
         await _queue_progress(adapter)
         accepted = await adapter.request_barge_in()
+        repeated = await adapter.request_barge_in()
         await adapter.application.drain(adapter.session_id)
         assert accepted and livekit.handles[0].interrupted
+        assert repeated and repeated[0].event_id == accepted[0].event_id
+        assert len([event for event in adapter.application.events(adapter.session_id)
+                    if event.event_type == "SpeechCancellationRequested"]) == 1
         assert not slow_work.done()
         assert not any(
             event.event_type == "CancellationRequested"
@@ -281,6 +347,44 @@ def test_barge_in_cancels_speech_without_cancelling_slow_work() -> None:
     asyncio.run(case())
 
 
+def test_ambiguous_playout_failure_neither_invents_unheard_nor_retries() -> None:
+    async def case() -> None:
+        class FailedHandle(FakeSpeechHandle):
+            async def wait_for_playout(self) -> None:
+                await self._done.wait()
+                raise RuntimeError("transport status is ambiguous")
+
+            def exception(self) -> RuntimeError:
+                return RuntimeError("transport status is ambiguous")
+
+        class FailedSession(FakeAgentSession):
+            def say(self, text: str, *, allow_interruptions: bool, add_to_chat_ctx: bool):
+                self.spoken.append((text, allow_interruptions, add_to_chat_ctx))
+                handle = FailedHandle()
+                self.handles.append(handle)
+                return handle
+
+        livekit = FailedSession()
+        adapter = LiveKitSessionAdapter(
+            livekit, session_id="ambiguous-output", application_factory=_factory(),
+        )
+        await adapter.start()
+        await _queue_progress(adapter)
+        livekit.handles[0].finish()
+        await asyncio.sleep(0)
+        await adapter.application.drain(adapter.session_id)
+        assert len(livekit.spoken) == 1
+        assert not any(event.event_type in {"SpeechEmissionFinished", "SpeechEmissionFailed"}
+                       for event in adapter.application.events(adapter.session_id))
+        with pytest.raises(RuntimeError, match="terminal status is unresolved"):
+            await adapter.close()
+        await adapter.output_failed(
+            speech_id="speech-1", error_code="LIVEKIT_OBSERVED_FAILURE", heard=True,
+        )
+        await adapter.close()
+    asyncio.run(case())
+
+
 def test_approved_output_is_exact_and_safe_progress_precedes_slow_completion() -> None:
     async def case() -> None:
         adapter, livekit = await _adapter()
@@ -298,6 +402,34 @@ def test_approved_output_is_exact_and_safe_progress_precedes_slow_completion() -
         await asyncio.gather(slow_work, return_exceptions=True)
         await adapter.close()
 
+    asyncio.run(case())
+
+
+def test_livekit_speaks_exact_persisted_truthlock_text() -> None:
+    async def case() -> None:
+        adapter, livekit = await _adapter()
+        speech = SpeechAct(
+            speech_id="truthlock-progress", act_type=SpeechActType.PROGRESS,
+            template_id="tmpl_checking", requested_certainty=ClaimCertainty.PROGRESS,
+            state=SpeechState.PROPOSED, created_by_event_id="test",
+        )
+        await _append(adapter, "SpeechActProposed", {
+            "speech_act": speech.model_dump(mode="json"),
+        })
+        await adapter.application.drain(adapter.session_id)
+        persisted = adapter.application.snapshot(adapter.session_id).speech[speech.speech_id]
+        assert persisted.approved_policy_id == "truthlock.v1"
+        assert persisted.rendered_text
+        assert livekit.spoken == [(persisted.rendered_text, True, False)]
+        assert [event.event_type for event in adapter.application.events(adapter.session_id)
+                if event.payload.get("speech_id") == speech.speech_id][-3:] == [
+                    "SpeechActApproved", "SpeechQueued", "SpeechEmissionStarted",
+                ]
+        livekit.handles[0].finish()
+        await asyncio.sleep(0)
+        await adapter.application.drain(adapter.session_id)
+        assert adapter.application.snapshot(adapter.session_id).speech[speech.speech_id].heard is True
+        await adapter.close()
     asyncio.run(case())
 
 
