@@ -115,4 +115,129 @@ describe('viewmodel/stage', () => {
     expect(stage.gapPx).toBe(0);
     expect(stage.resolvedProgress).toBe(1);
   });
+
+  it('returns ALIGNED strictly when authoritative observed reality matches active desired state', () => {
+    const proj = createMockProjection({
+      intent: {
+        intent_id: 'int-1',
+        goal_type: 'appointment_booking',
+        revisions: ['rev-1'],
+        active_revision_id: 'rev-1',
+        active_revision: {
+          revision_id: 'rev-1',
+          intent_id: 'int-1',
+          parent_revision_id: null,
+          values: { requested_slot: '2030-01-15T11:00:00+05:30' },
+          maturity: 'COMMITTED',
+          authorization: 'AUTHORIZED',
+          created_by_event_id: 'e1',
+          dependency_fingerprint: 'fp-1',
+        },
+      },
+      operations: [createMockOperation({ state: 'SUCCEEDED' })],
+      effects: [
+        {
+          effect_id: 'eff-1',
+          logical_action_id: 'act-1',
+          operation_id: 'op-1',
+          provider_effect_id: 'p-1',
+          effect_type: 'appointment.booking',
+          subject: {},
+          parameters: { confirmed_slot: '2030-01-15T11:00:00+05:30' },
+          state: 'COMMITTED',
+          observed_at: '2030-01-15T10:00:00Z',
+          authority: 'AUTHORITATIVE',
+          evidence_ids: ['ev-1'],
+          schema_version: 1,
+          supersedes_effect_id: null,
+        },
+      ],
+    });
+    const stage = deriveStage(proj, 'sess-1', 'CONNECTED');
+    expect(stage.stage).toBe('ALIGNED');
+    expect(stage.tension).toBe(0);
+    expect(stage.gapPx).toBe(0);
+    expect(stage.resolvedProgress).toBe(1);
+  });
+
+  it('returns UNVERIFIED when intent is accepted but no authoritative effect exists yet', () => {
+    const proj = createMockProjection({
+      intent: {
+        intent_id: 'int-1',
+        goal_type: 'appointment_booking',
+        revisions: ['rev-1'],
+        active_revision_id: 'rev-1',
+        active_revision: {
+          revision_id: 'rev-1',
+          intent_id: 'int-1',
+          parent_revision_id: null,
+          values: { requested_slot: '2030-01-15T11:00:00+05:30' },
+          maturity: 'COMMITTED',
+          authorization: 'AUTHORIZED',
+          created_by_event_id: 'e1',
+          dependency_fingerprint: 'fp-1',
+        },
+      },
+      operations: [],
+      effects: [],
+    });
+    const stage = deriveStage(proj, 'sess-1', 'CONNECTED');
+    expect(stage.stage).toBe('UNVERIFIED');
+    expect(stage.tension).toBe(0.1);
+  });
+
+  it('returns FAILED when active operation has failed', () => {
+    const proj = createMockProjection({
+      intent: {
+        intent_id: 'int-1',
+        goal_type: 'appointment_booking',
+        revisions: ['rev-1'],
+        active_revision_id: 'rev-1',
+        active_revision: {
+          revision_id: 'rev-1',
+          intent_id: 'int-1',
+          parent_revision_id: null,
+          values: { requested_slot: '2030-01-15T11:00:00+05:30' },
+          maturity: 'COMMITTED',
+          authorization: 'AUTHORIZED',
+          created_by_event_id: 'e1',
+          dependency_fingerprint: 'fp-1',
+        },
+      },
+      operations: [
+        createMockOperation({
+          state: 'FAILED',
+          error: { code: 'PROVIDER_ERROR', message: 'Failed', retryable: false },
+        }),
+      ],
+    });
+    const stage = deriveStage(proj, 'sess-1', 'CONNECTED');
+    expect(stage.stage).toBe('FAILED');
+    expect(stage.tension).toBe(0.8);
+  });
+
+  it('returns UNKNOWN when active operation timed out', () => {
+    const proj = createMockProjection({
+      intent: {
+        intent_id: 'int-1',
+        goal_type: 'appointment_booking',
+        revisions: ['rev-1'],
+        active_revision_id: 'rev-1',
+        active_revision: {
+          revision_id: 'rev-1',
+          intent_id: 'int-1',
+          parent_revision_id: null,
+          values: { requested_slot: '2030-01-15T11:00:00+05:30' },
+          maturity: 'COMMITTED',
+          authorization: 'AUTHORIZED',
+          created_by_event_id: 'e1',
+          dependency_fingerprint: 'fp-1',
+        },
+      },
+      operations: [createMockOperation({ state: 'TIMED_OUT' })],
+    });
+    const stage = deriveStage(proj, 'sess-1', 'CONNECTED');
+    expect(stage.stage).toBe('UNKNOWN');
+    expect(stage.tension).toBe(0.5);
+  });
 });

@@ -67,7 +67,7 @@ export const AppShell: React.FC<AppShellProps> = ({
 
         {/* WebGL StrandField background layer */}
         <Suspense fallback={null}>
-          <StrandField tension={tension} />
+          <StrandField tension={tension} className="opacity-15" />
         </Suspense>
 
         {/* 3% Film grain overlay */}

@@ -95,29 +95,39 @@ export const SessionMenu: React.FC<SessionMenuProps> = ({
             <span className="text-bone-50 font-bold">#{lastAppliedSequence}</span>
           </div>
 
-          <div className="flex flex-col gap-2 pt-1">
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setOpen(false);
-                onNewSession();
-              }}
-              disabled={actionPending}
-              className="w-full text-xs"
-            >
-              New Session
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                setOpen(false);
-                onResetDemo();
-              }}
-              disabled={actionPending || !sessionId}
-              className="w-full text-xs"
-            >
-              Reset Demo State
-            </Button>
+          <div className="flex flex-col gap-3 pt-1">
+            <div>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setOpen(false);
+                  onNewSession();
+                }}
+                disabled={actionPending}
+                className="w-full text-xs"
+              >
+                New Session
+              </Button>
+              <span className="block font-sans text-[10px] text-bone-500 mt-1 px-0.5 leading-snug">
+                New runtime session — external simulated world is preserved
+              </span>
+            </div>
+            <div>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setOpen(false);
+                  onResetDemo();
+                }}
+                disabled={actionPending || !sessionId}
+                className="w-full text-xs"
+              >
+                Reset Demo State
+              </Button>
+              <span className="block font-sans text-[10px] text-bone-500 mt-1 px-0.5 leading-snug">
+                Reset demo world + start clean session
+              </span>
+            </div>
           </div>
         </div>
       )}

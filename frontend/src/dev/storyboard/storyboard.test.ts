@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import realP0 from './fixtures/real-p0.json';
-import scriptedContinuation from './fixtures/scripted-continuation.json';
 import { createProjectionStore } from '../../state/store';
 import type { ProjectionEventMessage, SessionProjection } from '../../api/types';
 
@@ -23,13 +22,12 @@ const INITIAL_PROJECTION: SessionProjection = {
 };
 
 describe('Storyboard Fixtures and Playback', () => {
-  it('has 31 real P0 events and 10 scripted continuation events', () => {
+  it('has 31 real P0 events', () => {
     expect(realP0.events.length).toBe(31);
-    expect(scriptedContinuation.events.length).toBe(10);
-    expect(realP0.session_id).toBe(scriptedContinuation.session_id);
+    expect(realP0.session_id).toBe('01a1092a-21be-7e8a-bced-0584da056667');
   });
 
-  it('replays all 41 events continuously without gaps or errors', () => {
+  it('replays all 31 real P0 events continuously without gaps or errors', () => {
     const store = createProjectionStore();
     const sessionId = realP0.session_id;
 
@@ -43,10 +41,7 @@ describe('Storyboard Fixtures and Playback', () => {
     });
     expect(snapResult).toBe('SNAPSHOT_REPLACED');
 
-    const allEvents = [
-      ...realP0.events,
-      ...scriptedContinuation.events,
-    ] as unknown as ProjectionEventMessage[];
+    const allEvents = realP0.events as unknown as ProjectionEventMessage[];
 
     for (const event of allEvents) {
       const result = store.applyEvent(event);
@@ -54,20 +49,16 @@ describe('Storyboard Fixtures and Playback', () => {
     }
 
     const finalState = store.getState();
-    expect(finalState.lastAppliedSequence).toBe(41);
+    expect(finalState.lastAppliedSequence).toBe(31);
     expect(finalState.error).toBeNull();
     expect(finalState.stale).toBe(false);
 
-    // Verify final state properties
+    // Verify final state properties for P0 race
     const proj = finalState.projection;
     expect(proj).not.toBeNull();
     expect(proj?.intent?.active_revision?.values.requested_slot).toBe('2030-01-15T12:00:00+05:30');
     expect(proj?.divergences.length).toBe(1);
-    expect(proj?.divergences[0].state).toBe('RESOLVED');
+    expect(proj?.divergences[0].state).toBe('OPEN');
     expect(proj?.speech.length).toBeGreaterThan(0);
-
-    // Final speech is exact wording
-    const finalSpeech = proj?.speech[proj.speech.length - 1];
-    expect(finalSpeech?.rendered_text).toBe('Confirmed — your 12:00 appointment is booked.');
   });
 });

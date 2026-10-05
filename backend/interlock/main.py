@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 import json
 import re
@@ -396,6 +397,61 @@ class _Session:
                 self.session_id, context, "SpeechActProposed",
                 {"speech_act": speech.model_dump(mode="json")}, identity=speech.speech_id,
             ))
+            return
+
+        if event.event_type == "ClaimStateChanged":
+            to_state = event.payload.get("to_state")
+            if to_state == ClaimState.CONFIRMED.value:
+                claim_id = event.payload.get("claim_id")
+                claim = state.claims.get(claim_id)
+                if claim is not None and claim.predicate == "appointment_booked":
+                    active_intent = state.intents.get(state.active_intent_id) if state.active_intent_id else None
+                    active_rev_id = active_intent.active_revision_id if active_intent else None
+                    if claim.intent_revision_id == active_rev_id:
+                        unresolved = [
+                            d for d in state.divergences.values()
+                            if d.state in (
+                                DivergenceState.OPEN,
+                                DivergenceState.PLANNED,
+                                DivergenceState.RECONCILING,
+                                DivergenceState.ESCALATED,
+                            )
+                        ]
+                        if not unresolved:
+                            speech_id = _identity(claim.claim_id, "confirmed-speech")
+                            already_proposed = any(
+                                sp.speech_id == speech_id
+                                or (claim.claim_id in sp.claim_ids and sp.act_type == SpeechActType.RESULT)
+                                for sp in state.speech.values()
+                            )
+                            if not already_proposed:
+                                requested_slot = (
+                                    claim.object.get("requested_slot")
+                                    if isinstance(claim.object, dict)
+                                    else None
+                                )
+                                canonical_slot = (
+                                    claim.object.get("confirmed_slot")
+                                    or claim.object.get("requested_slot")
+                                    if isinstance(claim.object, dict)
+                                    else None
+                                )
+                                speech = SpeechAct(
+                                    speech_id=speech_id,
+                                    act_type=SpeechActType.RESULT,
+                                    template_id="tmpl_booking_confirmed",
+                                    slots={"slot": canonical_slot or "11:00"},
+                                    claim_ids=[claim.claim_id],
+                                    requested_certainty=ClaimCertainty.CONFIRMED,
+                                    state=SpeechState.PROPOSED,
+                                    created_by_event_id=event.event_id,
+                                )
+                                await self.journal.append(_candidate(
+                                    self.session_id, context, "SpeechActProposed",
+                                    {"speech_act": speech.model_dump(mode="json")},
+                                    identity=speech.speech_id,
+                                ))
+            return
 
     async def _propose_demo_claim(
         self, event: EventEnvelope, revision: IntentRevision, context: DispatchContext,
@@ -407,7 +463,10 @@ class _Session:
             claim_id=claim_id,
             predicate="appointment_booked",
             subject={"center_id": revision.values["center_id"]},
-            object={"requested_slot": revision.values["requested_slot"]},
+            object={
+                "requested_slot": revision.values["requested_slot"],
+                "operation_id": _identity(revision.revision_id, "appointment.book"),
+            },
             state=ClaimState.PROPOSED,
             required_evidence_rule="appointment_booked",
             supporting_evidence_ids=[],
@@ -478,6 +537,7 @@ class _Session:
             sequence=state.last_sequence, as_of=event.occurred_at,
             active_intent_revision_id=active.active_revision_id if active else None,
             plans=state.plans, divergences=state.divergences,
+            operations=state.operations,
         )
         if changes:
             change = changes[0]

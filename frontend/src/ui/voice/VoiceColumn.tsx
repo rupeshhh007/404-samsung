@@ -1,6 +1,4 @@
 import React, { useMemo, useState } from 'react';
-import { Eyebrow } from '../primitives/Eyebrow';
-import { Hairline } from '../primitives/Hairline';
 import { Transcript } from './Transcript';
 import { SuggestionChips } from './SuggestionChips';
 import { Composer } from './Composer';
@@ -25,13 +23,10 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
   onCancelSpeech,
   actionPending = false,
 }) => {
-  const [composerText, setComposerText] = useState('');
-
   const speechList = projection?.speech ?? [];
   const allClaims = projection?.claims ?? [];
-  const allEvidence = projection?.evidence ?? [];
 
-  // Interleave user prompts and speech chronologically by sequence
+  // Interleave user prompts and speech chronologically
   const transcriptItems = useMemo(() => {
     return mergeTranscript(userPrompts, speechList);
   }, [userPrompts, speechList]);
@@ -47,21 +42,28 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
     );
     if (revisionClaims.length === 0) return null;
 
-    // Check if there is an emitted RESULT speech after these claims
+    const targetClaim = revisionClaims[0];
+    if (!targetClaim) return null;
+
+    // Only suppress pending claim if an emitted RESULT references that exact claim or current revision
     const hasEmittedResult = speechList.some(
-      (s) => s.act_type === 'RESULT' && s.state === 'EMITTED',
+      (s) =>
+        s.act_type === 'RESULT' &&
+        (s.state === 'EMITTED' || s.state === 'APPROVED' || s.state === 'QUEUED' || s.state === 'EMITTING') &&
+        (s.claim_ids.includes(targetClaim.claim_id) ||
+          allClaims.some((c) => c.intent_revision_id === revId && s.claim_ids.includes(c.claim_id))),
     );
     if (hasEmittedResult) return null;
 
-    return revisionClaims[0] ?? null;
+    return targetClaim;
   }, [projection, allClaims, speechList]);
 
-  // Barge-in active when assistant speech is queued or emitting
+  // Barge-in active when assistant speech is emitting
   const emittingSpeech = useMemo(() => {
     return speechList.find((s) => s.state === 'EMITTING' || s.state === 'QUEUED') ?? null;
   }, [speechList]);
 
-  // Interrupt flight check for suggestions
+  // Interrupt flight check for quick suggestion prompt
   const hasInterruptableFlight = useMemo(() => {
     const ops = projection?.operations ?? [];
     return ops.some(
@@ -73,52 +75,36 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
 
   return (
     <section
-      aria-label="Agent Conversation and Voice"
-      className="flex flex-col h-full bg-ink-900 border border-ink-600 p-4 min-w-0"
+      aria-label="Conversation"
+      className="flex flex-col h-full bg-ink-950/70 p-4 sm:p-6 min-w-0 select-text"
     >
-      {/* Header */}
-      <div className="flex items-center justify-between pb-3">
-        <div className="flex items-center gap-2">
-          <Eyebrow>THE VOICE</Eyebrow>
-          <span className="font-mono text-[10px] text-bone-600">
-            [{transcriptItems.length} MESSAGES]
-          </span>
-        </div>
-        <span className="font-mono text-[10px] text-bone-500 uppercase">
-          STAGE: {stage}
-        </span>
-      </div>
-
-      <Hairline className="mb-3" />
-
       {/* Transcript feed */}
       <Transcript
         items={transcriptItems}
-        allClaims={allClaims}
-        allEvidence={allEvidence}
         pendingClaim={pendingClaim}
         onRetryUserPrompt={(text) => onSendText(text)}
       />
 
-      {/* Bottom docked composer area */}
-      <div className="pt-3 flex-shrink-0">
+      {/* Suggested Quick Prompts */}
+      <div className="pt-2">
         <SuggestionChips
           stage={stage}
-          onSelect={(text) => setComposerText(text)}
           hasInterruptableFlight={hasInterruptableFlight}
+          onSelect={(text) => onSendText(text)}
         />
+      </div>
 
+      {/* Input Composer */}
+      <div className="pt-2">
         <Composer
-          disabled={actionPending || stage === 'NO_SESSION'}
-          onSend={onSendText}
-          canBargeIn={emittingSpeech !== null}
+          disabled={actionPending}
+          onSend={(text) => onSendText(text)}
+          canBargeIn={!!emittingSpeech}
           onBargeIn={() => {
             if (emittingSpeech && onCancelSpeech) {
               onCancelSpeech(emittingSpeech.speech_id);
             }
           }}
-          initialText={composerText}
-          onTextChange={setComposerText}
         />
       </div>
     </section>

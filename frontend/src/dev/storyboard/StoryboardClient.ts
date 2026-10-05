@@ -2,7 +2,6 @@ import type { ProjectionStore } from '../../state/store';
 import type { ProjectionEventMessage, SessionProjection } from '../../api/types';
 import type { UserPromptEntry } from '../../ui/viewmodel/transcript';
 import realP0 from './fixtures/real-p0.json';
-import scriptedContinuation from './fixtures/scripted-continuation.json';
 
 const INITIAL_PROJECTION: SessionProjection = {
   intent: null,
@@ -35,10 +34,7 @@ export class StoryboardClient {
   constructor(store: ProjectionStore) {
     this.store = store;
     this.sessionId = realP0.session_id;
-    this.events = [
-      ...realP0.events,
-      ...scriptedContinuation.events,
-    ] as unknown as ProjectionEventMessage[];
+    this.events = realP0.events as unknown as ProjectionEventMessage[];
   }
 
   public init(startSequence = 0): void {
@@ -75,7 +71,7 @@ export class StoryboardClient {
   }
 
   public getIsScriptedContinuation(): boolean {
-    return this.currentSequence >= 32;
+    return false;
   }
 
   public getUserPrompts(): readonly UserPromptEntry[] {

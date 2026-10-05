@@ -35,6 +35,7 @@ from interlock.domain.models import (
     DivergenceCase,
     EffectRecord,
     EvidenceRecord,
+    OperationRecord,
     PlanStep,
     ReconciliationPlan,
     SessionState,
@@ -495,6 +496,7 @@ def _evaluate_appointment_booked(
     plans: Mapping[str, ReconciliationPlan] | None = None,
     divergences: Mapping[str, DivergenceCase] | None = None,
     active_plan_id: str | None = None,
+    operations: Mapping[str, OperationRecord] | None = None,
 ) -> tuple[ClaimState, list[str], str]:
     # Reconciliation check (Blocker #3 & Strict Reconciliation Proof):
     is_reconciliation = bool(
@@ -827,6 +829,26 @@ def _evaluate_appointment_booked(
     desired_req_id = params.get("provider_request_id")
     desired_booking_id = params.get("provider_booking_id")
     desired_op_id = params.get("operation_id")
+
+    # Canonical linkage: if desired_req_id is missing, attempt resolution from operations
+    if not desired_req_id and operations:
+        target_op = None
+        if desired_op_id and desired_op_id in operations:
+            target_op = operations[desired_op_id]
+        elif claim.intent_revision_id:
+            for op in operations.values():
+                if op.intent_revision_id == claim.intent_revision_id and op.tool_name == "appointment.book":
+                    target_op = op
+                    break
+        if target_op is not None:
+            if target_op.provider_request_id:
+                desired_req_id = target_op.provider_request_id
+                params = {**params, "provider_request_id": desired_req_id}
+            if desired_op_id is None:
+                desired_op_id = target_op.operation_id
+                params = {**params, "operation_id": desired_op_id}
+            if "logical_action_id" not in params and target_op.logical_action_id:
+                params = {**params, "logical_action_id": target_op.logical_action_id}
 
     # Blocker #4: Required claim identity completeness check
     if not desired_booking_id and not desired_req_id:
@@ -1355,6 +1377,7 @@ class ClaimEvaluator:
         active_intent_revision_id: str | None = None,
         plans: Mapping[str, ReconciliationPlan] | Sequence[ReconciliationPlan] | None = None,
         divergences: Mapping[str, DivergenceCase] | Sequence[DivergenceCase] | None = None,
+        operations: Mapping[str, OperationRecord] | Sequence[OperationRecord] | None = None,
         **kwargs: Any,
     ) -> tuple[ClaimStateChanged, ...]:
         """Evaluate a ClaimRecord against world effects, evidence snapshots, and reconciliation context.
@@ -1459,6 +1482,19 @@ class ClaimEvaluator:
             elif isinstance(divergences, Sequence):
                 divergences_map.update({d.divergence_id: d for d in divergences if hasattr(d, "divergence_id")})
 
+        operations_map: dict[str, OperationRecord] = {}
+        if operations is not None:
+            if isinstance(operations, Mapping):
+                operations_map.update({k: v for k, v in operations.items() if hasattr(v, "operation_id") or isinstance(v, OperationRecord)})
+            elif isinstance(operations, Sequence):
+                operations_map.update({op.operation_id: op for op in operations if hasattr(op, "operation_id")})
+        elif "operations" in kwargs:
+            raw_ops = kwargs["operations"]
+            if isinstance(raw_ops, Mapping):
+                operations_map.update({k: v for k, v in raw_ops.items() if hasattr(v, "operation_id") or isinstance(v, OperationRecord)})
+            elif isinstance(raw_ops, Sequence):
+                operations_map.update({op.operation_id: op for op in raw_ops if hasattr(op, "operation_id")})
+
         session_state = kwargs.get("state") or kwargs.get("session_state")
         for arg in args:
             if isinstance(arg, SessionState) or (hasattr(arg, "plans") and hasattr(arg, "divergences")):
@@ -1469,6 +1505,10 @@ class ClaimEvaluator:
                 plans_map.update(session_state.plans)
             if hasattr(session_state, "divergences") and isinstance(session_state.divergences, Mapping):
                 divergences_map.update(session_state.divergences)
+            if hasattr(session_state, "operations") and isinstance(session_state.operations, Mapping):
+                for k, v in session_state.operations.items():
+                    if k not in operations_map:
+                        operations_map[k] = v
 
         if "plans" in kwargs and isinstance(kwargs["plans"], Mapping):
             plans_map.update(kwargs["plans"])
@@ -1501,6 +1541,7 @@ class ClaimEvaluator:
                 plans=plans_map if plans_map else None,
                 divergences=divergences_map if divergences_map else None,
                 active_plan_id=active_plan_id,
+                operations=operations_map if operations_map else None,
             )
         elif rule_name == RULE_APPOINTMENT_CANCELLED:
             target_state, eids, reason = _evaluate_appointment_cancelled(
@@ -1538,6 +1579,7 @@ class ClaimEvaluator:
         active_intent_revision_id: str | None = None,
         plans: Mapping[str, ReconciliationPlan] | Sequence[ReconciliationPlan] | None = None,
         divergences: Mapping[str, DivergenceCase] | Sequence[DivergenceCase] | None = None,
+        operations: Mapping[str, OperationRecord] | Sequence[OperationRecord] | None = None,
         **kwargs: Any,
     ) -> tuple[ClaimStateChanged, ...]:
         """Evaluate multiple claims and collect state-change events deterministically."""
@@ -1555,6 +1597,7 @@ class ClaimEvaluator:
                     active_intent_revision_id=active_intent_revision_id,
                     plans=plans,
                     divergences=divergences,
+                    operations=operations,
                     **kwargs,
                 )
             )

@@ -623,3 +623,251 @@ def test_ext001_demo_reset_clears_provider_state_and_allows_rebooking() -> None:
         await host.hub.shutdown()
 
     run(scenario())
+
+
+def test_normal_booking_claim_confirmed_with_canonical_evidence_and_truth_gated_speech() -> None:
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        application = host.application
+        session_id = "normal-booking-p0-regression"
+        await application.start_session(session_id)
+        try:
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+
+            # Wait for operation to execute and settle
+            await asyncio.sleep(0.15)
+            await application.drain(session_id)
+
+            state = application.snapshot(session_id)
+            active_node = state.intents.get(state.active_intent_id)
+            assert active_node is not None
+            active_rev = state.revisions.get(active_node.active_revision_id)
+            assert active_rev is not None
+            assert active_rev.values["requested_slot"] == "2030-01-15T11:00:00+05:30"
+
+            # 1. Operation SUCCEEDED
+            assert any(
+                op.tool_name == "appointment.book" and op.state == OperationState.SUCCEEDED
+                for op in state.operations.values()
+            )
+
+            # 2. Authoritative COMMITTED effect exists for exact 11
+            effects = [
+                eff for eff in state.effects.values()
+                if eff.effect_type == "appointment.booking"
+                and eff.state == "COMMITTED"
+                and eff.authority == "AUTHORITATIVE"
+                and eff.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+            ]
+            assert len(effects) >= 1
+
+            # 3. appointment_booked claim for active revision becomes CONFIRMED with canonical evidence
+            active_claims = [
+                claim for claim in state.claims.values()
+                if claim.intent_revision_id == active_rev.revision_id
+                and claim.predicate == "appointment_booked"
+            ]
+            assert len(active_claims) == 1
+            claim = active_claims[0]
+            assert claim.state == "CONFIRMED"
+            assert len(claim.supporting_evidence_ids) > 0
+            assert all(eid in state.evidence for eid in claim.supporting_evidence_ids)
+
+            # 4. TRUTHLOCK-approved RESULT speech exists with exact template wording
+            result_speeches = [
+                s for s in state.speech.values()
+                if s.act_type == "RESULT" and claim.claim_id in s.claim_ids
+            ]
+            assert len(result_speeches) == 1
+            speech = result_speeches[0]
+            assert speech.state in ("APPROVED", "QUEUED", "EMITTING", "EMITTED")
+            assert speech.rendered_text == "Confirmed — your 11:00 appointment is booked."
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())
+
+
+def test_race_11_to_12_never_produces_confirmed_12_speech() -> None:
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        application = host.application
+        session_id = "race-11-12-regression"
+        await application.start_session(session_id)
+        try:
+            # 1. User requests 11:00
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+
+            # 2. Interruption with 12:00 arrives
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-12",
+                    "modality": "text",
+                    "content_ref": "Actually, make it 12:00.",
+                },
+                correlation_id="input-12",
+                dedupe_key="test:input-12",
+            ))
+
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+
+            state = application.snapshot(session_id)
+            active_node = state.intents.get(state.active_intent_id)
+            assert active_node is not None
+            active_rev = state.revisions.get(active_node.active_revision_id)
+            assert active_rev is not None
+            assert active_rev.values["requested_slot"] == "2030-01-15T12:00:00+05:30"
+
+            # Claim for 12:00 must NEVER be CONFIRMED without 12:00 evidence
+            claim_12 = [
+                c for c in state.claims.values()
+                if c.intent_revision_id == active_rev.revision_id
+                and c.predicate == "appointment_booked"
+            ]
+            assert len(claim_12) == 1
+            assert claim_12[0].state == "PENDING"
+
+            # No speech asserting 12:00 confirmed can exist
+            confirmed_12_speeches = [
+                s for s in state.speech.values()
+                if s.act_type == "RESULT" and "12:00" in (s.rendered_text or "")
+            ]
+            assert len(confirmed_12_speeches) == 0
+
+            # Active divergence exists
+            assert len(state.divergences) >= 1
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())
+
+
+def test_claims_match_slot_strict_canonical_equality() -> None:
+    from interlock.truth.claims import _match_slot, ClaimEvaluator
+    from interlock.domain.models import ClaimRecord, EffectRecord
+    from interlock.domain.enums import ClaimState, EffectState, EvidenceAuthority
+
+    # 1. Bare time string "11:00" must NEVER match full ISO datetime
+    assert not _match_slot("11:00", "2030-01-15T11:00:00+05:30")
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "11:00")
+
+    # 2. Same time-of-day on a different date must NEVER match
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "2030-01-16T11:00:00+05:30")
+    assert not _match_slot("2030-01-16T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+
+    # 3. Same time-of-day on a different timezone offset must NEVER match (different instant)
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00+00:00")
+    assert not _match_slot("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00-05:00")
+
+    # 4. Offset-naive vs offset-aware must fail closed
+    assert not _match_slot("2030-01-15T11:00:00", "2030-01-15T11:00:00+05:30")
+
+    # 5. Positive canonical controls
+    assert _match_slot("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+    assert _match_slot("2030-01-15T05:30:00Z", "2030-01-15T11:00:00+05:30")
+
+    # 6. Integration: ClaimEvaluator must NOT confirm a claim when world effect has same time on different date
+    evaluator = ClaimEvaluator()
+    claim = ClaimRecord(
+        claim_id="claim-test-slot-mismatch",
+        predicate="appointment_booked",
+        subject={"center_id": "center-1"},
+        object={
+            "requested_slot": "2030-01-15T11:00:00+05:30",
+            "provider_booking_id": "booking-99",
+        },
+        state=ClaimState.PROPOSED,
+        required_evidence_rule="appointment_booked",
+        intent_revision_id="rev-1",
+        updated_by_event_id="ev-1",
+    )
+    from datetime import datetime, timezone
+
+    mismatched_effect = EffectRecord(
+        effect_id="eff-slot-mismatch",
+        operation_id="op-1",
+        logical_action_id="action-1",
+        provider_effect_id="prov-eff-1",
+        effect_type="appointment.booking",
+        subject={"center_id": "center-1"},
+        parameters={
+            "confirmed_slot": "2030-01-16T11:00:00+05:30",
+            "provider_booking_id": "booking-99",
+        },
+        state=EffectState.COMMITTED,
+        observed_at=datetime(2030, 1, 16, 11, 0, tzinfo=timezone.utc),
+        authority=EvidenceAuthority.AUTHORITATIVE,
+        evidence_ids=["ev-1"],
+    )
+    events = evaluator.evaluate(
+        claim,
+        effects={"eff-slot-mismatch": mismatched_effect},
+        evidence={},
+        active_intent_revision_id="rev-1",
+    )
+    assert not any(event.to_state in (ClaimState.CONFIRMED, "CONFIRMED") for event in events)
+    assert any(event.to_state in (ClaimState.PENDING, "PENDING") for event in events)
+
+
+def test_truthlock_controlled_template_slot_formatting_and_identity() -> None:
+    from interlock.truth.truthlock import (
+        _format_display_slot,
+        _speech_slot_matches_claim,
+        _render_template,
+        CONTROLLED_TEMPLATES,
+    )
+
+    # 1. Format canonical ISO slot to human display time
+    assert _format_display_slot("2030-01-15T11:00:00+05:30") == "11:00"
+    assert _format_display_slot("11:00") == "11:00"
+
+    # 2. Speech slot validation accepts canonical identity or display time matching approved claim
+    assert _speech_slot_matches_claim("2030-01-15T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+    assert _speech_slot_matches_claim("11:00", "2030-01-15T11:00:00+05:30")
+    assert not _speech_slot_matches_claim("12:00", "2030-01-15T11:00:00+05:30")
+    assert not _speech_slot_matches_claim("2030-01-16T11:00:00+05:30", "2030-01-15T11:00:00+05:30")
+
+    # 3. Controlled template renders approved slot formatted for display
+    tmpl = CONTROLLED_TEMPLATES["tmpl_booking_confirmed"]
+    rendered = _render_template(tmpl, {"slot": "2030-01-15T11:00:00+05:30"}, supported_slot="2030-01-15T11:00:00+05:30")
+    assert rendered == "Confirmed — your 11:00 appointment is booked."

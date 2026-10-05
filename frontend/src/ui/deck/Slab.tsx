@@ -80,17 +80,17 @@ export const Slab: React.FC<SlabProps> = ({
       </div>
 
       {/* Giant Numerals Display */}
-      <div className="py-4 z-10 flex flex-col items-start justify-center">
-        <div className="flex items-baseline gap-2">
+      <div className="py-4 z-10 flex flex-col items-start justify-center min-w-0">
+        <div className="flex items-baseline gap-2 flex-wrap">
           <span
-            className={`font-display font-extrabold tabular text-[clamp(48px,5vw,96px)] leading-none ${
+            className={`font-display font-extrabold tabular text-[clamp(32px,3.8vw,64px)] tracking-tight leading-none ${
               isUnknown ? 'text-bone-600 tracking-wider' : 'text-bone-50'
             }`}
           >
             {slotParts.numerals}
           </span>
           {slotParts.meridiem && (
-            <span className="font-display font-bold text-lg md:text-2xl text-bone-500">
+            <span className="font-display font-bold text-base md:text-xl text-bone-500">
               {slotParts.meridiem}
             </span>
           )}
