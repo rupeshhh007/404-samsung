@@ -3,28 +3,80 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from importlib.metadata import version
 from typing import Any, Callable
 
 import pytest
 
-from interlock.adapters.livekit_agent import LiveKitSessionAdapter
+from interlock.adapters.livekit_agent import (
+    LiveKitSessionAdapter, VoiceProviders, compose_voice_room, run_livekit_voice_agent,
+)
 from interlock.config import Settings
 from interlock.domain.enums import (
     Authorization,
     ClaimCertainty,
+    ClaimState,
     EventSource,
     IntentMaturity,
     SpeechActType,
     SpeechState,
+    RuntimeMode,
 )
-from interlock.domain.models import IntentRevision, SpeechAct
+from interlock.domain.models import ClaimRecord, EventEnvelope, IntentRevision, SessionState, SpeechAct
 from interlock.main import Application, RuntimeDependencies
+from interlock.runtime.commands import RequestSpeechCorrection
 from interlock.runtime.journal import EventCandidate
+from interlock.runtime.reducer import Reducer
+from interlock.truth.speech import CorrectionPolicy, validate_correction_proposal
 
 
 def test_verified_livekit_agents_version_is_installed() -> None:
     assert version("livekit-agents") == "1.8.4"
+
+
+def test_normal_voice_composition_is_isolated_and_has_no_livekit_llm_or_tools(monkeypatch: Any) -> None:
+    import interlock.adapters.livekit_agent as voice
+
+    sessions: list[Any] = []
+    agents: list[Any] = []
+
+    def session_factory(**kwargs: Any) -> Any:
+        sessions.append(kwargs)
+        return FakeAgentSession()
+
+    def agent_factory(**kwargs: Any) -> Any:
+        agents.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(voice, "AgentSession", session_factory)
+    monkeypatch.setattr(voice, "Agent", agent_factory)
+    stt, tts = object(), object()
+    providers = VoiceProviders(stt=stt, tts=tts, dependencies=RuntimeDependencies())
+    settings = Settings(INTERLOCK_MODE="TEST")
+    first_session, first_adapter, first_agent = compose_voice_room("room-1", providers, settings=settings)
+    second_session, second_adapter, second_agent = compose_voice_room("room-2", providers, settings=settings)
+
+    assert first_session is not second_session
+    assert first_adapter.application is not second_adapter.application
+    assert first_adapter.session_id == "room-1"
+    assert second_adapter.session_id == "room-2"
+    assert first_adapter.application.dependencies.output is first_adapter
+    assert second_adapter.application.dependencies.output is second_adapter
+    assert first_agent is not second_agent
+    assert all(item == {"stt": stt, "tts": tts, "vad": None, "llm": None} for item in sessions)
+    assert all(item["llm"] is None and item["tools"] == [] for item in agents)
+
+
+def test_normal_voice_worker_fails_closed_without_transport_config(monkeypatch: Any) -> None:
+    for name in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(RuntimeError, match="LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET"):
+        run_livekit_voice_agent(lambda _ctx: VoiceProviders(object(), object(), RuntimeDependencies()),
+                                settings=Settings(INTERLOCK_MODE="LIVE"))
+    with pytest.raises(ValueError, match="explicit STT and TTS"):
+        compose_voice_room("room", VoiceProviders(None, object(), RuntimeDependencies()),
+                           settings=Settings(INTERLOCK_MODE="TEST"))
 
 
 class FakeSpeechHandle:
@@ -215,7 +267,7 @@ def test_final_correction_commits_active_arguments_once() -> None:
             transcript="actually make it 12:00",
             final=True,
             item_id="turn-2",
-            created_at=2.0,
+            created_at=2.1,
         )
         await adapter.application.drain(adapter.session_id)
         state = adapter.application.snapshot(adapter.session_id)
@@ -225,6 +277,68 @@ def test_final_correction_commits_active_arguments_once() -> None:
         assert len(state.intents["intent-1"].revisions) == 2
         await adapter.close()
 
+    asyncio.run(case())
+
+
+def test_evolving_partials_keep_original_text_and_one_final_identity() -> None:
+    async def case() -> None:
+        adapter, livekit = await _adapter()
+        first = await adapter.accept_transcript(
+            transcript="book eleven", final=False, item_id="utterance-1", created_at=1.0,
+        )
+        repeated = await adapter.accept_transcript(
+            transcript="book eleven", final=False, item_id="utterance-1", created_at=1.1,
+        )
+        corrected = await adapter.accept_transcript(
+            transcript="book twelve", final=False, item_id="utterance-1", created_at=1.2,
+        )
+        final = await adapter.accept_transcript(
+            transcript="book twelve please", final=True, item_id="utterance-1", created_at=1.3,
+        )
+        duplicate_final = await adapter.accept_transcript(
+            transcript="book twelve please", final=True, item_id="utterance-1", created_at=1.4,
+        )
+        await adapter.application.drain(adapter.session_id)
+        assert repeated.event_id == first.event_id
+        assert duplicate_final.event_id == final.event_id
+        events = [event for event in adapter.application.events(adapter.session_id)
+                  if event.event_type == "TranscriptHypothesisObserved"]
+        assert [(event.payload["text"], event.payload["final"]) for event in events] == [
+            ("book eleven", False), ("book twelve", False),
+            ("book twelve please", True),
+        ]
+        assert len({event.payload["evidence_id"] for event in events}) == 3
+        assert not any(event.event_type in {"IntentAuthorizationChanged", "ToolDispatchRequested"}
+                       for event in adapter.application.events(adapter.session_id))
+        for _ in range(4):
+            if not adapter._output_origins:
+                break
+            for handle in livekit.handles:
+                handle.finish()
+            await asyncio.sleep(0)
+            await adapter.application.drain(adapter.session_id)
+        await adapter.close()
+    asyncio.run(case())
+
+
+def test_empty_transcript_is_not_journaled_or_fatal_to_live_intake() -> None:
+    async def case() -> None:
+        adapter, livekit = await _adapter()
+        with pytest.raises(ValueError, match="speech text"):
+            await adapter.accept_transcript(transcript=" \t ", final=True, item_id="empty")
+        listener = livekit.listeners["user_input_transcribed"][0]
+        listener(type("TranscriptEvent", (), {
+            "transcript": "  ", "is_final": True, "item_id": "empty", "created_at": 1.0,
+        })())
+        assert adapter.application.snapshot(adapter.session_id).last_sequence == 1
+        assert adapter.callback_failures() == ()
+        assert adapter._accepting
+        accepted = await adapter.accept_transcript(
+            transcript="okay", final=True, item_id="next", created_at=2.0,
+        )
+        assert accepted.event_type == "TranscriptHypothesisObserved"
+        await adapter.application.drain(adapter.session_id)
+        await adapter.close()
     asyncio.run(case())
 
 
@@ -258,8 +372,12 @@ def test_barge_in_cancels_speech_without_cancelling_slow_work() -> None:
         slow_work = asyncio.create_task(asyncio.Event().wait())
         await _queue_progress(adapter)
         accepted = await adapter.request_barge_in()
+        repeated = await adapter.request_barge_in()
         await adapter.application.drain(adapter.session_id)
         assert accepted and livekit.handles[0].interrupted
+        assert repeated and repeated[0].event_id == accepted[0].event_id
+        assert len([event for event in adapter.application.events(adapter.session_id)
+                    if event.event_type == "SpeechCancellationRequested"]) == 1
         assert not slow_work.done()
         assert not any(
             event.event_type == "CancellationRequested"
@@ -281,6 +399,44 @@ def test_barge_in_cancels_speech_without_cancelling_slow_work() -> None:
     asyncio.run(case())
 
 
+def test_ambiguous_playout_failure_neither_invents_unheard_nor_retries() -> None:
+    async def case() -> None:
+        class FailedHandle(FakeSpeechHandle):
+            async def wait_for_playout(self) -> None:
+                await self._done.wait()
+                raise RuntimeError("transport status is ambiguous")
+
+            def exception(self) -> RuntimeError:
+                return RuntimeError("transport status is ambiguous")
+
+        class FailedSession(FakeAgentSession):
+            def say(self, text: str, *, allow_interruptions: bool, add_to_chat_ctx: bool):
+                self.spoken.append((text, allow_interruptions, add_to_chat_ctx))
+                handle = FailedHandle()
+                self.handles.append(handle)
+                return handle
+
+        livekit = FailedSession()
+        adapter = LiveKitSessionAdapter(
+            livekit, session_id="ambiguous-output", application_factory=_factory(),
+        )
+        await adapter.start()
+        await _queue_progress(adapter)
+        livekit.handles[0].finish()
+        await asyncio.sleep(0)
+        await adapter.application.drain(adapter.session_id)
+        assert len(livekit.spoken) == 1
+        assert not any(event.event_type in {"SpeechEmissionFinished", "SpeechEmissionFailed"}
+                       for event in adapter.application.events(adapter.session_id))
+        with pytest.raises(RuntimeError, match="terminal status is unresolved"):
+            await adapter.close()
+        await adapter.output_failed(
+            speech_id="speech-1", error_code="LIVEKIT_OBSERVED_FAILURE", heard=True,
+        )
+        await adapter.close()
+    asyncio.run(case())
+
+
 def test_approved_output_is_exact_and_safe_progress_precedes_slow_completion() -> None:
     async def case() -> None:
         adapter, livekit = await _adapter()
@@ -299,6 +455,71 @@ def test_approved_output_is_exact_and_safe_progress_precedes_slow_completion() -
         await adapter.close()
 
     asyncio.run(case())
+
+
+def test_livekit_speaks_exact_persisted_truthlock_text() -> None:
+    async def case() -> None:
+        adapter, livekit = await _adapter()
+        speech = SpeechAct(
+            speech_id="truthlock-progress", act_type=SpeechActType.PROGRESS,
+            template_id="tmpl_checking", requested_certainty=ClaimCertainty.PROGRESS,
+            state=SpeechState.PROPOSED, created_by_event_id="test",
+        )
+        await _append(adapter, "SpeechActProposed", {
+            "speech_act": speech.model_dump(mode="json"),
+        })
+        await adapter.application.drain(adapter.session_id)
+        persisted = adapter.application.snapshot(adapter.session_id).speech[speech.speech_id]
+        assert persisted.approved_policy_id == "truthlock.v1"
+        assert persisted.rendered_text
+        assert livekit.spoken == [(persisted.rendered_text, True, False)]
+        assert [event.event_type for event in adapter.application.events(adapter.session_id)
+                if event.payload.get("speech_id") == speech.speech_id][-3:] == [
+                    "SpeechActApproved", "SpeechQueued", "SpeechEmissionStarted",
+                ]
+        livekit.handles[0].finish()
+        await asyncio.sleep(0)
+        await adapter.application.drain(adapter.session_id)
+        assert adapter.application.snapshot(adapter.session_id).speech[speech.speech_id].heard is True
+        await adapter.close()
+    asyncio.run(case())
+
+
+def test_heard_claim_invalidation_preserves_history_and_proposes_truth_gated_correction() -> None:
+    claim = ClaimRecord(
+        claim_id="booking", predicate="appointment_booked", state=ClaimState.CONFIRMED,
+        required_evidence_rule="appointment_booked", supporting_evidence_ids=["provider-proof"],
+        intent_revision_id="revision", updated_by_event_id="confirmed-event",
+    )
+    prior = SpeechAct(
+        speech_id="prior", act_type=SpeechActType.RESULT, template_id="tmpl_booked",
+        claim_ids=[claim.claim_id], requested_certainty=ClaimCertainty.CONFIRMED,
+        state=SpeechState.EMITTED, created_by_event_id="proposal-event",
+        rendered_text="The appointment is booked.", approved_policy_id="truthlock.v1",
+        approved_through_sequence=1,
+        approved_claim_versions={claim.claim_id: claim.updated_by_event_id}, heard=True,
+    )
+    state = SessionState(session_id="room", last_sequence=1,
+                         claims={claim.claim_id: claim}, speech={prior.speech_id: prior})
+    invalidation = EventEnvelope(
+        event_id="invalidation", session_id="room", sequence=2,
+        event_type="ClaimStateChanged", source=EventSource.POLICY,
+        occurred_at=datetime(2030, 1, 1, tzinfo=timezone.utc), logical_time=2,
+        payload={"claim_id": claim.claim_id, "from_state": "CONFIRMED", "to_state": "STALE",
+                 "evidence_ids": []},
+    )
+    changed, commands = Reducer.reduce(state, invalidation, RuntimeMode.TEST)
+    assert changed is not None
+    assert changed.speech[prior.speech_id].state == SpeechState.CORRECTION_REQUIRED
+    assert changed.speech[prior.speech_id].heard is True
+    assert changed.speech[prior.speech_id].rendered_text == prior.rendered_text
+    requests = [command for command in commands if isinstance(command, RequestSpeechCorrection)]
+    assert len(requests) == 1
+    proposal = CorrectionPolicy().propose(requests[0], changed, correction_speech_id="correction")
+    assert proposal is not None
+    assert proposal.speech_act.act_type == SpeechActType.CORRECTION
+    assert proposal.speech_act.supersedes_speech_id == prior.speech_id
+    assert validate_correction_proposal(proposal, changed) is None
 
 
 def test_new_input_remains_responsive_while_background_work_is_pending() -> None:

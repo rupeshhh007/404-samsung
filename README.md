@@ -24,6 +24,8 @@ The updated Theme 05 competition target is a **voice-native LiveKit agent evalua
 
 The core runtime foundation is under development. The LiveKit/FDB-v3 adapter and one-command official evaluator path are implemented, but a real run still requires the separately distributed official dataset, LiveKit credentials, and model-provider credentials. No benchmark score is claimed by this repository; only artifacts produced by an actual evaluator run are results.
 
+The normal LiveKit worker composition is available through `run_livekit_voice_agent(provider_factory, settings=...)` in `backend/interlock/adapters/livekit_agent.py`. A deployment must supply fresh STT/TTS providers and INTERLOCK inward ports per room, plus LiveKit credentials; no vendor is selected by the core adapter. Credential-free construction is tested, but a credentialed room-to-audio run has not been verified. The browser voice column remains text-based because the backend has no secure room/token endpoint for microphone access.
+
 ### Implemented
 
 - **RUN-001 — Event Journal / Session Runtime**
