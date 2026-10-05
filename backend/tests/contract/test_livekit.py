@@ -8,7 +8,9 @@ from typing import Any, Callable
 
 import pytest
 
-from interlock.adapters.livekit_agent import LiveKitSessionAdapter
+from interlock.adapters.livekit_agent import (
+    LiveKitSessionAdapter, VoiceProviders, compose_voice_room, run_livekit_voice_agent,
+)
 from interlock.config import Settings
 from interlock.domain.enums import (
     Authorization,
@@ -25,6 +27,50 @@ from interlock.runtime.journal import EventCandidate
 
 def test_verified_livekit_agents_version_is_installed() -> None:
     assert version("livekit-agents") == "1.8.4"
+
+
+def test_normal_voice_composition_is_isolated_and_has_no_livekit_llm_or_tools(monkeypatch: Any) -> None:
+    import interlock.adapters.livekit_agent as voice
+
+    sessions: list[Any] = []
+    agents: list[Any] = []
+
+    def session_factory(**kwargs: Any) -> Any:
+        sessions.append(kwargs)
+        return FakeAgentSession()
+
+    def agent_factory(**kwargs: Any) -> Any:
+        agents.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(voice, "AgentSession", session_factory)
+    monkeypatch.setattr(voice, "Agent", agent_factory)
+    stt, tts = object(), object()
+    providers = VoiceProviders(stt=stt, tts=tts, dependencies=RuntimeDependencies())
+    settings = Settings(INTERLOCK_MODE="TEST")
+    first_session, first_adapter, first_agent = compose_voice_room("room-1", providers, settings=settings)
+    second_session, second_adapter, second_agent = compose_voice_room("room-2", providers, settings=settings)
+
+    assert first_session is not second_session
+    assert first_adapter.application is not second_adapter.application
+    assert first_adapter.session_id == "room-1"
+    assert second_adapter.session_id == "room-2"
+    assert first_adapter.application.dependencies.output is first_adapter
+    assert second_adapter.application.dependencies.output is second_adapter
+    assert first_agent is not second_agent
+    assert all(item == {"stt": stt, "tts": tts, "vad": None, "llm": None} for item in sessions)
+    assert all(item["llm"] is None and item["tools"] == [] for item in agents)
+
+
+def test_normal_voice_worker_fails_closed_without_transport_config(monkeypatch: Any) -> None:
+    for name in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(RuntimeError, match="LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET"):
+        run_livekit_voice_agent(lambda _ctx: VoiceProviders(object(), object(), RuntimeDependencies()),
+                                settings=Settings(INTERLOCK_MODE="LIVE"))
+    with pytest.raises(ValueError, match="explicit STT and TTS"):
+        compose_voice_room("room", VoiceProviders(None, object(), RuntimeDependencies()),
+                           settings=Settings(INTERLOCK_MODE="TEST"))
 
 
 class FakeSpeechHandle:

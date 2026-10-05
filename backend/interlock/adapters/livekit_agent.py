@@ -8,13 +8,15 @@ text, and delegates every authoritative transition to ``Application``.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from time import monotonic_ns
 from typing import Any, Protocol, cast
 
-from livekit.agents import AgentSession, UserInputTranscribedEvent, UserStateChangedEvent
+from livekit.agents import Agent, AgentServer, AgentSession, UserInputTranscribedEvent, UserStateChangedEvent
 from livekit.agents.voice import SpeechHandle
 
 from interlock.config import Settings
@@ -42,6 +44,74 @@ class _LiveKitSession(Protocol):
 
 
 ApplicationFactory = Callable[[OutputPort], Application]
+
+
+@dataclass(frozen=True)
+class VoiceProviders:
+    """Per-room provider ports supplied by deployment, never by LiveKit policy."""
+
+    stt: Any
+    tts: Any
+    dependencies: RuntimeDependencies
+    vad: Any = None
+
+
+def compose_voice_room(
+    session_id: str, providers: VoiceProviders, *, settings: Settings
+) -> tuple[AgentSession[Any], LiveKitSessionAdapter, Agent]:
+    """Create one transport and one authoritative INTERLOCK session per room.
+
+    LiveKit has no LLM or tools here: transcript interpretation and all output
+    decisions belong to INTERLOCK; LiveKit only transcribes and plays exact text.
+    """
+
+    if providers.stt is None or providers.tts is None:
+        raise ValueError("voice deployment requires explicit STT and TTS providers")
+    if not session_id:
+        raise ValueError("voice room identity must be nonempty")
+    session = AgentSession(stt=providers.stt, tts=providers.tts, vad=providers.vad, llm=None)
+    adapter = LiveKitSessionAdapter(
+        session,
+        session_id=session_id,
+        application_factory=lambda output: Application(
+            settings=settings,
+            dependencies=replace(providers.dependencies, output=output),
+        ),
+    )
+    agent = Agent(instructions="INTERLOCK transport only; responses are externally approved.", llm=None, tools=[])
+    return session, adapter, agent
+
+
+def run_livekit_voice_agent(
+    provider_factory: Callable[[Any], VoiceProviders], *, settings: Settings
+) -> None:
+    """Run a normal LiveKit worker with provider construction at its outer edge.
+
+    The deployment supplies fresh STT/TTS and INTERLOCK inward ports for each
+    job. No credentials, vendor selection, or model-side tool calls live here.
+    """
+
+    if settings.INTERLOCK_MODE != "LIVE":
+        raise ValueError("voice worker requires INTERLOCK_MODE=LIVE")
+    missing = [name for name in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
+               if not os.environ.get(name, "").strip()]
+    if missing:
+        raise RuntimeError("voice worker requires " + ", ".join(missing))
+
+    server = AgentServer()
+
+    @server.rtc_session()
+    async def entrypoint(ctx: Any) -> None:
+        session, adapter, agent = compose_voice_room(
+            ctx.room.name, provider_factory(ctx), settings=settings
+        )
+        await adapter.start()
+        ctx.add_shutdown_callback(lambda _reason="": adapter.close())
+        await session.start(room=ctx.room, agent=agent)
+
+    from livekit import agents
+
+    agents.cli.run_app(server)
 
 
 def _stable_id(*parts: object) -> str:
@@ -500,4 +570,4 @@ class LiveKitSessionAdapter(OutputPort):
         return final
 
 
-__all__ = ["LiveKitSessionAdapter"]
+__all__ = ["LiveKitSessionAdapter", "VoiceProviders", "compose_voice_room", "run_livekit_voice_agent"]
