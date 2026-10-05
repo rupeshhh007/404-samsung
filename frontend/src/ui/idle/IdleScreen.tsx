@@ -1,6 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { LockSnapMark } from './LockSnapMark';
-import { PillarRow } from './PillarRow';
 import { Button } from '../primitives/Button';
 import { useFontsReady } from '../motion/useFontsReady';
 
@@ -43,27 +41,21 @@ export const IdleScreen: React.FC<IdleScreenProps> = ({
   };
 
   return (
-    <div className="relative min-h-[calc(100vh-64px)] flex flex-col justify-between p-6 sm:p-10 lg:p-14 max-w-5xl mx-auto w-full z-10 select-none">
-      {/* Center Hero */}
-      <div className="flex flex-col justify-center my-auto space-y-6 max-w-3xl">
-        <div className="flex items-center gap-4">
-          <LockSnapMark size={72} />
-          <div>
-            <h1
-              className={`font-display font-extrabold uppercase tracking-tight text-bone-50 leading-none text-[clamp(48px,6vw,84px)] transition-opacity duration-300 ${
-                fontsReady ? 'opacity-100' : 'opacity-80'
-              }`}
-            >
-              INTERLOCK
-            </h1>
-            <span className="font-mono text-[10px] tracking-[0.2em] uppercase text-bone-500">
-              CONSISTENCY RUNTIME
-            </span>
-          </div>
+    <div className="relative mx-auto flex min-h-[calc(100vh-72px)] w-full max-w-5xl select-none flex-col justify-center px-6 py-14 sm:px-12 lg:px-16">
+      <div className="max-w-3xl space-y-8">
+        <div>
+          <span className="editorial-kicker">Consistency runtime</span>
+          <h1
+            className={`mt-4 font-voice text-[clamp(64px,10vw,132px)] leading-[0.82] tracking-[-0.055em] text-[var(--console-ink)] transition-opacity duration-300 ${
+              fontsReady ? 'opacity-100' : 'opacity-80'
+            }`}
+          >
+            Reality,<br />without guesswork.
+          </h1>
         </div>
 
         {/* One-Line Mission Statement */}
-        <p className="font-voice italic text-[clamp(22px,2.2vw,32px)] text-bone-100 leading-snug">
+        <p className="max-w-xl font-sans text-[clamp(17px,2vw,22px)] leading-relaxed text-[var(--console-muted)]">
           Anticipate early. Commit safely. Speak only what reality confirms.
         </p>
 
@@ -74,30 +66,30 @@ export const IdleScreen: React.FC<IdleScreenProps> = ({
             onClick={handleBegin}
             loading={loading}
             iconRight="arrow-right"
-            className="h-12 px-6 text-sm font-bold"
+            className="h-12 border-0 bg-[var(--console-ink)] px-6 text-sm font-bold text-[var(--console-paper)] shadow-none"
           >
             Begin Session
           </Button>
 
           {/* Backend Status Line */}
-          <div className="flex items-center gap-2 font-mono text-xs text-bone-500">
+          <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-[var(--console-muted)]">
             {healthStatus === 'checking' && (
               <span className="animate-pulse">Checking backend…</span>
             )}
             {healthStatus === 'ok' && (
-              <span className="text-sig-verify flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-sig-verify" />
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--console-ink)]" />
                 Backend healthy
               </span>
             )}
             {healthStatus === 'error' && (
-              <div className="flex items-center gap-2 text-sig-alarm">
-                <span className="w-2 h-2 rounded-full bg-sig-alarm" />
+              <div className="flex items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--console-muted)]" />
                 Backend unreachable at {baseUrl}
                 <button
                   type="button"
                   onClick={checkHealth}
-                  className="underline hover:text-bone-50 ml-1"
+                  className="ml-1 underline"
                 >
                   Retry
                 </button>
@@ -107,8 +99,6 @@ export const IdleScreen: React.FC<IdleScreenProps> = ({
         </div>
       </div>
 
-      {/* Honest 3-Pillar Row */}
-      <PillarRow />
     </div>
   );
 };

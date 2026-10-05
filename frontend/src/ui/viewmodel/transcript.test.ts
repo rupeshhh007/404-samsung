@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { mergeTranscript, type UserPromptEntry } from './transcript';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { Transcript } from '../voice/Transcript';
 import type { SpeechProjection } from '../../api/types';
 
 function createMockSpeech(overrides: Partial<SpeechProjection> = {}): SpeechProjection {
@@ -26,6 +29,16 @@ function createMockSpeech(overrides: Partial<SpeechProjection> = {}): SpeechProj
 }
 
 describe('viewmodel/transcript', () => {
+  it('attaches divergence support once to the newest relevant uncertainty response', () => {
+    const items = mergeTranscript([{id: 'u', text: 'Make it 12:00.', acceptedSequence: 3}], [
+      createMockSpeech({speech_id: 'old', act_type: 'UNCERTAINTY', rendered_text: 'Old response', approved_through_sequence: 2}),
+      createMockSpeech({speech_id: 'current', act_type: 'UNCERTAINTY', rendered_text: 'Current response', approved_through_sequence: 4}),
+      createMockSpeech({speech_id: 'newest', act_type: 'UNCERTAINTY', rendered_text: 'Newest response', approved_through_sequence: 5}),
+    ]);
+    const markup = renderToStaticMarkup(createElement(Transcript, {items, supportingLine: '12:00 has not been confirmed.'}));
+    expect(markup.split('12:00 has not been confirmed.')).toHaveLength(2);
+    expect(markup.indexOf('12:00 has not been confirmed.')).toBeGreaterThan(markup.indexOf('Newest response'));
+  });
   it('correctly interleaves user prompts and assistant speech by sequence', () => {
     const userPrompts: UserPromptEntry[] = [
       { id: 'u1', text: 'Book 11:00.', acceptedSequence: 1 },

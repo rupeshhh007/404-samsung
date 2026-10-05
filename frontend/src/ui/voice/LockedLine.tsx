@@ -2,9 +2,9 @@ import React from 'react';
 
 export const LockedLine: React.FC = () => {
   return (
-    <div className="py-3 text-xs text-bone-400 font-sans flex items-center gap-2 select-none">
-      <span className="w-1.5 h-1.5 rounded-full bg-sig-pending animate-pulse" />
-      <span>Waiting for external confirmation…</span>
+    <div className="editorial-truthlock mb-8 flex items-center gap-2 select-none">
+      <span className="h-1.5 w-1.5 rounded-full bg-[var(--console-muted)] animate-pulse" />
+      <span>TRUTHLOCK · Awaiting authoritative evidence</span>
     </div>
   );
 };

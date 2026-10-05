@@ -25,7 +25,6 @@ import type { ActiveView } from './ui/shell/TopBar';
 import type { ToastMessage } from './ui/shell/Toasts';
 import { IdleScreen } from './ui/idle/IdleScreen';
 import { VoiceColumn } from './ui/voice/VoiceColumn';
-import { Deck } from './ui/deck/Deck';
 import { BlackBoxPage } from './ui/blackbox/BlackBoxPage';
 import { KitchenSink } from './ui/primitives/KitchenSink';
 import { deriveStage } from './ui/viewmodel/stage';
@@ -450,29 +449,16 @@ export const App: React.FC = () => {
         /* Active session views */
         <>
           {view === 'console' ? (
-            <div className="flex-1 flex flex-col min-[1000px]:flex-row min-h-0 overflow-hidden max-w-7xl mx-auto w-full">
-              {/* Region 1: Conversation Column (Left) */}
-              <div className="w-full min-[1000px]:w-[52%] min-[1200px]:w-[50%] flex-shrink-0 h-[50vh] min-[1000px]:h-full border-b min-[1000px]:border-b-0 min-[1000px]:border-r border-ink-800/80 flex flex-col">
-                <VoiceColumn
-                  stage={stage}
-                  projection={state.projection}
-                  userPrompts={effectivePrompts}
-                  onSendText={submitText}
-                  onCancelSpeech={cancelSpeech}
-                  actionPending={actionPending}
-                />
-              </div>
-
-              {/* Regions 2 & 3: Current Action + Intent vs Reality (Right) */}
-              <div className="flex-1 min-w-0 h-[50vh] min-[1000px]:h-full p-4 sm:p-6 lg:p-8 overflow-y-auto flex flex-col justify-center">
-                <Deck
-                  stage={stage}
-                  gapPx={gapPx}
-                  projection={state.projection}
-                  onOpenBlackBox={() => setView('blackbox')}
-                />
-              </div>
-            </div>
+            <VoiceColumn
+              stage={stage}
+              gapPx={gapPx}
+              projection={state.projection}
+              userPrompts={effectivePrompts}
+              onSendText={submitText}
+              onCancelSpeech={cancelSpeech}
+              onOpenBlackBox={() => setView('blackbox')}
+              actionPending={actionPending}
+            />
           ) : (
             /* Black Box forensic replay */
             <BlackBoxPage

@@ -1,12 +1,9 @@
-import React, { useEffect, Suspense, lazy } from 'react';
+import React, { useEffect } from 'react';
 import { TopBar, type ActiveView } from './TopBar';
 import { Toasts, type ToastMessage } from './Toasts';
 import { LiveRegionsProvider } from './LiveRegions';
 import type { Stage } from '../viewmodel/stage';
 import type { ConnectionStatus } from '../../api/types';
-
-// Lazy load WebGL background shader
-const StrandField = lazy(() => import('../gl/StrandField'));
 
 interface AppShellProps {
   readonly view: ActiveView;
@@ -29,7 +26,7 @@ export const AppShell: React.FC<AppShellProps> = ({
   view,
   onViewChange,
   stage,
-  tension = 0,
+  tension: _tension = 0,
   connectionStatus,
   sessionId,
   lastAppliedSequence,
@@ -56,22 +53,14 @@ export const AppShell: React.FC<AppShellProps> = ({
 
   return (
     <LiveRegionsProvider>
-      <div className="relative min-h-screen bg-ink-950 text-bone-50 flex flex-col font-sans selection:bg-ink-700 selection:text-bone-50">
+      <div className={`interlock-app ${view === 'blackbox' ? 'interlock-app--blackbox' : 'interlock-app--console'} relative flex min-h-screen flex-col font-sans`}>
         {/* Skip to main content link for screen readers and keyboard users */}
         <a
           href="#main-content"
-          className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:px-4 focus:py-2 focus:bg-bone-50 focus:text-ink-950 focus:font-mono focus:text-xs focus:font-bold focus:slab-shadow"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:bg-white focus:px-4 focus:py-2 focus:font-mono focus:text-xs focus:font-bold focus:text-black"
         >
           Skip to main content
         </a>
-
-        {/* WebGL StrandField background layer */}
-        <Suspense fallback={null}>
-          <StrandField tension={tension} className="opacity-15" />
-        </Suspense>
-
-        {/* 3% Film grain overlay */}
-        <div className="grain-overlay" aria-hidden="true" />
 
         {/* TopBar navigation */}
         <TopBar
@@ -89,7 +78,7 @@ export const AppShell: React.FC<AppShellProps> = ({
         />
 
         {/* Main Product Surface */}
-        <main id="main-content" className="relative z-10 flex-1 flex flex-col">
+        <main id="main-content" className="relative flex flex-1 flex-col">
           {children}
         </main>
 

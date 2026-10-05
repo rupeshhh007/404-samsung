@@ -10,12 +10,16 @@ interface TranscriptProps {
   readonly allClaims?: readonly ClaimProjection[];
   readonly allEvidence?: readonly EvidenceProjection[];
   readonly pendingClaim?: ClaimProjection | null;
+  readonly interlude?: React.ReactNode;
+  readonly supportingLine?: string | null;
   readonly onRetryUserPrompt?: (text: string) => void;
 }
 
 export const Transcript: React.FC<TranscriptProps> = ({
   items,
   pendingClaim,
+  interlude,
+  supportingLine,
   onRetryUserPrompt,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -52,22 +56,35 @@ export const Transcript: React.FC<TranscriptProps> = ({
     }
   }, [items.length, pendingClaim]);
 
+  const latestUserSequence = items.reduce((sequence, item) =>
+    item.kind === 'user' ? Math.max(sequence, item.sequence ?? sequence) : sequence, -1);
+  const newestUncertainty = items.reduce<TranscriptItem | null>((latest, item) => {
+    if (item.kind !== 'assistant' || item.speech.act_type !== 'UNCERTAINTY' ||
+        !item.speech.rendered_text || (item.speech.approved_through_sequence ?? -1) < latestUserSequence ||
+        item.speech.state === 'CANCELLED' || item.speech.state === 'BLOCKED') return latest;
+    if (!latest || latest.kind !== 'assistant' ||
+        (item.speech.approved_through_sequence ?? -1) >= (latest.speech.approved_through_sequence ?? -1)) return item;
+    return latest;
+  }, null);
+
   return (
-    <div className="relative flex-1 min-h-0 flex flex-col">
+    <div className="editorial-transcript relative flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
         role="log"
         aria-live="off"
-        className="flex-1 overflow-y-auto pr-2 space-y-1"
+        className="flex-1"
       >
         {items.length === 0 && !pendingClaim && (
-          <div className="flex flex-col items-center justify-center h-full text-center p-8 text-bone-500 font-sans text-sm">
-            <span>Ask INTERLOCK to book an appointment or test a mid-flight correction.</span>
+          <div className="mb-12 max-w-xl font-voice text-4xl leading-tight text-[var(--console-ink)]">
+            <span>What should reality do next?</span>
           </div>
         )}
 
-        {items.map((item) => {
+        {items.map((item, index) => {
+          const showInterlude = interlude && item.kind === 'assistant' &&
+            !items.slice(0, index).some((candidate) => candidate.kind === 'assistant');
           if (item.kind === 'user') {
             return (
               <UserLine
@@ -79,12 +96,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
           }
 
           return (
-            <AssistantLine
-              key={`assistant-${item.id}`}
-              speech={item.speech}
-            />
+            <React.Fragment key={`assistant-${item.id}`}>
+              {showInterlude && interlude}
+              <AssistantLine speech={item.speech} supportingLine={item === newestUncertainty ? supportingLine : null} />
+            </React.Fragment>
           );
         })}
+
+        {interlude && !items.some((item) => item.kind === 'assistant') && interlude}
 
         {/* Tail Pending Status Line */}
         {pendingClaim && <LockedLine />}

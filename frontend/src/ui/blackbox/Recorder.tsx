@@ -11,12 +11,12 @@ interface RecorderProps {
 const LANES: readonly EventLane[] = ['INTENT', 'EXECUTION', 'REALITY', 'VOICE'];
 
 const ROLE_COLORS: Record<EventRole, string> = {
-  active: '#4C8DFF',
-  spec: '#A073FF',
-  pending: '#FFB020',
-  alarm: '#FF4438',
-  adapt: '#19D3C5',
-  verify: '#3DDC84',
+  active: '#BDB5A7',
+  spec: '#8A8377',
+  pending: '#F4EFE6',
+  alarm: '#C8321F',
+  adapt: '#BDB5A7',
+  verify: '#F4EFE6',
   neutral: '#BDB5A7',
 };
 
