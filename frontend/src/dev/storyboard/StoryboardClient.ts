@@ -83,7 +83,7 @@ export class StoryboardClient {
         acceptedSequence: 1,
       });
     }
-    if (this.currentSequence >= 12) {
+    if (this.currentSequence >= 12 && new URLSearchParams(window.location.search).get('qa') !== 'success') {
       prompts.push({
         id: 'prompt-2',
         text: 'Actually, make it 12:00.',
@@ -113,6 +113,24 @@ export class StoryboardClient {
       }
     }
 
+    const qa = new URLSearchParams(window.location.search).get('qa');
+    const projection = this.store.getState().projection;
+    if (projection && (qa === 'success' || qa === 'failed' || qa === 'unknown')) {
+      const initialIntent = this.events.find(event => event.sequence === 4)?.projection_delta.changed.intent;
+      this.store.applySnapshot({
+        type: 'snapshot', schema_version: 1, session_id: this.sessionId, through_sequence: clamped,
+        projection: {
+          ...projection,
+          intent: qa === 'success' ? initialIntent ?? projection.intent : projection.intent,
+          divergences: [], claims: [], speech: [],
+          effects: qa === 'success' ? projection.effects : [],
+          operations: projection.operations.map(operation => ({...operation,
+            state: qa === 'success' ? 'SUCCEEDED' : qa === 'failed' ? 'FAILED' : 'TIMED_OUT',
+            cancellation_state: 'NONE', error: null,
+          })),
+        },
+      });
+    }
     this.currentSequence = clamped;
     this.notify();
   }

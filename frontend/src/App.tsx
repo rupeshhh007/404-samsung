@@ -103,7 +103,7 @@ export const App: React.FC = () => {
   const traceTargetSequenceRef = useRef(0);
   const traceEventsRef = useRef<ProjectionEventMessage[]>([]);
 
-  const [view, setView] = useState<ActiveView>('console');
+  const [view, setView] = useState<ActiveView>(new URLSearchParams(window.location.search).get('qa') === 'blackbox' ? 'blackbox' : 'console');
   const [actionPending, setActionPending] = useState(false);
   const [toasts, setToasts] = useState<readonly ToastMessage[]>([]);
   const [traceEvents, setTraceEvents] = useState<readonly ProjectionEventMessage[]>([]);

@@ -141,6 +141,7 @@
 
   .intent-reality__labels,
   .intent-reality__values {
+    position: relative;
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(88px, 0.28fr) minmax(0, 1fr);
     align-items: center;
@@ -158,6 +159,7 @@
   .intent-reality__labels span:last-child,
   .intent-reality__value--reality {
     text-align: right;
+    grid-column: 3;
   }
 
   .intent-reality__values {
@@ -184,7 +186,10 @@
   }
 
   .intent-reality__connector {
-    position: relative;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -10px;
     height: 1px;
     background: var(--console-ink);
   }
@@ -242,7 +247,7 @@
 
   .intent-reality--diverged .intent-reality__connector {
     color: var(--console-red);
-    background: linear-gradient(to right, var(--console-red) 0 42%, transparent 42% 58%, var(--console-red) 58% 100%);
+    background: linear-gradient(to right, var(--console-ink) 0 40%, var(--console-red) 40% 42%, transparent 42% 58%, var(--console-red) 58% 60%, var(--console-ink) 60% 100%);
   }
 
   .intent-reality--diverged .intent-reality__break {
@@ -328,6 +333,8 @@
   }
 
   .editorial-composer {
+    width: 100%;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
     display: flex;
     align-items: flex-end;
     gap: 14px;
@@ -411,6 +418,8 @@
       left: -11px;
       top: 50%;
       width: 38px;
+      right: auto;
+      bottom: auto;
       background: transparent !important;
     }
     .intent-reality__connector::before,

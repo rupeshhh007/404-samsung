@@ -4,7 +4,6 @@ import {
   extractDesiredSlot,
   selectObservedWorld,
   selectActiveOperation,
-  matchSlots,
 } from '../viewmodel/slots';
 import type { Stage } from '../viewmodel/stage';
 import type { SessionProjection } from '../../api/types';
@@ -35,6 +34,7 @@ function stateCopy(
   if (stage === 'CANCEL_RACE') return { label: 'Cancellation pending', note: 'The operation boundary is still being resolved.' };
   if (stage === 'RECONCILING') return { label: 'Reconciling', note: 'A repair plan is in progress.' };
   if (stage === 'RESOLVED') return { label: 'Resolved · Verified', note: 'The recorded divergence is resolved.' };
+  if (stage === 'STALE') return { label: 'State stale', note: 'Reconnect to obtain current authoritative state.' };
   return { label: 'Not yet observed', note: 'No authoritative external effect is recorded.' };
 }
 
@@ -52,17 +52,8 @@ export const IntentRealityHero: React.FC<IntentRealityHeroProps> = ({
   const reality = useMemo(() => formatSlotParts(observed.rawSlot), [observed.rawSlot]);
 
   const hasObservedSlot = observed.slot !== null && !reality.unknown;
-  const isDiverged =
-    stage === 'DIVERGED' ||
-    observed.divergence?.state === 'OPEN' ||
-    observed.divergence?.state === 'ESCALATED';
-  const isAligned =
-    stage === 'ALIGNED' ||
-    stage === 'RESOLVED' ||
-    (observed.state === 'COMMITTED' &&
-      rawDesired !== null &&
-      observed.rawSlot !== null &&
-      matchSlots(observed.rawSlot, rawDesired));
+  const isDiverged = stage === 'DIVERGED';
+  const isAligned = stage === 'ALIGNED';
   const status = stateCopy(
     stage,
     isDiverged,

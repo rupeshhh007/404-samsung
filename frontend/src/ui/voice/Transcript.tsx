@@ -56,6 +56,17 @@ export const Transcript: React.FC<TranscriptProps> = ({
     }
   }, [items.length, pendingClaim]);
 
+  const latestUserSequence = items.reduce((sequence, item) =>
+    item.kind === 'user' ? Math.max(sequence, item.sequence ?? sequence) : sequence, -1);
+  const newestUncertainty = items.reduce<TranscriptItem | null>((latest, item) => {
+    if (item.kind !== 'assistant' || item.speech.act_type !== 'UNCERTAINTY' ||
+        !item.speech.rendered_text || (item.speech.approved_through_sequence ?? -1) < latestUserSequence ||
+        item.speech.state === 'CANCELLED' || item.speech.state === 'BLOCKED') return latest;
+    if (!latest || latest.kind !== 'assistant' ||
+        (item.speech.approved_through_sequence ?? -1) >= (latest.speech.approved_through_sequence ?? -1)) return item;
+    return latest;
+  }, null);
+
   return (
     <div className="editorial-transcript relative flex min-h-0 flex-1 flex-col">
       <div
@@ -87,7 +98,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           return (
             <React.Fragment key={`assistant-${item.id}`}>
               {showInterlude && interlude}
-              <AssistantLine speech={item.speech} supportingLine={supportingLine} />
+              <AssistantLine speech={item.speech} supportingLine={item === newestUncertainty ? supportingLine : null} />
             </React.Fragment>
           );
         })}

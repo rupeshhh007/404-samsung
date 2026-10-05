@@ -73,7 +73,7 @@ export const Composer: React.FC<ComposerProps> = ({
 
   return (
     <div className="editorial-composer relative">
-      <div className="flex items-end gap-3">
+      <div className="flex w-full min-w-0 items-end gap-3">
         {/* Left Mono Prompt */}
         <span className="select-none pb-2 pl-1 font-mono text-base font-bold text-[var(--console-muted)]">
           ›
@@ -89,7 +89,7 @@ export const Composer: React.FC<ComposerProps> = ({
           onKeyDown={handleKeyDown}
           disabled={disabled}
           placeholder="Tell it what to do…"
-          className="min-h-[38px] max-h-[120px] flex-1 resize-none bg-transparent px-1 py-2 font-sans text-sm leading-relaxed focus:outline-none placeholder:font-voice placeholder:italic"
+          className="min-h-[38px] max-h-[120px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2 font-sans text-sm leading-relaxed focus:outline-none placeholder:font-voice placeholder:italic"
         />
 
         {/* Barge-In Button (If Assistant is speaking) */}
