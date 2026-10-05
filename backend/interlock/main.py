@@ -53,7 +53,7 @@ from interlock.runtime.dispatcher import (
 from interlock.runtime.journal import EventCandidate, EventJournal
 from interlock.runtime.reducer import Reducer
 from interlock.runtime.session import SessionRegistry
-from interlock.truth.claims import ClaimEvaluator
+from interlock.truth.claims import ClaimEvaluator, _match_slot
 from interlock.truth.evidence import EvidenceStore
 from interlock.truth.speech import CorrectionPolicy, OutputPort, OutputPortFailure
 from interlock.truth.truthlock import Truthlock
@@ -126,6 +126,7 @@ class _Session:
         self._output_attempts: dict[str, DispatchContext] = {}
         self._output_ready: dict[str, asyncio.Event] = {}
         self._cancel_attempts: set[str] = set()
+        self._divergence_attempts: set[str] = set()
         self._output_lock = asyncio.Lock()
         self._monitors: set[asyncio.Task[None]] = set()
         self._last_event: EventEnvelope | None = None
@@ -324,8 +325,6 @@ class _Session:
                 return
             await self._propose_demo_claim(event, revision, context)
             if revision.parent_revision_id is not None:
-                for effect in sorted(state.effects.values(), key=lambda item: item.effect_id):
-                    await self._detect_demo_divergence(event, revision, effect, context)
                 return
             bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
             known = {
@@ -356,8 +355,16 @@ class _Session:
             ))
             return
 
-        if event.event_type == "IntentRevisionCommitted" and previous is not None:
-            revision = state.revisions.get(event.payload["revision"]["revision_id"])
+        if event.event_type == "IntentRevisionCommitted":
+            rev_payload = event.payload.get("revision")
+            rev_id = (
+                rev_payload.revision_id
+                if hasattr(rev_payload, "revision_id")
+                else rev_payload.get("revision_id")
+                if isinstance(rev_payload, dict)
+                else None
+            )
+            revision = state.revisions.get(rev_id) if rev_id else None
             if revision is None:
                 return
             if revision.parent_revision_id is not None:
@@ -375,6 +382,8 @@ class _Session:
                             identity=_identity(revision.revision_id, operation.operation_id),
                         ))
                         break
+                for effect in sorted(state.effects.values(), key=lambda item: item.effect_id):
+                    await self._detect_demo_divergence(event, revision, effect, context)
             return
 
         if event.event_type == "WorldEffectObserved":
@@ -492,10 +501,10 @@ class _Session:
             return
         desired = revision.values.get("requested_slot")
         observed = effect.parameters.get("confirmed_slot") or effect.parameters.get("requested_slot")
-        if desired is None or observed is None or desired == observed:
+        if desired is None or observed is None or _match_slot(observed, desired):
             return
         divergence_id = _identity(revision.revision_id, effect.effect_id, "divergence")
-        if divergence_id in state.divergences:
+        if divergence_id in state.divergences or divergence_id in self._divergence_attempts:
             return
         if any(
             d.state == DivergenceState.OPEN
@@ -504,6 +513,7 @@ class _Session:
             for d in state.divergences.values()
         ):
             return
+        self._divergence_attempts.add(divergence_id)
         case = DivergenceCase(
             divergence_id=divergence_id,
             desired_fingerprint=revision.dependency_fingerprint,

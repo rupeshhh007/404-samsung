@@ -871,3 +871,166 @@ def test_truthlock_controlled_template_slot_formatting_and_identity() -> None:
     tmpl = CONTROLLED_TEMPLATES["tmpl_booking_confirmed"]
     rendered = _render_template(tmpl, {"slot": "2030-01-15T11:00:00+05:30"}, supported_slot="2030-01-15T11:00:00+05:30")
     assert rendered == "Confirmed — your 11:00 appointment is booked."
+
+
+def test_g03_correction_after_commit_emits_open_divergence_when_authorization_not_requested() -> None:
+    """TST-003 G-03: committed correction changes desired state after world effect commits.
+
+    Verifies points A-F:
+    A. effect 11 exists first (committed, authoritative)
+    B. child revision 12 commits directly with authorization NOT_REQUESTED
+    C. OPEN divergence is emitted (DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT)
+    D. no new booking dispatch for 12
+    E. no confirmed-12 claim/speech, safe uncertainty speech only
+    F. world 11 remains authoritative, no 12 effect fabricated
+    """
+    from interlock.domain.enums import (
+        Authorization,
+        ClaimState,
+        DivergenceState,
+        EffectState,
+        EvidenceAuthority,
+        IntentMaturity,
+        SpeechActType,
+    )
+    from interlock.domain.models import IntentRevision
+    from interlock.intelligence.intent_graph import bind_dependencies, dependency_fingerprint
+    from interlock.main import _identity
+
+    async def scenario() -> None:
+        host = create_demo_asgi_app(Settings(
+            INTERLOCK_MODE="DEMO",
+            INTERLOCK_MODEL_PROVIDER="fallback",
+            INTERLOCK_FAKE_LATENCY_MS=50,
+        ))
+        application = host.application
+        session_id = "tst003-g03-regression"
+        await application.start_session(session_id)
+        try:
+            # 1. Normal booking for 11:00 completes and world effect 11:00 is committed
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="UserInputObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={
+                    "evidence_id": "input-11",
+                    "modality": "text",
+                    "content_ref": "Book 11:00.",
+                },
+                correlation_id="input-11",
+                dedupe_key="test:input-11",
+            ))
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+
+            # Point A: Effect 11 exists first, committed and authoritative
+            state1 = application.snapshot(session_id)
+            effects_11 = [
+                e for e in state1.effects.values()
+                if e.state == EffectState.COMMITTED
+                and e.authority == EvidenceAuthority.AUTHORITATIVE
+                and (e.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+                     or e.parameters.get("requested_slot") == "2030-01-15T11:00:00+05:30")
+            ]
+            assert len(effects_11) >= 1
+            effect_11 = effects_11[0]
+            assert len(state1.divergences) == 0
+
+            # Root revision that was active
+            active_intent = state1.intents[state1.active_intent_id]
+            root_rev = state1.revisions[active_intent.active_revision_id]
+
+            # Point B: Child revision 12 commits directly with authorization NOT_REQUESTED
+            # (No IntentAuthorizationChanged is emitted, matching TST-003 G-03 contract)
+            rev12_id = "rev-child-12-unauthorized"
+            rev12_values = {
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T12:00:00+05:30",
+            }
+            rev12_fingerprint = dependency_fingerprint(
+                bind_dependencies(rev12_values, sorted(rev12_values))
+            )
+            child_revision = IntentRevision(
+                revision_id=rev12_id,
+                intent_id=root_rev.intent_id,
+                parent_revision_id=root_rev.revision_id,
+                values=rev12_values,
+                maturity=IntentMaturity.COMMITTED,
+                authorization=Authorization.NOT_REQUESTED,
+                created_by_event_id="evt-commit-12",
+                dependency_fingerprint=rev12_fingerprint,
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentRevisionCommitted",
+                source=EventSource.MODEL,
+                payload={"revision": child_revision.model_dump(mode="json")},
+                correlation_id="input-12",
+                identity=_identity(rev12_id, "commit"),
+            ))
+            await asyncio.sleep(0.1)
+            await application.drain(session_id)
+
+            state2 = application.snapshot(session_id)
+            active_rev = state2.revisions[state2.intents[state2.active_intent_id].active_revision_id]
+            assert active_rev.revision_id == rev12_id
+            assert active_rev.authorization == Authorization.NOT_REQUESTED
+            assert active_rev.values["requested_slot"] == "2030-01-15T12:00:00+05:30"
+
+            # Point C: OPEN divergence is emitted
+            assert len(state2.divergences) == 1
+            divergence = next(iter(state2.divergences.values()))
+            assert divergence.state == DivergenceState.OPEN
+            assert divergence.kind == "DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT"
+            assert effect_11.effect_id in divergence.observed_effect_ids
+            assert divergence.desired_fingerprint == rev12_fingerprint
+
+            # Point D: No new booking dispatch for 12
+            ops_12 = [
+                op for op in state2.operations.values()
+                if op.intent_revision_id == rev12_id
+            ]
+            assert len(ops_12) == 0
+
+            # Point E: No confirmed-12 claim / speech
+            claims_12_confirmed = [
+                c for c in state2.claims.values()
+                if c.intent_revision_id == rev12_id and c.state == ClaimState.CONFIRMED
+            ]
+            assert len(claims_12_confirmed) == 0
+
+            speech_12_confirmed = [
+                s for s in state2.speech.values()
+                if s.act_type == SpeechActType.RESULT and "12:00" in (s.rendered_text or "")
+            ]
+            assert len(speech_12_confirmed) == 0
+
+            # Safe uncertainty speech is proposed instead
+            uncertainty_speeches = [
+                s for s in state2.speech.values()
+                if s.act_type == SpeechActType.UNCERTAINTY
+            ]
+            assert len(uncertainty_speeches) >= 1
+
+            # Point F: World 11 remains authoritative
+            current_effect_11 = state2.effects.get(effect_11.effect_id)
+            assert current_effect_11 is not None
+            assert current_effect_11.state == EffectState.COMMITTED
+            assert current_effect_11.authority == EvidenceAuthority.AUTHORITATIVE
+            assert (current_effect_11.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+                    or current_effect_11.parameters.get("requested_slot") == "2030-01-15T11:00:00+05:30")
+
+            # No 12:00 world effect was fabricated
+            effects_12 = [
+                e for e in state2.effects.values()
+                if (e.parameters.get("confirmed_slot") == "2030-01-15T12:00:00+05:30"
+                    or e.parameters.get("requested_slot") == "2030-01-15T12:00:00+05:30")
+            ]
+            assert len(effects_12) == 0
+        finally:
+            await application.close()
+            await host.output.shutdown()
+            await host.hub.shutdown()
+
+    run(scenario())
