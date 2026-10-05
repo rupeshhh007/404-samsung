@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from importlib.metadata import version
 from typing import Any, Callable
 
@@ -15,14 +16,19 @@ from interlock.config import Settings
 from interlock.domain.enums import (
     Authorization,
     ClaimCertainty,
+    ClaimState,
     EventSource,
     IntentMaturity,
     SpeechActType,
     SpeechState,
+    RuntimeMode,
 )
-from interlock.domain.models import IntentRevision, SpeechAct
+from interlock.domain.models import ClaimRecord, EventEnvelope, IntentRevision, SessionState, SpeechAct
 from interlock.main import Application, RuntimeDependencies
+from interlock.runtime.commands import RequestSpeechCorrection
 from interlock.runtime.journal import EventCandidate
+from interlock.runtime.reducer import Reducer
+from interlock.truth.speech import CorrectionPolicy, validate_correction_proposal
 
 
 def test_verified_livekit_agents_version_is_installed() -> None:
@@ -477,6 +483,43 @@ def test_livekit_speaks_exact_persisted_truthlock_text() -> None:
         assert adapter.application.snapshot(adapter.session_id).speech[speech.speech_id].heard is True
         await adapter.close()
     asyncio.run(case())
+
+
+def test_heard_claim_invalidation_preserves_history_and_proposes_truth_gated_correction() -> None:
+    claim = ClaimRecord(
+        claim_id="booking", predicate="appointment_booked", state=ClaimState.CONFIRMED,
+        required_evidence_rule="appointment_booked", supporting_evidence_ids=["provider-proof"],
+        intent_revision_id="revision", updated_by_event_id="confirmed-event",
+    )
+    prior = SpeechAct(
+        speech_id="prior", act_type=SpeechActType.RESULT, template_id="tmpl_booked",
+        claim_ids=[claim.claim_id], requested_certainty=ClaimCertainty.CONFIRMED,
+        state=SpeechState.EMITTED, created_by_event_id="proposal-event",
+        rendered_text="The appointment is booked.", approved_policy_id="truthlock.v1",
+        approved_through_sequence=1,
+        approved_claim_versions={claim.claim_id: claim.updated_by_event_id}, heard=True,
+    )
+    state = SessionState(session_id="room", last_sequence=1,
+                         claims={claim.claim_id: claim}, speech={prior.speech_id: prior})
+    invalidation = EventEnvelope(
+        event_id="invalidation", session_id="room", sequence=2,
+        event_type="ClaimStateChanged", source=EventSource.POLICY,
+        occurred_at=datetime(2030, 1, 1, tzinfo=timezone.utc), logical_time=2,
+        payload={"claim_id": claim.claim_id, "from_state": "CONFIRMED", "to_state": "STALE",
+                 "evidence_ids": []},
+    )
+    changed, commands = Reducer.reduce(state, invalidation, RuntimeMode.TEST)
+    assert changed is not None
+    assert changed.speech[prior.speech_id].state == SpeechState.CORRECTION_REQUIRED
+    assert changed.speech[prior.speech_id].heard is True
+    assert changed.speech[prior.speech_id].rendered_text == prior.rendered_text
+    requests = [command for command in commands if isinstance(command, RequestSpeechCorrection)]
+    assert len(requests) == 1
+    proposal = CorrectionPolicy().propose(requests[0], changed, correction_speech_id="correction")
+    assert proposal is not None
+    assert proposal.speech_act.act_type == SpeechActType.CORRECTION
+    assert proposal.speech_act.supersedes_speech_id == prior.speech_id
+    assert validate_correction_proposal(proposal, changed) is None
 
 
 def test_new_input_remains_responsive_while_background_work_is_pending() -> None:
