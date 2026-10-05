@@ -1034,3 +1034,399 @@ def test_g03_correction_after_commit_emits_open_divergence_when_authorization_no
             await host.hub.shutdown()
 
     run(scenario())
+
+
+def test_g03_correction_after_commit_emits_open_divergence_when_authorization_not_requested_test_mode() -> None:
+    """TST-003 G-03 in TEST mode: committed correction changes desired state after world effect commits.
+
+    Asserts specifically for TEST mode:
+    - revision 12 authorization = NOT_REQUESTED
+    - authoritative effect 11 remains COMMITTED
+    - divergence OPEN
+    - zero operation for revision 12
+    - zero provider dispatch for 12
+    - zero confirmed-12 speech
+    """
+    from datetime import datetime, timezone
+    from interlock.domain.enums import (
+        ActionType,
+        Authorization,
+        CancellationPolicy,
+        CancellationState,
+        DivergenceState,
+        EffectState,
+        EvidenceAuthority,
+        IntentMaturity,
+        OperationState,
+        RuntimeMode,
+    )
+    from interlock.domain.models import EffectRecord, IntentRevision, OperationRecord
+    from interlock.intelligence.intent_graph import bind_dependencies, dependency_fingerprint
+
+    async def scenario() -> None:
+        from interlock.execution.tools import ToolRegistry
+        from interlock.main import Application, RuntimeDependencies
+        from interlock.providers.fake_tools import create_fake_tool_transport
+        from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+
+        fixture = load_demo_fixture()
+        registry = ToolRegistry(default_timeout_ms=5000)
+        register_tool_manifests(registry)
+        transport, provider = create_fake_tool_transport(fixture)
+        dependencies = RuntimeDependencies(tool_transport=transport)
+        application = Application(
+            Settings(
+                INTERLOCK_MODE="TEST",
+                INTERLOCK_MODEL_PROVIDER="fallback",
+            ),
+            registry=registry,
+            dependencies=dependencies,
+        )
+        session_id = "tst003-g03-test-mode"
+        await application.start_session(session_id, mode=RuntimeMode.TEST)
+        try:
+            # 1. Root revision 11:00 is committed
+            rev11_values = {
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T11:00:00+05:30",
+            }
+            rev11_fingerprint = dependency_fingerprint(bind_dependencies(rev11_values, sorted(rev11_values)))
+            root_revision = IntentRevision(
+                revision_id="rev-root-11",
+                intent_id="intent-apt",
+                values=rev11_values,
+                maturity=IntentMaturity.COMMITTED,
+                authorization=Authorization.NOT_REQUESTED,
+                created_by_event_id="evt-root-11",
+                dependency_fingerprint=rev11_fingerprint,
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentRevisionCommitted",
+                source=EventSource.MODEL,
+                payload={"revision": root_revision.model_dump(mode="json")},
+                identity="rev-root-11-commit",
+            ))
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentAuthorizationChanged",
+                source=EventSource.SYSTEM,
+                payload={
+                    "revision_id": "rev-root-11",
+                    "authorization": Authorization.AUTHORIZED.value,
+                    "evidence_id": "ev-auth-11",
+                },
+                identity="auth-root-11",
+            ))
+
+            # 2. Local operation op-11 is created
+            op_11 = OperationRecord(
+                operation_id="op-11",
+                logical_action_id="act-11",
+                intent_revision_id="rev-root-11",
+                tool_name="appointment.book",
+                args={
+                    "center_id": "ctr-01",
+                    "requested_slot": "2030-01-15T11:00:00+05:30",
+                    "idempotency_key": "idemp-11",
+                },
+                bindings=[],
+                fingerprint="fp-op-11",
+                action_type=ActionType.REVERSIBLE,
+                cancellation_policy=CancellationPolicy.AT_SAFEPOINT,
+                idempotency_key="idemp-11",
+                state=OperationState.CREATED,
+                cancellation_state=CancellationState.NONE,
+                effect_state=EffectState.NOT_STARTED,
+                speculative=False,
+                descriptor_capability_hash=registry.capability_hash("appointment.book"),
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="OperationCreated",
+                source=EventSource.SYSTEM,
+                payload={"operation": op_11.model_dump(mode="json")},
+                identity="op-11-created",
+            ))
+
+            # 3. Authoritative world effect 11:00 is observed
+            eff_11 = EffectRecord(
+                effect_id="eff-11",
+                logical_action_id="act-11",
+                operation_id="op-11",
+                provider_effect_id="apt-11",
+                effect_type="appointment",
+                subject={"resource": "appointment", "provider_booking_id": "apt-11", "center_id": "ctr-01"},
+                parameters={"confirmed_slot": "2030-01-15T11:00:00+05:30", "center_id": "ctr-01"},
+                state=EffectState.COMMITTED,
+                observed_at=datetime.now(timezone.utc),
+                authority=EvidenceAuthority.AUTHORITATIVE,
+                evidence_ids=["ev-11"],
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="WorldEffectObserved",
+                source=EventSource.TOOL,
+                payload={"effect": eff_11.model_dump(mode="json")},
+                identity="eff-11-observed",
+            ))
+            await asyncio.sleep(0.05)
+            await application.drain(session_id)
+
+            state1 = application.snapshot(session_id)
+            assert state1.mode == RuntimeMode.TEST
+            assert len(state1.effects) == 1
+            assert len(state1.divergences) == 0
+
+            # 4. Child revision 12:00 commits directly with authorization NOT_REQUESTED
+            rev12_values = {
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T12:00:00+05:30",
+            }
+            rev12_fingerprint = dependency_fingerprint(bind_dependencies(rev12_values, sorted(rev12_values)))
+            child_revision = IntentRevision(
+                revision_id="rev-child-12",
+                intent_id="intent-apt",
+                parent_revision_id="rev-root-11",
+                values=rev12_values,
+                maturity=IntentMaturity.COMMITTED,
+                authorization=Authorization.NOT_REQUESTED,
+                created_by_event_id="evt-commit-12",
+                dependency_fingerprint=rev12_fingerprint,
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentRevisionCommitted",
+                source=EventSource.MODEL,
+                payload={"revision": child_revision.model_dump(mode="json")},
+                identity="rev-child-12-commit",
+            ))
+            await asyncio.sleep(0.05)
+            await application.drain(session_id)
+
+            state2 = application.snapshot(session_id)
+            assert state2.mode == RuntimeMode.TEST
+
+            # Assert specifically for TEST:
+            # - revision 12 authorization = NOT_REQUESTED
+            active_rev = state2.revisions[state2.intents[state2.active_intent_id].active_revision_id]
+            assert active_rev.revision_id == "rev-child-12"
+            assert active_rev.authorization == Authorization.NOT_REQUESTED
+            assert active_rev.values["requested_slot"] == "2030-01-15T12:00:00+05:30"
+
+            # - authoritative effect 11 remains COMMITTED
+            effect_11_rec = state2.effects.get("eff-11")
+            assert effect_11_rec is not None
+            assert effect_11_rec.state == EffectState.COMMITTED
+            assert effect_11_rec.authority == EvidenceAuthority.AUTHORITATIVE
+            assert effect_11_rec.parameters.get("confirmed_slot") == "2030-01-15T11:00:00+05:30"
+
+            # - divergence OPEN
+            assert len(state2.divergences) == 1
+            divergence = next(iter(state2.divergences.values()))
+            assert divergence.state == DivergenceState.OPEN
+            assert divergence.kind == "DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT"
+            assert "eff-11" in divergence.observed_effect_ids
+            assert divergence.desired_fingerprint == rev12_fingerprint
+
+            # - zero operation for revision 12
+            ops_12 = [op for op in state2.operations.values() if op.intent_revision_id == "rev-child-12"]
+            assert len(ops_12) == 0
+
+            # - zero provider dispatch for 12
+            assert all(op.intent_revision_id != "rev-child-12" for op in state2.operations.values())
+
+            # - zero confirmed-12 speech
+            assert len(state2.speech) == 0
+        finally:
+            await application.close()
+
+    run(scenario())
+
+
+def test_g03_correction_first_then_late_effect_emits_open_divergence_test_mode() -> None:
+    """TST-003 opposite race in TEST mode: correction to 12 commits first, then late 11 effect arrives.
+
+    Asserts:
+    - OPEN divergence is emitted
+    - zero operation for revision 12
+    - zero confirmed-12 speech
+    - world effect 11 remains authoritative
+    """
+    from datetime import datetime, timezone
+    from interlock.domain.enums import (
+        ActionType,
+        Authorization,
+        CancellationPolicy,
+        CancellationState,
+        DivergenceState,
+        EffectState,
+        EvidenceAuthority,
+        IntentMaturity,
+        OperationState,
+        RuntimeMode,
+    )
+    from interlock.domain.models import EffectRecord, IntentRevision, OperationRecord
+    from interlock.intelligence.intent_graph import bind_dependencies, dependency_fingerprint
+
+    async def scenario() -> None:
+        from interlock.execution.tools import ToolRegistry
+        from interlock.main import Application, RuntimeDependencies
+        from interlock.providers.fake_tools import create_fake_tool_transport
+        from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+
+        fixture = load_demo_fixture()
+        registry = ToolRegistry(default_timeout_ms=5000)
+        register_tool_manifests(registry)
+        transport, provider = create_fake_tool_transport(fixture)
+        dependencies = RuntimeDependencies(tool_transport=transport)
+        application = Application(
+            Settings(
+                INTERLOCK_MODE="TEST",
+                INTERLOCK_MODEL_PROVIDER="fallback",
+            ),
+            registry=registry,
+            dependencies=dependencies,
+        )
+        session_id = "tst003-g03-race-test-mode"
+        await application.start_session(session_id, mode=RuntimeMode.TEST)
+        try:
+            # 1. Root revision 11:00 is committed
+            rev11_values = {
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T11:00:00+05:30",
+            }
+            rev11_fingerprint = dependency_fingerprint(bind_dependencies(rev11_values, sorted(rev11_values)))
+            root_revision = IntentRevision(
+                revision_id="rev-root-11",
+                intent_id="intent-apt",
+                values=rev11_values,
+                maturity=IntentMaturity.COMMITTED,
+                authorization=Authorization.NOT_REQUESTED,
+                created_by_event_id="evt-root-11",
+                dependency_fingerprint=rev11_fingerprint,
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentRevisionCommitted",
+                source=EventSource.MODEL,
+                payload={"revision": root_revision.model_dump(mode="json")},
+                identity="rev-root-11-commit",
+            ))
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentAuthorizationChanged",
+                source=EventSource.SYSTEM,
+                payload={
+                    "revision_id": "rev-root-11",
+                    "authorization": Authorization.AUTHORIZED.value,
+                    "evidence_id": "ev-auth-11",
+                },
+                identity="auth-root-11",
+            ))
+
+            # 2. Local operation op-11 is created
+            op_11 = OperationRecord(
+                operation_id="op-11",
+                logical_action_id="act-11",
+                intent_revision_id="rev-root-11",
+                tool_name="appointment.book",
+                args={
+                    "center_id": "ctr-01",
+                    "requested_slot": "2030-01-15T11:00:00+05:30",
+                    "idempotency_key": "idemp-11",
+                },
+                bindings=[],
+                fingerprint="fp-op-11",
+                action_type=ActionType.REVERSIBLE,
+                cancellation_policy=CancellationPolicy.AT_SAFEPOINT,
+                idempotency_key="idemp-11",
+                state=OperationState.CREATED,
+                cancellation_state=CancellationState.NONE,
+                effect_state=EffectState.NOT_STARTED,
+                speculative=False,
+                descriptor_capability_hash=registry.capability_hash("appointment.book"),
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="OperationCreated",
+                source=EventSource.SYSTEM,
+                payload={"operation": op_11.model_dump(mode="json")},
+                identity="op-11-created",
+            ))
+
+            # 3. Correction to 12 commits FIRST (before effect arrives)
+            rev12_values = {
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T12:00:00+05:30",
+            }
+            rev12_fingerprint = dependency_fingerprint(bind_dependencies(rev12_values, sorted(rev12_values)))
+            child_revision = IntentRevision(
+                revision_id="rev-child-12",
+                intent_id="intent-apt",
+                parent_revision_id="rev-root-11",
+                values=rev12_values,
+                maturity=IntentMaturity.COMMITTED,
+                authorization=Authorization.NOT_REQUESTED,
+                created_by_event_id="evt-commit-12",
+                dependency_fingerprint=rev12_fingerprint,
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="IntentRevisionCommitted",
+                source=EventSource.MODEL,
+                payload={"revision": child_revision.model_dump(mode="json")},
+                identity="rev-child-12-commit",
+            ))
+            await asyncio.sleep(0.05)
+            await application.drain(session_id)
+
+            # At this point, child 12 is active, but no effect exists yet -> 0 divergences
+            state1 = application.snapshot(session_id)
+            assert len(state1.divergences) == 0
+
+            # 4. Late authoritative 11:00 effect arrives afterward
+            eff_11 = EffectRecord(
+                effect_id="eff-11",
+                logical_action_id="act-11",
+                operation_id="op-11",
+                provider_effect_id="apt-11",
+                effect_type="appointment",
+                subject={"resource": "appointment", "provider_booking_id": "apt-11", "center_id": "ctr-01"},
+                parameters={"confirmed_slot": "2030-01-15T11:00:00+05:30", "center_id": "ctr-01"},
+                state=EffectState.COMMITTED,
+                observed_at=datetime.now(timezone.utc),
+                authority=EvidenceAuthority.AUTHORITATIVE,
+                evidence_ids=["ev-11"],
+            )
+            await application.append(EventCandidate(
+                session_id=session_id,
+                event_type="WorldEffectObserved",
+                source=EventSource.TOOL,
+                payload={"effect": eff_11.model_dump(mode="json")},
+                identity="eff-11-observed",
+            ))
+            await asyncio.sleep(0.05)
+            await application.drain(session_id)
+
+            # 5. OPEN divergence is detected between active 12 and late 11 effect
+            state2 = application.snapshot(session_id)
+            assert len(state2.divergences) == 1
+            divergence = next(iter(state2.divergences.values()))
+            assert divergence.state == DivergenceState.OPEN
+            assert divergence.kind == "DESIRED_SLOT_DIFFERS_FROM_CONFIRMED_SLOT"
+            assert "eff-11" in divergence.observed_effect_ids
+            assert divergence.desired_fingerprint == rev12_fingerprint
+
+            # Zero operations for 12, zero speech
+            ops_12 = [op for op in state2.operations.values() if op.intent_revision_id == "rev-child-12"]
+            assert len(ops_12) == 0
+            assert len(state2.speech) == 0
+        finally:
+            await application.close()
+
+    run(scenario())

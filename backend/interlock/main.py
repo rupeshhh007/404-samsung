@@ -154,7 +154,7 @@ class _Session:
             (PublishProjection, dependencies.projection or self._projection),
         ):
             self.dispatcher.register(kind, handler)
-        if settings.INTERLOCK_MODE == RuntimeMode.DEMO:
+        if settings.INTERLOCK_MODE in (RuntimeMode.DEMO, RuntimeMode.TEST, RuntimeMode.LIVE):
             # EXE-006 owns repair planning.  EXT-001 only surfaces the canonical
             # divergence and deliberately leaves it unresolved.
             self.dispatcher.register(BuildReconciliationPlan, self._defer_reconciliation)
@@ -304,8 +304,53 @@ class _Session:
                             self.session_id, context, "SpeechCancellationRequested",
                             {"speech_id": speech_id}, identity=_identity(event.event_id, speech_id),
                         ))
-        if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO:
+        session_mode = RuntimeMode(state.mode)
+        if session_mode in (RuntimeMode.DEMO, RuntimeMode.TEST, RuntimeMode.LIVE):
+            await self._booking_divergence_policy(event, state, context)
+        if session_mode == RuntimeMode.DEMO:
             await self._demo_policies(event, previous, state, context)
+
+    async def _booking_divergence_policy(
+        self, event: EventEnvelope, state: SessionState, context: DispatchContext,
+    ) -> None:
+        """Surfaces real-world divergence between appointment revisions and authoritative effects.
+
+        Shared across DEMO, TEST, and LIVE modes. Does NOT create operations,
+        claims, authorizations, speech, reconciliation plans, or fake provider calls.
+        """
+        if event.event_type == "IntentRevisionCommitted":
+            rev_payload = event.payload.get("revision")
+            rev_id = (
+                rev_payload.revision_id
+                if hasattr(rev_payload, "revision_id")
+                else rev_payload.get("revision_id")
+                if isinstance(rev_payload, dict)
+                else None
+            )
+            revision = state.revisions.get(rev_id) if rev_id else None
+            if revision is None or revision.parent_revision_id is None:
+                return
+            if revision.values.get("requested_slot") is None:
+                return
+            for effect in sorted(state.effects.values(), key=lambda item: item.effect_id):
+                await self._detect_booking_divergence(event, revision, effect, context)
+            return
+
+        if event.event_type == "WorldEffectObserved":
+            effect_payload = event.payload.get("effect")
+            eff_id = (
+                effect_payload.effect_id
+                if hasattr(effect_payload, "effect_id")
+                else effect_payload.get("effect_id")
+                if isinstance(effect_payload, dict)
+                else None
+            )
+            effect = state.effects.get(eff_id) if eff_id else None
+            node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
+            revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
+            if effect is not None and revision is not None:
+                await self._detect_booking_divergence(event, revision, effect, context)
+            return
 
     async def _demo_policies(
         self, event: EventEnvelope, previous: SessionState | None,
@@ -382,16 +427,6 @@ class _Session:
                             identity=_identity(revision.revision_id, operation.operation_id),
                         ))
                         break
-                for effect in sorted(state.effects.values(), key=lambda item: item.effect_id):
-                    await self._detect_demo_divergence(event, revision, effect, context)
-            return
-
-        if event.event_type == "WorldEffectObserved":
-            effect = state.effects.get(event.payload["effect"]["effect_id"])
-            node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
-            revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
-            if effect is not None and revision is not None:
-                await self._detect_demo_divergence(event, revision, effect, context)
             return
 
         if event.event_type == "DivergenceDetected":
@@ -487,7 +522,7 @@ class _Session:
             {"claim": claim.model_dump(mode="json")}, identity=claim_id,
         ))
 
-    async def _detect_demo_divergence(
+    async def _detect_booking_divergence(
         self,
         event: EventEnvelope,
         revision: IntentRevision,
