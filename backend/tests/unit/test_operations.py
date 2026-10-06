@@ -70,7 +70,7 @@ def test_t_unk_01_t_inv_i13_n_post_dispatch_timeout_remains_unknown():
     assert not any(command.command_type == "DispatchTool" for command in commands)
 
 
-def test_t_inv_i13_p_correlated_terminal_failure_resolves_unknown_effect():
+def test_t_inv_i13_p_authoritative_verify_absence_resolves_unknown_to_failed():
     operation, _, _ = _operation()
     operation.state = OperationState.TIMED_OUT
     operation.effect_state = EffectState.OUTCOME_UNKNOWN
@@ -84,9 +84,16 @@ def test_t_inv_i13_p_correlated_terminal_failure_resolves_unknown_effect():
         occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         logical_time=3,
         payload={"operation_id": "op", "provider_request_id": "provider-request",
-                 "outcome": "FAILED", "result": {"status": "BOOKING_FAILED"}},
+                 "outcome": "FAILED",
+                 "result": {"phase": "FINAL", "status": "LOOKUP_FAILED",
+                            "provider_request_id": "verify-request",
+                            "provider_booking_id": "missing-booking",
+                            "center_id": "center-1"}},
+        causation_id="verify-outcome-request",
     )
     updated, commands = Reducer.reduce(state, failed)
     assert updated.operations["op"].state == OperationState.TIMED_OUT
     assert updated.operations["op"].effect_state == EffectState.FAILED
+    assert updated.effects == {}
     assert not any(command.command_type == "DispatchTool" for command in commands)
+    assert not any(command.command_type == "VerifyOutcome" for command in commands)

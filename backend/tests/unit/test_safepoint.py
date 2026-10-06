@@ -2,15 +2,19 @@
 T-INV-I14-P, T-INV-I14-N: final dispatch gate.
 """
 
+from datetime import datetime, timezone
+
 from interlock.domain.enums import (
-    Authorization, CancellationPolicy, CancellationState, IntentMaturity,
-    OperationState, RuntimeMode, SafePointDecision,
+    Authorization, CancellationAckScope, CancellationPolicy, CancellationState,
+    EventSource, IntentMaturity, OperationState, RuntimeMode, SafePointDecision,
 )
-from interlock.domain.models import IntentNode, IntentRevision, SessionState
+from interlock.domain.models import EventEnvelope, IntentNode, IntentRevision, SessionState
 from interlock.execution.descriptors import ToolRegistry
 from interlock.execution.operations import OperationManager
 from interlock.execution.safepoint import SafePointPolicy
 from interlock.intelligence.intent_graph import bind_dependencies, dependency_fingerprint
+from interlock.runtime.reducer import Reducer
+from interlock.execution.safepoint import SafePointReason
 from interlock.testing.fixtures import register_tool_manifests
 
 
@@ -63,6 +67,10 @@ def test_t_saf_02_t_inv_i14_n_provisional_or_expired_holds():
         session.revisions["r1"] = revision
         result = _decide(registry, revision, operation, session, evidence)
         assert result.decision == SafePointDecision.HOLD
+        assert result.reason in {
+            SafePointReason.INTENT_NOT_COMMITTED,
+            SafePointReason.AUTHORIZATION_REQUIRED,
+        }
         assert result.follow_up_event is None
 
 
@@ -86,3 +94,46 @@ def test_t_saf_02_t_inv_i3_n_noncancellable_request_does_not_force_cancel():
     operation.cancellation_state = CancellationState.REQUESTED
     result = _decide(registry, revision, operation, session, evidence)
     assert result.decision == SafePointDecision.CONTINUE
+
+
+def test_t_saf_01_correction_before_dispatch_acknowledges_locally_without_effect():
+    registry, revision, operation, session, evidence = _case()
+    operation.cancellation_state = CancellationState.REQUESTED
+    session.operations["op"] = operation
+    decision = _decide(registry, revision, operation, session, evidence)
+    assert decision.decision == SafePointDecision.CANCEL
+    assert decision.reason == SafePointReason.CANCELLATION_REQUESTED
+    assert decision.follow_up_event is None
+
+    acknowledged, commands = Reducer.reduce(session, EventEnvelope(
+        event_id="cancelled", session_id="s", sequence=4,
+        event_type="CancellationAcknowledged", source=EventSource.SYSTEM,
+        occurred_at=datetime(2030, 1, 1, tzinfo=timezone.utc), logical_time=4,
+        payload={"operation_id": "op", "scope": CancellationAckScope.LOCAL_TASK},
+    ))
+    assert acknowledged.operations["op"].state == OperationState.CANCELLED
+    assert acknowledged.operations["op"].cancellation_state == CancellationState.ACKNOWLEDGED
+    assert acknowledged.effects == {}
+    assert not any(command.command_type == "DispatchTool" for command in commands)
+
+
+def test_t_saf_02_stale_fingerprint_cancels_with_exact_reason_and_never_dispatches():
+    registry, revision, operation, session, evidence = _case()
+    changed_evidence = {path: ["new-proof"] for path in evidence}
+    result = _decide(registry, revision, operation, session, changed_evidence)
+    assert result.decision == SafePointDecision.CANCEL
+    assert result.reason == SafePointReason.DEPENDENCY_CHANGED
+    assert result.affected_paths == tuple(sorted(changed_evidence))
+    follow_up = result.follow_up_event
+    assert type(follow_up).__name__ == "CancellationRequested"
+    assert follow_up.reason == "DEPENDENCY_CHANGED"
+    assert result.current_fingerprint != result.expected_fingerprint
+    cancelled, commands = Reducer.reduce(session, EventEnvelope(
+        event_id="stale-cancel", session_id="s", sequence=4,
+        event_type="CancellationRequested", source=EventSource.SYSTEM,
+        occurred_at=datetime(2030, 1, 1, tzinfo=timezone.utc), logical_time=4,
+        payload=follow_up.model_dump(mode="json"),
+    ))
+    assert cancelled.operations["op"].cancellation_state == CancellationState.REQUESTED
+    assert any(command.command_type == "RequestToolCancellation" for command in commands)
+    assert not any(command.command_type == "DispatchTool" for command in commands)

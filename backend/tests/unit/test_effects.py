@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 
 from interlock.domain.enums import (
     ActionType, CancellationPolicy, CancellationState, EffectState, EventSource,
-    EvidenceAuthority, OperationState, RuntimeMode,
+    DivergenceState, EvidenceAuthority, OperationState, RuntimeMode,
 )
-from interlock.domain.models import EffectRecord, EventEnvelope, OperationRecord, SessionState
+from interlock.domain.models import (
+    DivergenceCase, EffectRecord, EventEnvelope, OperationRecord, SessionState,
+)
 from interlock.runtime.reducer import Reducer
 
 
@@ -64,6 +66,25 @@ def test_t_wld_01_t_inv_i4_n_late_effect_kept_without_reactivating_work():
                                          _effect(), mode=RuntimeMode.REPLAY)
     assert replayed == state
     assert replay_commands == []
+
+    divergence = DivergenceCase(
+        divergence_id="late-booking", desired_fingerprint="desired-12",
+        observed_effect_ids=["effect"], kind="STALE_BOOKING_COMMITTED",
+        state=DivergenceState.OPEN, detected_by_event_id="event-2",
+    )
+    visible, divergence_commands = Reducer.reduce(state, EventEnvelope(
+        event_id="event-3", session_id="s", sequence=3,
+        event_type="DivergenceDetected", source=EventSource.SYSTEM,
+        occurred_at=_NOW, logical_time=3, payload={"case": divergence},
+        causation_id="event-2",
+    ))
+    assert visible.divergences["late-booking"].state == DivergenceState.OPEN
+    assert visible.divergences["late-booking"].observed_effect_ids == ["effect"]
+    assert any(command.command_type == "BuildReconciliationPlan"
+               for command in divergence_commands)
+    assert visible.speech == {}
+    assert not any(command.command_type in {"QueueOutput", "EmitOutput"}
+                   for command in divergence_commands)
 
 
 def test_t_wld_01_conflicting_physical_observations_request_verification():

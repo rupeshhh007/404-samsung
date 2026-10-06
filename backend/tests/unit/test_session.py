@@ -22,3 +22,20 @@ def test_t_ret_01_halt_metadata():
     registry.halt_session("s", "protocol violation")
     assert registry.get_session("s").halted is True
     assert registry.get_session("s").halt_reason == "protocol violation"
+
+
+def test_t_ret_01_process_restart_clears_memory_and_omits_secrets():
+    registry = SessionRegistry(session_retention_s=3600)
+    record = registry.create_session(session_id="volatile-1", mode=RuntimeMode.TEST)
+    assert registry.get_session("volatile-1") is record
+    assert "volatile-1" in registry.list_active_sessions()
+
+    # Process restart simulation: fresh in-memory registry contains zero prior sessions
+    restarted = SessionRegistry(session_retention_s=3600)
+    assert restarted.get_session("volatile-1") is None
+    assert restarted.list_active_sessions() == []
+
+    # Verify session record contains no sensitive credentials or secret auth tokens
+    assert not hasattr(record, "secret_token")
+    assert not hasattr(record, "credentials")
+    assert not hasattr(record, "api_key")

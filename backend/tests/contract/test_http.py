@@ -65,6 +65,12 @@ def test_t_api_01_session_input_and_validation():
             )
             assert accepted[0] == 202
             assert "event_id" in accepted[1]
+            retried = await _request(
+                host, "POST", f"/api/v1/sessions/{session_id}/inputs",
+                {"modality": "TEXT", "content": "Book 11:00.",
+                 "client_request_id": "input-1"},
+            )
+            assert retried == accepted
             bad = await _request(
                 host, "POST", f"/api/v1/sessions/{session_id}/inputs",
                 {"modality": "TEXT", "content": "", "client_request_id": "bad"},

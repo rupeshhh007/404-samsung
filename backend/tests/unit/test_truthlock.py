@@ -1,7 +1,12 @@
 """T-TRU-01, T-INV-I6-P, T-INV-I6-N: truth-gated output."""
 
-from interlock.domain.enums import ClaimCertainty, ClaimState, SpeechActType, SpeechState
-from interlock.domain.models import ClaimRecord, SpeechAct
+from datetime import datetime, timezone
+
+from interlock.domain.enums import (
+    ClaimCertainty, ClaimState, EvidenceAuthority, EvidenceSource,
+    SpeechActType, SpeechState,
+)
+from interlock.domain.models import ClaimRecord, EvidenceRecord, SpeechAct
 from interlock.truth.claims import RULE_APPOINTMENT_BOOKED
 from interlock.truth.truthlock import Truthlock
 
@@ -46,3 +51,23 @@ def test_t_tru_01_t_inv_i6_p_progress_template_can_be_approved():
     )
     assert decision.is_approved
     assert decision.create_approval_event().speech_id == "progress"
+
+
+def test_t_tru_01_t_inv_i6_p_exact_confirmed_claim_approves_confirmed_template():
+    claim = _claim(ClaimState.CONFIRMED)
+    evidence = EvidenceRecord(
+        evidence_id="proof", source=EvidenceSource.TOOL,
+        kind="booking_confirmation",
+        captured_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        content_ref="fixture://booking/apt-11", content_hash="sha256:proof",
+        authority=EvidenceAuthority.AUTHORITATIVE,
+    )
+    decision = Truthlock().validate(
+        speech_act=_speech(), claims={"claim": claim}, evidence={"proof": evidence},
+        through_sequence=2, authoritative_sequence=2,
+    )
+    assert decision.is_approved
+    assert decision.rendered_text == "Confirmed — your 11:00 appointment is booked."
+    approval = decision.create_approval_event()
+    assert approval.claim_versions == {"claim": "claim-event"}
+    assert approval.through_sequence == 2

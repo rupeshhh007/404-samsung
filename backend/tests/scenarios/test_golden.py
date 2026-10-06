@@ -41,7 +41,20 @@ def test_t_off_01_t_e2e_01_normal_booking_uses_real_offline_runtime(slot):
                 await asyncio.sleep(0)
             else:
                 raise AssertionError("normal booking did not reach confirmed claim")
-            assert any(effect.state == "COMMITTED" for effect in state.effects.values())
+            committed = [
+                effect for effect in state.effects.values()
+                if effect.state == "COMMITTED"
+            ]
+            assert len(committed) == 1
+            assert committed[0].authority == "AUTHORITATIVE"
+            assert committed[0].parameters["requested_slot"].endswith(
+                f"T{slot}:00+05:30"
+            )
+            assert committed[0].parameters["confirmed_slot"].endswith(
+                f"T{slot}:00+05:30"
+            )
+            if slot == "12:00":
+                assert committed[0].provider_effect_id == "apt-12"
             confirmed_claims = [
                 claim for claim in state.claims.values()
                 if claim.state == "CONFIRMED"
@@ -57,18 +70,41 @@ def test_t_off_01_t_e2e_01_normal_booking_uses_real_offline_runtime(slot):
                        and f"{slot} appointment is booked." in speech.rendered_text
                        for speech in state.speech.values())
             event_types = [event.event_type for event in app.events("golden")]
-            assert event_types.index("UserInputObserved") < event_types.index("WorldEffectObserved")
+            events = app.events("golden")
             confirmed = next(
-                index for index, event in enumerate(app.events("golden"))
+                index for index, event in enumerate(events)
                 if event.event_type == "ClaimStateChanged"
                 and event.payload.get("to_state") == "CONFIRMED"
             )
+            ordered = [
+                "UserInputObserved", "IntentRevisionCommitted",
+                "IntentAuthorizationChanged", "OperationPrepared",
+                "ToolDispatchRequested", "ToolDispatchAccepted",
+                "ToolResultObserved", "WorldEffectObserved",
+            ]
+            positions = [event_types.index(kind) for kind in ordered]
+            positions.extend([confirmed, event_types.index("SpeechActApproved")])
+            assert positions == sorted(positions)
             assert event_types.index("WorldEffectObserved") < confirmed
             assert confirmed < event_types.index("SpeechActApproved")
-            events = app.events("golden")
             event_ids = {event.event_id for event in events}
             assert all(event.causation_id in event_ids for event in events
                        if event.causation_id is not None)
+            by_id = {event.event_id: event for event in events}
+            current = next(e for e in reversed(events) if e.event_type == "SpeechEmissionFinished")
+            trace_types = []
+            while current and current.causation_id:
+                current = by_id.get(current.causation_id)
+                if current:
+                    trace_types.append(current.event_type)
+            assert "UserInputObserved" in trace_types
+            assert "IntentAuthorizationChanged" in trace_types
+            assert "OperationCreated" in trace_types
+            assert "OperationPrepared" in trace_types
+            assert "ToolDispatchRequested" in trace_types
+            assert "ToolResultObserved" in trace_types
+            assert "WorldEffectObserved" in trace_types
+            assert "ClaimStateChanged" in trace_types
         finally:
             await app.close()
             await host.output.shutdown()

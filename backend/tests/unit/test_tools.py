@@ -1,8 +1,10 @@
 """T-TOL-01, T-IDM-01, T-INV-I5-P, T-INV-I5-N: stable identities."""
 
 import pytest
+import asyncio
 
 from interlock.domain.events import ToolResultObserved
+from interlock.execution.tools import ToolInvocation
 from interlock.execution.idempotency import (
     CallbackStatus, IdempotencyError, IdempotencyStatus,
     classify_callback, classify_idempotency, derive_idempotency_key,
@@ -55,3 +57,44 @@ def test_t_idm_01_t_inv_i5_n_conflicting_retry_or_callback_fails_closed():
     assert duplicate.status == CallbackStatus.DUPLICATE
     assert conflict.status == CallbackStatus.CONFLICT
     assert conflict.requires_verification
+
+
+def test_t_idm_01_t_inv_i5_p_t_inv_i5_n_retries_create_one_physical_effect():
+    from interlock.providers.fake_tools import create_fake_tool_transport
+
+    adapter, provider = create_fake_tool_transport()
+    invocation = ToolInvocation(
+        operation_id="op", dispatch_requested_event_id="dispatch",
+        tool_name="appointment.book", descriptor_capability_hash="sha256:hash",
+        arguments={"center_id": "ctr-01",
+                   "requested_slot": "2030-01-15T12:00:00+05:30",
+                   "idempotency_key": "stable-key"},
+        logical_action_id="action", idempotency_key="stable-key",
+        timeout_ms=5000, deadline_ms=None, cancellation_token="cancel",
+        speculative=False, attempt=1,
+    )
+
+    first = asyncio.run(adapter.invoke(invocation))
+    retry = asyncio.run(adapter.invoke(invocation))
+    assert first.observation == retry.observation
+    assert first.observation.provider_effect_id == "apt-12"
+    observed = ToolResultObserved(
+        operation_id=invocation.operation_id,
+        provider_request_id=first.observation.provider_request_id,
+        outcome=first.observation.outcome,
+        result=first.observation.result,
+        provider_effect_id=first.observation.provider_effect_id,
+    )
+    accepted = classify_callback(
+        observed, callback_dedupe_key=first.observation.callback_dedupe_key,
+        known_observation_digests={},
+    )
+    duplicate = classify_callback(
+        observed, callback_dedupe_key=retry.observation.callback_dedupe_key,
+        known_observation_digests={
+            first.observation.callback_dedupe_key: accepted.observation_digest
+        },
+    )
+    assert duplicate.status == CallbackStatus.DUPLICATE
+    assert provider.physical_action_count == 1
+    assert list(provider.bookings) == ["apt-12"]
