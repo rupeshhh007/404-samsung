@@ -160,6 +160,12 @@ class EffectInterpreter:
         if operation.tool_name == "appointment.cancel":
             return self._compensation(source, observed, operation, result,
                                       known_effects, known_evidence)
+        if descriptor.action_type == ActionType.READ_ONLY and descriptor.effect_classification == EffectClassification.NONE:
+            return (self._evidence_candidate(
+                source, observed, operation, result,
+                EvidenceAuthority.AUTHORITATIVE if semantics.commit and status == semantics.commit else EvidenceAuthority.NON_AUTHORITATIVE,
+                "tool_read_result",
+            ),)
         raise EffectInterpretationError("effect-producing tool has no canonical effect mapping")
 
     def _booking(self, source: EventEnvelope, observed: ToolResultObserved,
@@ -617,7 +623,11 @@ def _booking_identity(observed: ToolResultObserved, result: Mapping[str, Any]) -
 
 
 def _nonempty(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return value is not None
 
 
 def _digest(value: Any) -> str:
