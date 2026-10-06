@@ -156,7 +156,7 @@ def test_t_con_02_t_inv_i1_p_t_inv_i1_n_stale_read_race_completes_historical_onl
         final_state = app.snapshot("s")
         read_evidence = [ev for ev in final_state.evidence.values() if ev.kind == "tool_read_result"]
         assert len(read_evidence) == 1
-        assert read_evidence[0].authority == EvidenceAuthority.AUTHORITATIVE
+        assert read_evidence[0].authority == EvidenceAuthority.NON_AUTHORITATIVE
 
         # 5. Stale evidence does NOT overwrite current active projection
         final_proj = project_state(final_state)

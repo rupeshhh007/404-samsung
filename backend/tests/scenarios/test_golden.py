@@ -139,11 +139,30 @@ def test_t_scn_01_same_scenario_uses_same_virtual_input_and_checkpoint_order():
             self.events = []
 
         async def setup(self, scenario, clock):
+            from interlock.testing.fixtures import FakeProviderFixture, load_demo_fixture
+
             self.session_id = scenario.initial_state.get("session_id", "normal-booking")
-            self.host = create_demo_asgi_app(Settings(
-                _env_file=None, INTERLOCK_MODE="DEMO",
-                INTERLOCK_MODEL_PROVIDER="fallback", INTERLOCK_FAKE_LATENCY_MS=0,
-            ))
+            fixture = load_demo_fixture()
+            identities = {
+                center_id: dict(slots)
+                for center_id, slots in fixture.booking_identities.items()
+            }
+            for script in scenario.tools.get("appointment.book", []):
+                match = script["match"]
+                result = script["result"]
+                identities[match["args.center_id"]][match["args.requested_slot"]] = (
+                    result["provider_booking_id"]
+                )
+            scenario_fixture = FakeProviderFixture.model_validate({
+                **fixture.model_dump(mode="json"),
+                "booking_identities": identities,
+            })
+            with patch("interlock.testing.fixtures.load_demo_fixture",
+                       return_value=scenario_fixture):
+                self.host = create_demo_asgi_app(Settings(
+                    _env_file=None, INTERLOCK_MODE="DEMO",
+                    INTERLOCK_MODEL_PROVIDER="fallback", INTERLOCK_FAKE_LATENCY_MS=0,
+                ))
             self.app = self.host.application
             await self.app.start_session(self.session_id, logical_time=clock.now())
 
@@ -174,7 +193,7 @@ def test_t_scn_01_same_scenario_uses_same_virtual_input_and_checkpoint_order():
             if "world" in assertion and "confirmed_booking" in assertion["world"]:
                 expected_id = assertion["world"]["confirmed_booking"]
                 committed = [e for e in state.effects.values() if e.state == "COMMITTED"]
-                assert any(e.provider_effect_id in (expected_id, "apt-11") for e in committed)
+                assert any(e.provider_effect_id == expected_id for e in committed)
             if "provider_write_count" in assertion:
                 committed = [e for e in state.effects.values() if e.state == "COMMITTED"]
                 assert len(committed) == assertion["provider_write_count"]
@@ -186,7 +205,7 @@ def test_t_scn_01_same_scenario_uses_same_virtual_input_and_checkpoint_order():
             if "world" in expectation and "confirmed_booking" in expectation["world"]:
                 expected_id = expectation["world"]["confirmed_booking"]
                 committed = [e for e in self.final_state.effects.values() if e.state == "COMMITTED"]
-                assert any(e.provider_effect_id in (expected_id, "apt-11") for e in committed)
+                assert any(e.provider_effect_id == expected_id for e in committed)
             if "provider_write_count" in expectation:
                 committed = [e for e in self.final_state.effects.values() if e.state == "COMMITTED"]
                 assert len(committed) == expectation["provider_write_count"]

@@ -2,14 +2,19 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from interlock.domain.enums import (
     ActionType, CancellationPolicy, CancellationState, EffectState, EventSource,
-    DivergenceState, EvidenceAuthority, OperationState, RuntimeMode,
+    DivergenceState, EvidenceAuthority, OperationState, RuntimeMode, ToolOutcome,
 )
 from interlock.domain.models import (
     DivergenceCase, EffectRecord, EventEnvelope, OperationRecord, SessionState,
 )
+from interlock.execution.descriptors import ToolRegistry
+from interlock.execution.effects import EffectInterpretationError, EffectInterpreter
 from interlock.runtime.reducer import Reducer
+from interlock.testing.fixtures import register_tool_manifests
 
 
 _NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
@@ -93,3 +98,72 @@ def test_t_wld_01_conflicting_physical_observations_request_verification():
     assert set(second.effects) == {"effect", "other"}
     assert any(command.command_type == "VerifyOutcome"
                and command.provider_effect_id == "booking" for command in commands)
+
+
+def _read_observation(tool_name, result):
+    registry = ToolRegistry()
+    register_tool_manifests(registry)
+    descriptor = registry.get(tool_name)
+    operation = OperationRecord(
+        operation_id=f"op-{tool_name}", tool_name=tool_name, args={},
+        intent_revision_id="r1", fingerprint="fingerprint",
+        action_type=descriptor.action_type,
+        cancellation_policy=descriptor.cancellation_policy,
+        state=OperationState.WAITING, cancellation_state=CancellationState.NONE,
+        effect_state=EffectState.OUTCOME_UNKNOWN, speculative=False,
+        logical_action_id=f"action-{tool_name}", idempotency_key="key",
+        descriptor_capability_hash=registry.capability_hash(tool_name),
+        provider_request_id="request-read", dispatch_requested_event_id="dispatch",
+    )
+    source = EventEnvelope(
+        event_id="event-read", session_id="s", sequence=2,
+        event_type="ToolResultObserved", source=EventSource.TOOL,
+        occurred_at=_NOW, logical_time=2,
+        payload={
+            "operation_id": operation.operation_id,
+            "provider_request_id": "request-read",
+            "outcome": ToolOutcome.SUCCEEDED,
+            "result": result,
+        },
+    )
+    return EffectInterpreter(registry=registry).observe(
+        source, operation=operation, known_effects={}, known_evidence={},
+    )
+
+
+@pytest.mark.parametrize(("tool_name", "result"), [
+    ("service.find_centers", {
+        "phase": "FINAL", "status": "SERVICE_CENTERS_FOUND",
+        "provider_request_id": "request-read", "device_id": "device-1",
+        "error_code": "E101", "centers": [],
+    }),
+    ("appointment.availability", {
+        "phase": "FINAL", "status": "AVAILABILITY_FOUND",
+        "provider_request_id": "request-read", "center_id": "center-1",
+        "available_slots": [],
+    }),
+])
+def test_read_only_empty_collections_are_non_authoritative_evidence(tool_name, result):
+    candidates = _read_observation(tool_name, result)
+
+    assert len(candidates) == 1
+    assert candidates[0].event_type == "EvidenceRecorded"
+    evidence = candidates[0].payload["evidence"]
+    assert evidence["kind"] == "tool_read_result"
+    assert evidence["authority"] == EvidenceAuthority.NON_AUTHORITATIVE
+
+
+@pytest.mark.parametrize("result", [
+    {
+        "phase": "FINAL", "status": "AVAILABILITY_FOUND",
+        "provider_request_id": "request-read", "center_id": "center-1",
+    },
+    {
+        "phase": "FINAL", "status": "AVAILABILITY_FOUND",
+        "provider_request_id": "request-read", "center_id": "",
+        "available_slots": [],
+    },
+])
+def test_read_only_missing_or_empty_required_fields_still_fail(result):
+    with pytest.raises(EffectInterpretationError):
+        _read_observation("appointment.availability", result)
