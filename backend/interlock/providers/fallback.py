@@ -128,15 +128,15 @@ class DeterministicFallbackProvider:
         if context.active_intent_id is None:
             return _clarify("Which active request should I correct?")
 
-        delta = None
         value_token = _last_value_token(normalized)
-        if context.correction_field and value_token:
-            value = context.value_aliases.get(value_token, value_token)
-            delta = IntentDelta(
-                target_intent_id=context.active_intent_id,
-                set_fields={context.correction_field: value},
-                confidence=0.96,
-            )
+        if not context.correction_field or not value_token:
+            return _clarify("Which booking time do you want: eleven or twelve?")
+        value = context.value_aliases.get(value_token, value_token)
+        delta = IntentDelta(
+            target_intent_id=context.active_intent_id,
+            set_fields={context.correction_field: value},
+            confidence=0.96,
+        )
         return _result(
             ControlKind.CORRECT,
             0.96,
