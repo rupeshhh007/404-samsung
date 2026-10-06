@@ -1171,17 +1171,18 @@ _DEMO_SLOT_ALIASES = {
     "twelve": "2030-01-15T12:00:00+05:30",
     "twelve pm": "2030-01-15T12:00:00+05:30",
     "noon": "2030-01-15T12:00:00+05:30",
+    "midday": "2030-01-15T12:00:00+05:30",
 }
 
 _DEMO_SLOT_TOKEN = (
-    r"(?:11(?::00)?|12(?::00)?|eleven|twelve|noon)"
+    r"(?:11(?::00)?|12(?::00)?|eleven|twelve|noon|midday)"
     r"(?:\s*(?:a\.?m\.?|p\.?m\.?|o['’]?clock))?"
 )
 
 
 def _canonical_demo_slot(raw: str) -> str | None:
     token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
-    if token == "noon" or token.startswith("twelve") or token.startswith("12"):
+    if token in {"noon", "midday"} or token.startswith("twelve") or token.startswith("12"):
         return "12"
     if token.startswith("eleven") or token.startswith("11"):
         return "11"
@@ -1195,7 +1196,11 @@ def _demo_spoken_slot(normalized: str) -> str | None:
     # This makes "change from eleven to twelve" resolve to 12 while a bare
     # "eleven or twelve" remains ambiguous and therefore fail-closed.
     targeted = re.findall(
-        rf"\b(?:to|for|at)\s+({_DEMO_SLOT_TOKEN})\b",
+        rf"\b(?:"
+        rf"(?:to|for|at)\s+|"
+        rf"(?:make|do|use|choose|pick)\s+(?:it\s+|that\s+)?|"
+        rf"(?:go\s+with|set\s+(?:it\s+)?(?:to|for)|put\s+(?:it\s+)?(?:at|for))\s+"
+        rf")({_DEMO_SLOT_TOKEN})\b",
         normalized,
         flags=re.IGNORECASE,
     )
@@ -1241,6 +1246,14 @@ def _demo_spoken_alias(raw: str) -> str:
 
     slot = _demo_spoken_slot(normalized)
     if slot is None:
+        mentioned = {
+            canonical
+            for token in re.findall(rf"\b({_DEMO_SLOT_TOKEN})\b", normalized, flags=re.IGNORECASE)
+            if (canonical := _canonical_demo_slot(token)) is not None
+        }
+        # Multiple distinct candidate times are consequentially ambiguous.
+        if len(mentioned) > 1:
+            return "please clarify"
         return raw
 
     if re.search(r"\b(?:don't|dont|do not|never|not)\b", normalized):
@@ -1249,7 +1262,7 @@ def _demo_spoken_alias(raw: str) -> str:
 
     correction_cue = re.search(
         r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
-        r"make|correct|update|reschedule|sorry|meant|mean|no)\b",
+        r"make|correct|update|reschedule|sorry|meant|mean|no|wait)\b",
         normalized,
     )
     if correction_cue is not None:
@@ -1260,7 +1273,8 @@ def _demo_spoken_alias(raw: str) -> str:
         normalized,
     )
     request_cue = re.search(
-        r"\b(?:i want|i'd like|id like|can i have|can we do|please)\b",
+        r"\b(?:i want|i'd like|id like|can i have|can we do|please|"
+        r"let's do|lets do|go with|give me|i'll take|ill take)\b",
         normalized,
     )
     if booking_cue is not None or request_cue is not None:
@@ -1268,7 +1282,7 @@ def _demo_spoken_alias(raw: str) -> str:
 
     # Terse correction forms are useful only once an intent exists; _interpret
     # decides whether the resulting "book N" is a root action or active correction.
-    if re.fullmatch(rf"(?:the\s+)?{_DEMO_SLOT_TOKEN}(?:\s+please)?", normalized):
+    if re.fullmatch(rf"(?:(?:the|at|for)\s+)?{_DEMO_SLOT_TOKEN}(?:\s+please)?", normalized):
         return f"book {slot}"
 
     return raw
