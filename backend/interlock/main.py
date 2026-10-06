@@ -1179,14 +1179,16 @@ _DEMO_SLOT_ALIASES = {
 }
 
 _DEMO_SLOT_TOKEN = (
-    r"(?:11(?::00)?|12(?::00)?|eleven|twelve|noon|midday)"
-    r"(?:\s*(?:a\.?m\.?|p\.?m\.?|o['’]?clock))?"
+    r"(?:11(?::00)?(?!:\\d{2})|12(?::00)?(?!:\\d{2})|"
+    r"eleven|twelve|noon|midday|mid\\s+day)"
+    r"(?:\\s*(?:a\\s*\\.?\\s*m\\.?|p\\s*\\.?\\s*m\\.?|"
+    r"o['’]?clock|in\\s+the\\s+morning|in\\s+the\\s+afternoon))?"
 )
 
 
 def _canonical_demo_slot(raw: str) -> str | None:
     token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
-    if token in {"noon", "midday"} or token.startswith("twelve") or token.startswith("12"):
+    if token in {"noon", "midday", "mid day"} or token.startswith("twelve") or token.startswith("12"):
         return "12"
     if token.startswith("eleven") or token.startswith("11"):
         return "11"
@@ -1236,6 +1238,44 @@ def _demo_spoken_slot(normalized: str) -> str | None:
     return next(iter(slots)) if len(slots) == 1 else None
 
 
+def _demo_time_is_inexact_or_unsupported(normalized: str) -> bool:
+    """Fail closed when the user did not request exactly 11:00 or 12:00."""
+
+    if re.search(r"\b(?:11|12):(?!(?:00)\b)[0-5]\d\b", normalized):
+        return True
+    if re.search(r"\b(?:11|12)\s+[0-5]\d\b", normalized):
+        return True
+    if re.search(
+        r"\b(?:half|quarter)\s+(?:past|to)\s+(?:11|12|eleven|twelve)\b",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"\b(?:eleven|twelve)\s+(?:oh\s+)?(?:five|ten|fifteen|twenty|"
+        r"twenty[- ]five|thirty|thirty[- ]five|forty|forty[- ]five|fifty|fifty[- ]five)\b",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"\b(?:maybe|perhaps|possibly|around|about|roughly|approximately|"
+        r"before|after|by|either|no later than|no earlier than)\b",
+        normalized,
+    ):
+        return True
+    range_match = re.search(
+        rf"\bfrom\s+({_DEMO_SLOT_TOKEN})\s+to\s+({_DEMO_SLOT_TOKEN})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if range_match is not None and not re.search(
+        r"\b(?:actually|change|changed|move|moved|switch|reschedule|"
+        r"correct|update|make)\b",
+        normalized,
+    ):
+        return True
+    return False
+
+
 def _demo_spoken_alias(raw: str) -> str:
     """Normalize common voice/STT variants without changing journaled evidence.
 
@@ -1247,6 +1287,9 @@ def _demo_spoken_alias(raw: str) -> str:
     normalized = " ".join(raw.strip().lower().replace("’", "'").split())
     normalized = re.sub(r"[,!?;]+", " ", normalized)
     normalized = " ".join(normalized.split())
+
+    if _demo_time_is_inexact_or_unsupported(normalized):
+        return "please clarify"
 
     slot = _demo_spoken_slot(normalized)
     if slot is None:
