@@ -138,12 +138,19 @@ def load_tool_manifests(path: Path | None = None) -> tuple[dict[str, Any], ...]:
     return tuple(deepcopy(manifest) for manifest in manifests)
 
 
-def register_tool_manifests(registry: ToolRegistry, path: Path | None = None) -> None:
-    """Register the canonical fake manifests in dependency-safe file order."""
+def register_tool_manifests(
+    registry: ToolRegistry,
+    path: Path | None = None,
+    *,
+    timeout_ms_override: int | None = None,
+) -> None:
+    """Register fake manifests, optionally overriding timeout for DEMO composition."""
 
     if not isinstance(registry, ToolRegistry):
         raise TypeError("registry must be a ToolRegistry")
     for manifest in load_tool_manifests(path):
+        if timeout_ms_override is not None:
+            manifest["timeout_ms"] = timeout_ms_override
         registry.register(manifest)
 
 
