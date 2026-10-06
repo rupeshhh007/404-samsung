@@ -810,10 +810,14 @@ class _Session:
     async def _clarify(self, command: BaseCommand, context: DispatchContext) -> EventCandidate:
         """Turn a reducer clarification request into truth-gated output."""
         assert isinstance(command, RequestClarification)
+        template_id = {
+            "Which booking time do you want: eleven or twelve?": "tmpl_clarification_slot",
+            "VOICE_TRANSCRIPT_MISSING": "tmpl_clarification_repeat",
+        }.get(command.clarification or "", "tmpl_clarification")
         speech = SpeechAct(
             speech_id=_identity(command.control_id, context.origin_event_id or "", "clarification"),
             act_type=SpeechActType.CLARIFICATION,
-            template_id="tmpl_clarification",
+            template_id=template_id,
             slots={},
             claim_ids=[],
             requested_certainty=ClaimCertainty.PROGRESS,
