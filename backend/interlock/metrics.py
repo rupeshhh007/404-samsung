@@ -81,8 +81,9 @@ def derive_metrics(
                     samples.append(delta)
         if previous:
             for case_id, case in state.divergences.items():
-                if case.state in ("RESOLVED", "ESCALATED") and case != previous.divergences.get(case_id):
-                    terminal_cases[case_id] = str(case.state)
+                state_val = case.state.value if hasattr(case.state, "value") else str(case.state)
+                if state_val in ("RESOLVED", "ESCALATED") and case != previous.divergences.get(case_id):
+                    terminal_cases[case_id] = state_val
     durations: dict[str, float] = {}
     gauges: dict[str, float] = {}
     if samples:

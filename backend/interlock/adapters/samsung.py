@@ -24,7 +24,6 @@ from interlock.adapters.protocol import (
     require_version,
     strict_object,
 )
-from interlock.domain.enums import ToolOutcome
 from interlock.execution.idempotency import strict_json_copy
 from interlock.execution.tools import (
     ProviderCancellationRequest,
@@ -242,7 +241,7 @@ class SamsungShapedToolAdapter:
         if callback_id is None:
             callback_id = _digest({
                 "provider_request_id": provider_id,
-                "outcome": outcome.value,
+                "outcome": outcome,
                 "result": result,
                 "provider_effect_id": effect_id,
             })
@@ -307,7 +306,7 @@ def _normalize_result(
     response: Mapping[str, Any],
     state: str,
     provider_id: str,
-) -> tuple[dict[str, Any], ToolOutcome, str | None]:
+) -> tuple[dict[str, Any], str, str | None]:
     if state == "ERROR_LOOKUP_SUCCEEDED":
         if invocation.tool_name != "device.lookup_error":
             raise AdapterProtocolError(
@@ -331,7 +330,7 @@ def _normalize_result(
             "summary": require_safe_text(diagnostic["summary"], "diagnostic.summary"),
         }
         _match_request(invocation, result)
-        return result, ToolOutcome.SUCCEEDED, None
+        return result, "SUCCEEDED", None
 
     if state == "SERVICE_CENTERS_FOUND":
         if invocation.tool_name != "service.find_centers":
@@ -353,7 +352,7 @@ def _normalize_result(
             "centers": centers,
         }
         _match_request(invocation, result)
-        return result, ToolOutcome.SUCCEEDED, None
+        return result, "SUCCEEDED", None
 
     if state == "AVAILABILITY_FOUND":
         if invocation.tool_name != "appointment.availability":
@@ -382,7 +381,7 @@ def _normalize_result(
             ],
         }
         _match_request(invocation, result)
-        return result, ToolOutcome.SUCCEEDED, None
+        return result, "SUCCEEDED", None
 
     if state == "REQUEST_RECEIVED":
         if invocation.tool_name != "appointment.book":
@@ -400,7 +399,7 @@ def _normalize_result(
             "requested_slot": booking["requestedStart"],
         }
         _match_request(invocation, result)
-        return result, ToolOutcome.ACKNOWLEDGED, None
+        return result, "ACKNOWLEDGED", None
 
     if state in {"BOOKING_CONFIRMED", "BOOKING_FOUND"}:
         if invocation.tool_name not in {"appointment.book", "appointment.get"}:
@@ -422,7 +421,7 @@ def _normalize_result(
             "confirmed_slot": booking["confirmedStart"],
         }
         _match_request(invocation, result)
-        return result, ToolOutcome.SUCCEEDED, booking["bookingId"]
+        return result, "SUCCEEDED", booking["bookingId"]
 
     if state == "CANCELLATION_CONFIRMED":
         if invocation.tool_name != "appointment.cancel":
@@ -444,7 +443,7 @@ def _normalize_result(
             "cancelled_at": booking["cancelledAt"],
         }
         _match_request(invocation, result)
-        return result, ToolOutcome.SUCCEEDED, booking["bookingId"]
+        return result, "SUCCEEDED", booking["bookingId"]
 
     failure_states = {
         "device.lookup_error": "ERROR_LOOKUP_FAILED",
@@ -480,7 +479,7 @@ def _normalize_result(
         effect_id = _optional_booking_identity(response)
         if effect_id is not None:
             result["provider_booking_id"] = effect_id
-        return result, ToolOutcome.FAILED, effect_id
+        return result, "FAILED", effect_id
 
     if state == "OUTCOME_UNKNOWN":
         _forbid(response, "error", "retryCategory", "diagnostic", "query",
@@ -497,7 +496,7 @@ def _normalize_result(
         effect_id = _optional_booking_identity(response)
         if effect_id is not None:
             result["provider_booking_id"] = effect_id
-        return result, ToolOutcome.UNKNOWN, effect_id
+        return result, "UNKNOWN", effect_id
 
     raise AdapterProtocolError(
         AdapterErrorCode.INVALID_RESPONSE, "unknown provider result state"

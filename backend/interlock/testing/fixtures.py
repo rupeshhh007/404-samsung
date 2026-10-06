@@ -63,6 +63,7 @@ class FakeProviderFixture(_FixtureModel):
     centers: tuple[FakeCenter, ...]
     diagnostics: tuple[FakeDiagnostic, ...]
     availability: dict[str, tuple[str, ...]]
+    booking_identities: dict[str, dict[str, str]]
     initial_bookings: tuple[FakeBooking, ...]
     cancelled_at: str = Field(min_length=1)
     default_outcomes: dict[str, tuple[ProviderOutcome, ...]]
@@ -76,6 +77,8 @@ class FakeProviderFixture(_FixtureModel):
             raise ValueError("centers must have unique identities")
         if frozenset(self.availability) != frozenset(center_ids):
             raise ValueError("availability must cover exactly the declared centers")
+        if frozenset(self.booking_identities) != frozenset(center_ids):
+            raise ValueError("booking identities must cover exactly the declared centers")
         diagnostic_keys = [(item.device_id, item.error_code) for item in self.diagnostics]
         if not diagnostic_keys or len(diagnostic_keys) != len(set(diagnostic_keys)):
             raise ValueError("diagnostic identities must be unique and nonempty")
@@ -84,14 +87,25 @@ class FakeProviderFixture(_FixtureModel):
                 center_id not in center_ids for center_id in item.center_ids
             ):
                 raise ValueError("diagnostic center references must be unique and known")
-        for slots in self.availability.values():
+        booking_ids: list[str] = []
+        for center_id, slots in self.availability.items():
             if len(slots) != len(set(slots)):
                 raise ValueError("availability slots must be unique")
             for slot in slots:
                 _parse_rfc3339(slot)
-        booking_ids = [booking.booking_id for booking in self.initial_bookings]
-        if len(booking_ids) != len(set(booking_ids)):
+            identities = self.booking_identities[center_id]
+            if frozenset(identities) != frozenset(slots):
+                raise ValueError("booking identities must cover exactly the available slots")
+            if any(not isinstance(identity, str) or not identity for identity in identities.values()):
+                raise ValueError("booking identities must be nonempty text")
+            booking_ids.extend(identities.values())
+        initial_booking_ids = [booking.booking_id for booking in self.initial_bookings]
+        if len(initial_booking_ids) != len(set(initial_booking_ids)):
             raise ValueError("initial booking identities must be unique")
+        if len(booking_ids) != len(set(booking_ids)):
+            raise ValueError("planned booking identities must be unique")
+        if set(booking_ids).intersection(initial_booking_ids):
+            raise ValueError("planned and initial booking identities must be distinct")
         if any(booking.center_id not in center_ids for booking in self.initial_bookings):
             raise ValueError("initial booking references an unknown center")
         _parse_rfc3339(self.cancelled_at)
