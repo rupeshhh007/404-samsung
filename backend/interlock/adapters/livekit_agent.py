@@ -909,7 +909,10 @@ def _browser_stt_options() -> dict[str, Any]:
     configured = os.environ.get(
         "INTERLOCK_VOICE_STT_KEYTERMS",
         "book,appointment,eleven,twelve,noon,midday,actually,reschedule,change,move,"
-        "book twelve,make it twelve,actually book twelve",
+        "book eleven,book twelve,make it eleven,make it twelve,"
+        "actually book eleven,actually book twelve,"
+        "actually make it eleven,actually make it twelve,"
+        "change it to eleven,change it to twelve,eleven o'clock,twelve o'clock",
     )
     keyterms = [term.strip() for term in configured.split(",") if term.strip()]
     endpointing_ms = int(os.environ.get("INTERLOCK_VOICE_STT_ENDPOINTING_MS", "500"))
