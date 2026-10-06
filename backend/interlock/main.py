@@ -1374,7 +1374,9 @@ def create_demo_session_dependencies(
     if fixture.fixture_id != "samsung-demo-v1":
         raise RuntimeError("unexpected demo fixture")
     registry = ToolRegistry(default_timeout_ms=settings.INTERLOCK_TOOL_TIMEOUT_MS)
-    register_tool_manifests(registry)
+    register_tool_manifests(
+        registry, timeout_ms_override=settings.INTERLOCK_TOOL_TIMEOUT_MS,
+    )
     transport, provider = create_fake_tool_transport(fixture)
     dependencies = RuntimeDependencies(
         tool_transport=_DelayedDemoTransport(transport, settings.INTERLOCK_FAKE_LATENCY_MS),
