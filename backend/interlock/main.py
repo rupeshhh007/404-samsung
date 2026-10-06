@@ -1170,32 +1170,69 @@ _DEMO_SLOT_ALIASES = {
     "12:00pm": "2030-01-15T12:00:00+05:30",
     "twelve": "2030-01-15T12:00:00+05:30",
     "twelve pm": "2030-01-15T12:00:00+05:30",
+    "noon": "2030-01-15T12:00:00+05:30",
 }
+
+_DEMO_SLOT_TOKEN = (
+    r"(?:11(?::00)?|12(?::00)?|eleven|twelve|noon)"
+    r"(?:\s*(?:a\.?m\.?|p\.?m\.?|o['’]?clock))?"
+)
+
+
+def _canonical_demo_slot(raw: str) -> str | None:
+    token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
+    if token == "noon" or token.startswith("twelve") or token.startswith("12"):
+        return "12"
+    if token.startswith("eleven") or token.startswith("11"):
+        return "11"
+    return None
 
 
 def _demo_spoken_slot(normalized: str) -> str | None:
-    """Extract one unambiguous 11/12 demo slot from natural STT text."""
+    """Extract one intended 11/12 target from common conversational STT text."""
 
-    matches = re.findall(
-        r"\b(?:11(?::00)?|12(?::00)?|eleven|twelve)(?:\s*(?:a\.?m\.?|p\.?m\.?|o['’]?clock))?\b",
+    # Prefer an explicit destination after correction/scheduling prepositions.
+    # This makes "change from eleven to twelve" resolve to 12 while a bare
+    # "eleven or twelve" remains ambiguous and therefore fail-closed.
+    targeted = re.findall(
+        rf"\b(?:to|for|at)\s+({_DEMO_SLOT_TOKEN})\b",
         normalized,
         flags=re.IGNORECASE,
     )
-    slots: set[str] = set()
-    for raw in matches:
-        token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
-        if token.startswith("eleven") or token.startswith("11"):
-            slots.add("11")
-        elif token.startswith("twelve") or token.startswith("12"):
-            slots.add("12")
+    if targeted:
+        target_slots = [
+            slot for raw in targeted
+            if (slot := _canonical_demo_slot(raw)) is not None
+        ]
+        if target_slots:
+            return target_slots[-1]
+
+    instead = re.search(
+        rf"\b({_DEMO_SLOT_TOKEN})\s+instead\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if instead is not None:
+        return _canonical_demo_slot(instead.group(1))
+
+    matches = re.findall(
+        rf"\b({_DEMO_SLOT_TOKEN})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    slots = {
+        slot for raw in matches
+        if (slot := _canonical_demo_slot(raw)) is not None
+    }
     return next(iter(slots)) if len(slots) == 1 else None
 
 
 def _demo_spoken_alias(raw: str) -> str:
-    """Normalize common voice/STT variants without changing journaled raw evidence.
+    """Normalize common voice/STT variants without changing journaled evidence.
 
-    The demo remains conservative: one explicit slot must be present and
-    negated/destructive phrasing is never rewritten into a booking command.
+    This is intentionally bounded to the deterministic 11/12 demo.  It accepts
+    natural phrasing but still requires one explicit, unambiguous slot and never
+    converts negation into a positive write.
     """
 
     normalized = " ".join(raw.strip().lower().replace("’", "'").split())
@@ -1206,22 +1243,32 @@ def _demo_spoken_alias(raw: str) -> str:
     if slot is None:
         return raw
 
-    # Never turn a negated utterance into a positive booking/correction.
     if re.search(r"\b(?:don't|dont|do not|never|not)\b", normalized):
-        if re.search(r"\b(?:book|schedule|reserve|make|change|move|switch)\b", normalized):
+        if re.search(r"\b(?:book|schedule|reserve|make|change|move|switch|reschedule)\b", normalized):
             return "please clarify"
 
     correction_cue = re.search(
         r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
-        r"make|correct|update|reschedule)\b",
+        r"make|correct|update|reschedule|sorry|meant|mean|no)\b",
         normalized,
     )
     if correction_cue is not None:
         return f"make it {slot}"
 
-    # "Book twelve instead" is covered above by "instead".  These variants
-    # intentionally support natural direct booking language from STT.
-    if re.search(r"\b(?:book|schedule|reserve)\b", normalized):
+    booking_cue = re.search(
+        r"\b(?:book|schedule|reserve|appointment|slot|time)\b",
+        normalized,
+    )
+    request_cue = re.search(
+        r"\b(?:i want|i'd like|id like|can i have|can we do|please)\b",
+        normalized,
+    )
+    if booking_cue is not None or request_cue is not None:
+        return f"book {slot}"
+
+    # Terse correction forms are useful only once an intent exists; _interpret
+    # decides whether the resulting "book N" is a root action or active correction.
+    if re.fullmatch(rf"(?:the\s+)?{_DEMO_SLOT_TOKEN}(?:\s+please)?", normalized):
         return f"book {slot}"
 
     return raw
