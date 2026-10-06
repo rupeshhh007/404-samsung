@@ -593,6 +593,9 @@ class BrowserVoiceWorkerTransport:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._handles: dict[str, SpeechHandle] = {}
         self._closed = False
+        self._transcript_listener: Callable[[Any], None] = self._on_transcript
+        self._transcription_timeout_listener: Callable[[Any], None] = self._on_transcription_timeout
+        self._user_state_listener: Callable[[Any], None] = self._on_user_state
 
     async def connect(self) -> None:
         import websockets
@@ -606,9 +609,9 @@ class BrowserVoiceWorkerTransport:
             },
             max_size=65_536,
         )
-        self.session.on("user_input_transcribed", self._on_transcript)
-        self.session.on("user_transcription_timeout", self._on_transcription_timeout)
-        self.session.on("user_state_changed", self._on_user_state)
+        self.session.on("user_input_transcribed", self._transcript_listener)
+        self.session.on("user_transcription_timeout", self._transcription_timeout_listener)
+        self.session.on("user_state_changed", self._user_state_listener)
         self._spawn(self._read())
 
     def _spawn(self, awaitable: Any) -> None:
@@ -745,9 +748,9 @@ class BrowserVoiceWorkerTransport:
 
     async def close(self, _reason: str = "") -> None:
         try:
-            self.session.off("user_input_transcribed", self._on_transcript)
-            self.session.off("user_transcription_timeout", self._on_transcription_timeout)
-            self.session.off("user_state_changed", self._on_user_state)
+            self.session.off("user_input_transcribed", self._transcript_listener)
+            self.session.off("user_transcription_timeout", self._transcription_timeout_listener)
+            self.session.off("user_state_changed", self._user_state_listener)
         except Exception:
             pass
         self._closed = True
