@@ -750,7 +750,7 @@ def _browser_stt_options() -> dict[str, Any]:
     language = os.environ.get("INTERLOCK_VOICE_STT_LANGUAGE", "en-IN").strip() or "en-IN"
     configured = os.environ.get(
         "INTERLOCK_VOICE_STT_KEYTERMS",
-        "book,appointment,eleven,twelve,actually,reschedule,change,move",
+        "book,appointment,eleven,twelve,noon,actually,reschedule,change,move,book twelve,make it twelve,actually book twelve",
     )
     keyterms = [term.strip() for term in configured.split(",") if term.strip()]
     return {"language": language, "keyterm": keyterms}
