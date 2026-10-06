@@ -155,8 +155,17 @@ def _matches(text: str, pattern: str) -> bool:
 
 
 def _last_value_token(text: str) -> Optional[str]:
-    matches = re.findall(r"\b\d{1,2}(?::\d{2})?(?:\s*[ap]m)?\b", text)
-    return matches[-1].replace(" ", "") if matches else None
+    """Return the last explicit correction value, including common STT number words."""
+
+    matches = re.findall(
+        r"\b(?:eleven|twelve|\d{1,2}(?::\d{2})?(?:\s*[ap]\.?m\.?)?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not matches:
+        return None
+    token = matches[-1].lower().replace(".", "")
+    return " ".join(token.split())
 
 
 def _active_targets(context: FallbackContext) -> tuple[str, ...]:
