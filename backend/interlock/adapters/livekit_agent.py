@@ -607,6 +607,7 @@ class BrowserVoiceWorkerTransport:
             max_size=65_536,
         )
         self.session.on("user_input_transcribed", self._on_transcript)
+        self.session.on("user_transcription_timeout", self._on_transcription_timeout)
         self.session.on("user_state_changed", self._on_user_state)
         self._spawn(self._read())
 
@@ -642,6 +643,17 @@ class BrowserVoiceWorkerTransport:
             "type": "TRANSCRIPT", "item_id": getattr(event, "item_id", None),
             "text": text, "final": bool(event.is_final),
             "created_at": getattr(event, "created_at", None),
+        }))
+
+    def _on_transcription_timeout(self, event: Any) -> None:
+        duration = getattr(event, "speech_duration", 0.0)
+        try:
+            duration_ms = max(0, min(120_000, int(float(duration) * 1000)))
+        except (TypeError, ValueError):
+            duration_ms = 0
+        self._spawn(self._send({
+            "type": "TRANSCRIPTION_TIMEOUT",
+            "speech_duration_ms": duration_ms,
         }))
 
     def _on_user_state(self, event: Any) -> None:
@@ -732,6 +744,12 @@ class BrowserVoiceWorkerTransport:
             await asyncio.gather(poll, playout, return_exceptions=True)
 
     async def close(self, _reason: str = "") -> None:
+        try:
+            self.session.off("user_input_transcribed", self._on_transcript)
+            self.session.off("user_transcription_timeout", self._on_transcription_timeout)
+            self.session.off("user_state_changed", self._on_user_state)
+        except Exception:
+            pass
         self._closed = True
         for handle in tuple(self._handles.values()):
             if not handle.done():
