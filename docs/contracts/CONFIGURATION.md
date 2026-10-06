@@ -9,7 +9,7 @@
 | `INTERLOCK_MODE` | `DEMO|LIVE|TEST`, `DEMO` | optional; composition; unknown fail |
 | `INTERLOCK_MODEL_PROVIDER` | `fallback|configured`, `fallback` | optional; intelligence |
 | `INTERLOCK_MODEL_API_KEY` | secret, no default | required only configured; missing uses fallback in DEMO, fails LIVE |
-| `INTERLOCK_TOOL_TIMEOUT_MS` | int `5000`, 100..60000 | optional; tools |
+| `INTERLOCK_TOOL_TIMEOUT_MS` | int `5000`, 100..60000 | optional; tools; in DEMO this overrides fixture-manifest timeouts so manual delayed-provider tests can safely use values above 5000 ms |
 | `INTERLOCK_BRANCH_TOP_K` | int `2`, 0..3 | optional; BranchCache |
 | `INTERLOCK_BRANCH_TTL_MS` | int `10000`, 100..60000 | optional; BranchCache |
 | `INTERLOCK_SPECULATION_BUDGET` | int cost units `3`, 0..20 | optional; BranchCache |
@@ -46,7 +46,7 @@
 | `AZURE_OPENAI_ENDPOINT` | URL, no default | required only for `azure_openai` |
 | `AZURE_OPENAI_DEPLOYMENT` | string, no default | required only for `azure_openai` |
 
-The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`.
+For manual DEMO race testing, keep `INTERLOCK_TOOL_TIMEOUT_MS` comfortably above `INTERLOCK_FAKE_LATENCY_MS` (for example `15000` with a `10000` ms fake delay) so the delayed provider result is observed instead of being converted into a timeout. The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`.
 
 Current `.env.example`:
 
