@@ -1213,7 +1213,7 @@ def _demo_spoken_slot(normalized: str) -> str | None:
     # "eleven or twelve" remains ambiguous and therefore fail-closed.
     targeted = re.findall(
         rf"\b(?:"
-        rf"(?:to|for|at)\s+|"
+        rf"(?:to|for|at|with)\s+|"
         rf"(?:make|do|use|choose|pick|book|schedule|reserve)\s+(?:it\s+|that\s+)?|"
         rf"(?:go\s+(?:with|for)|set\s+(?:it\s+)?(?:to|for)|"
         rf"put\s+(?:it\s+)?(?:at|for))\s+"
@@ -1322,7 +1322,7 @@ def _demo_spoken_alias(raw: str) -> str:
 
     correction_cue = re.search(
         r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
-        r"make|correct|update|reschedule|cancel|replace|sorry|meant|mean|no|wait)\b",
+        r"make|correct|update|reschedule|cancel|replace|swap|sorry|meant|mean|no|wait)\b",
         normalized,
     )
     if correction_cue is not None:
