@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from interlock.adapters.livekit_agent import _browser_stt_options
+from interlock.adapters.livekit_agent import (
+    _browser_final_coalesce_ms,
+    _browser_stt_options,
+    _merge_final_transcript_segments,
+)
 from interlock.domain.enums import ControlKind
 from interlock.main import _demo_spoken_alias
 from interlock.providers.fallback import DeterministicFallbackProvider, FallbackContext
@@ -135,6 +139,35 @@ def test_fallback_missing_correction_value_requests_slot_specific_clarification(
     assert result.kind == ControlKind.CLARIFY
     assert result.intent_delta is None
     assert result.clarification == "Which booking time do you want: eleven or twelve?"
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "merged"),
+    [
+        ("Actually book", "twelve", "Actually book twelve"),
+        ("Actually book", "book twelve", "Actually book twelve"),
+        ("Change the booking to", "to twelve", "Change the booking to twelve"),
+        ("Book twelve", "Book twelve", "Book twelve"),
+    ],
+)
+def test_final_transcript_segments_merge_without_duplicate_boundary(
+    left: str,
+    right: str,
+    merged: str,
+) -> None:
+    assert _merge_final_transcript_segments(left, right) == merged
+
+
+def test_final_transcript_coalesce_window_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("INTERLOCK_VOICE_FINAL_COALESCE_MS", raising=False)
+    assert _browser_final_coalesce_ms() == 700
+    monkeypatch.setenv("INTERLOCK_VOICE_FINAL_COALESCE_MS", "900")
+    assert _browser_final_coalesce_ms() == 900
+    monkeypatch.setenv("INTERLOCK_VOICE_FINAL_COALESCE_MS", "50")
+    with pytest.raises(RuntimeError):
+        _browser_final_coalesce_ms()
 
 
 def test_browser_stt_defaults_are_tuned_for_demo_speech(monkeypatch: pytest.MonkeyPatch) -> None:
