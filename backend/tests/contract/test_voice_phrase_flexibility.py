@@ -16,12 +16,26 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Book twelve please.", "book 12"),
         ("Please book me for twelve.", "book 12"),
         ("Can you schedule it for 12?", "book 12"),
+        ("I'd like twelve.", "book 12"),
+        ("Can we do twelve?", "book 12"),
+        ("Twelve please.", "book 12"),
+        ("Book an appointment for noon.", "book 12"),
         ("Actually book twelve.", "make it 12"),
         ("Actually, book 12 please.", "make it 12"),
         ("Actually make it twelve.", "make it 12"),
+        ("Actually, twelve.", "make it 12"),
+        ("No, twelve.", "make it 12"),
+        ("Sorry, twelve.", "make it 12"),
+        ("I meant twelve.", "make it 12"),
+        ("Make that twelve.", "make it 12"),
         ("Change the booking to twelve.", "make it 12"),
+        ("Change from eleven to twelve.", "make it 12"),
         ("Could you move it to 12:00 please?", "make it 12"),
+        ("Move the appointment from eleven to twelve.", "make it 12"),
+        ("Switch it to noon.", "make it 12"),
+        ("Reschedule for twelve.", "make it 12"),
         ("Twelve instead.", "make it 12"),
+        ("Can we do twelve instead?", "make it 12"),
     ],
 )
 def test_demo_spoken_alias_accepts_common_stt_variants(
@@ -41,6 +55,18 @@ def test_demo_spoken_alias_accepts_common_stt_variants(
 )
 def test_demo_spoken_alias_never_turns_negation_into_positive_write(spoken: str) -> None:
     assert _demo_spoken_alias(spoken) not in {"book 12", "make it 12"}
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "Eleven or twelve.",
+        "Book eleven or twelve.",
+        "Maybe eleven, maybe twelve.",
+    ],
+)
+def test_demo_spoken_alias_keeps_ambiguous_multi_slot_input_unresolved(spoken: str) -> None:
+    assert _demo_spoken_alias(spoken) == spoken
 
 
 def test_fallback_correction_accepts_spoken_number_word() -> None:
