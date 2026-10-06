@@ -1149,36 +1149,70 @@ class Application:
 _DEMO_SLOT_ALIASES = {
     "11": "2030-01-15T11:00:00+05:30",
     "11:00": "2030-01-15T11:00:00+05:30",
+    "11am": "2030-01-15T11:00:00+05:30",
+    "11:00am": "2030-01-15T11:00:00+05:30",
+    "eleven": "2030-01-15T11:00:00+05:30",
+    "eleven am": "2030-01-15T11:00:00+05:30",
     "12": "2030-01-15T12:00:00+05:30",
     "12:00": "2030-01-15T12:00:00+05:30",
+    "12pm": "2030-01-15T12:00:00+05:30",
+    "12:00pm": "2030-01-15T12:00:00+05:30",
+    "twelve": "2030-01-15T12:00:00+05:30",
+    "twelve pm": "2030-01-15T12:00:00+05:30",
 }
 
 
+def _demo_spoken_slot(normalized: str) -> str | None:
+    """Extract one unambiguous 11/12 demo slot from natural STT text."""
+
+    matches = re.findall(
+        r"\b(?:11(?::00)?|12(?::00)?|eleven|twelve)(?:\s*(?:a\.?m\.?|p\.?m\.?|o['’]?clock))?\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    slots: set[str] = set()
+    for raw in matches:
+        token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
+        if token.startswith("eleven") or token.startswith("11"):
+            slots.add("11")
+        elif token.startswith("twelve") or token.startswith("12"):
+            slots.add("12")
+    return next(iter(slots)) if len(slots) == 1 else None
+
+
 def _demo_spoken_alias(raw: str) -> str:
-    """Interpret only exact demo utterance aliases; never rewrite raw evidence."""
+    """Normalize common voice/STT variants without changing journaled raw evidence.
+
+    The demo remains conservative: one explicit slot must be present and
+    negated/destructive phrasing is never rewritten into a booking command.
+    """
 
     normalized = " ".join(raw.strip().lower().replace("’", "'").split())
-    normalized = re.sub(r"[,.!?]+", "", normalized)
-    if normalized in {
-        "book eleven", "book eleven am", "book 11", "book 11 am",
-        "book 11:00", "book 11:00 am",
-    }:
-        return "book 11"
-    if normalized in {
-        "book twelve", "book twelve pm", "book 12", "book 12 pm",
-        "book 12:00", "book 12:00 pm",
-    }:
-        return "book 12"
-    if normalized in {
-        "actually make it twelve", "make it twelve",
-        "actually make it 12", "make it 12",
-        "actually make it 12:00", "make it 12:00",
-        "actually change it to twelve", "change it to twelve",
-        "12 pm",
-    }:
-        return "make it 12"
-    if normalized in {"don't make it twelve", "do not make it twelve"}:
-        return "please clarify"
+    normalized = re.sub(r"[,!?;]+", " ", normalized)
+    normalized = " ".join(normalized.split())
+
+    slot = _demo_spoken_slot(normalized)
+    if slot is None:
+        return raw
+
+    # Never turn a negated utterance into a positive booking/correction.
+    if re.search(r"\b(?:don't|dont|do not|never|not)\b", normalized):
+        if re.search(r"\b(?:book|schedule|reserve|make|change|move|switch)\b", normalized):
+            return "please clarify"
+
+    correction_cue = re.search(
+        r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
+        r"make|correct|update|reschedule)\b",
+        normalized,
+    )
+    if correction_cue is not None:
+        return f"make it {slot}"
+
+    # "Book twelve instead" is covered above by "instead".  These variants
+    # intentionally support natural direct booking language from STT.
+    if re.search(r"\b(?:book|schedule|reserve)\b", normalized):
+        return f"book {slot}"
+
     return raw
 
 
