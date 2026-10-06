@@ -1190,15 +1190,15 @@ _DEMO_SLOT_ALIASES = {
 
 _DEMO_SLOT_TOKEN = (
     r"(?:11(?::00)?(?!:\d{2})|12(?::00)?(?!:\d{2})|"
-    r"eleven|twelve|noon|midday|mid\s+day)"
+    r"eleven|twelve|noon|midday|mid[-\s]+day)"
     r"(?:\s*(?:a\s*\.?\s*m\.?|p\s*\.?\s*m\.?|"
-    r"o['’]?clock|in\s+the\s+morning|in\s+the\s+afternoon))?"
+    r"o\s*['’]?\s*clock|in\s+the\s+morning|in\s+the\s+afternoon))?"
 )
 
 
 def _canonical_demo_slot(raw: str) -> str | None:
     token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
-    if token in {"noon", "midday", "mid day"} or token.startswith("twelve") or token.startswith("12"):
+    if token in {"noon", "midday", "mid day", "mid-day"} or token.startswith("twelve") or token.startswith("12"):
         return "12"
     if token.startswith("eleven") or token.startswith("11"):
         return "11"
@@ -1214,19 +1214,22 @@ def _demo_spoken_slot(normalized: str) -> str | None:
     targeted = re.findall(
         rf"\b(?:"
         rf"(?:to|for|at)\s+|"
-        rf"(?:make|do|use|choose|pick)\s+(?:it\s+|that\s+)?|"
-        rf"(?:go\s+with|set\s+(?:it\s+)?(?:to|for)|put\s+(?:it\s+)?(?:at|for))\s+"
+        rf"(?:make|do|use|choose|pick|book|schedule|reserve)\s+(?:it\s+|that\s+)?|"
+        rf"(?:go\s+(?:with|for)|set\s+(?:it\s+)?(?:to|for)|"
+        rf"put\s+(?:it\s+)?(?:at|for))\s+"
         rf")({_DEMO_SLOT_TOKEN})\b",
         normalized,
         flags=re.IGNORECASE,
     )
     if targeted:
-        target_slots = [
+        target_slots = {
             slot for raw in targeted
             if (slot := _canonical_demo_slot(raw)) is not None
-        ]
-        if target_slots:
-            return target_slots[-1]
+        }
+        if len(target_slots) == 1:
+            return next(iter(target_slots))
+        if len(target_slots) > 1:
+            return None
 
     instead = re.search(
         rf"\b({_DEMO_SLOT_TOKEN})\s+instead\b",
@@ -1319,7 +1322,7 @@ def _demo_spoken_alias(raw: str) -> str:
 
     correction_cue = re.search(
         r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
-        r"make|correct|update|reschedule|sorry|meant|mean|no|wait)\b",
+        r"make|correct|update|reschedule|cancel|replace|sorry|meant|mean|no|wait)\b",
         normalized,
     )
     if correction_cue is not None:
@@ -1331,7 +1334,8 @@ def _demo_spoken_alias(raw: str) -> str:
     )
     request_cue = re.search(
         r"\b(?:i want|i'd like|id like|can i have|can we do|please|"
-        r"let's do|lets do|go with|give me|i'll take|ill take)\b",
+        r"let's do|lets do|go with|go for|give me|i'll take|ill take|"
+        r"yes|yeah|yep|works|fine|good)\b",
         normalized,
     )
     if booking_cue is not None or request_cue is not None:
