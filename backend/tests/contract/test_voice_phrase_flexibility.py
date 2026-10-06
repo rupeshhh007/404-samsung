@@ -21,6 +21,10 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Twelve please.", "book 12"),
         ("Book an appointment for noon.", "book 12"),
         ("Give me midday please.", "book 12"),
+        ("Mid day please.", "book 12"),
+        ("Book eleven in the morning.", "book 11"),
+        ("Book twelve in the afternoon.", "book 12"),
+        ("Book 12 p m.", "book 12"),
         ("Let's do twelve.", "book 12"),
         ("Go with 12.", "book 12"),
         ("At twelve please.", "book 12"),
@@ -64,6 +68,25 @@ def test_demo_spoken_alias_accepts_common_stt_variants(
 )
 def test_demo_spoken_alias_never_turns_negation_into_positive_write(spoken: str) -> None:
     assert _demo_spoken_alias(spoken) not in {"book 12", "make it 12"}
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "Book 12:30.",
+        "Book eleven thirty.",
+        "Book half past eleven.",
+        "Book quarter to twelve.",
+        "Book sometime before twelve.",
+        "Book after eleven.",
+        "Book around twelve.",
+        "Maybe book twelve.",
+        "Book by twelve.",
+        "Book from eleven to twelve.",
+    ],
+)
+def test_demo_spoken_alias_rejects_inexact_or_unsupported_time_requests(spoken: str) -> None:
+    assert _demo_spoken_alias(spoken) == "please clarify"
 
 
 @pytest.mark.parametrize(
