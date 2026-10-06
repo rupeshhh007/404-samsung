@@ -663,6 +663,79 @@ class _AutoVoicePlayout:
         task.add_done_callback(self.tasks.discard)
 
 
+def test_missing_final_transcript_gets_controlled_repeat_prompt(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        from uuid import uuid4
+
+        await registry.accept(binding, binding.generation, {
+            "type": "TRANSCRIPTION_TIMEOUT",
+            "worker_event_id": uuid4().hex,
+            "speech_duration_ms": 1400,
+        })
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+
+        async def repeat_prompt_emitted() -> None:
+            while True:
+                state = host.application.snapshot(binding.session_id)
+                if any(
+                    speech.template_id == "tmpl_clarification_repeat"
+                    and speech.state == SpeechState.EMITTED
+                    for speech in state.speech.values()
+                ):
+                    return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(repeat_prompt_emitted(), timeout=5)
+        events = host.application.events(binding.session_id)
+        assert any(event.event_type == "VoiceTranscriptionTimeoutObserved" for event in events)
+        assert not any(event.event_type == "ToolDispatchRequested" for event in events)
+        assert binding.provider.physical_action_count == 0
+
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_short_vad_blip_timeout_does_not_prompt_or_write(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        from uuid import uuid4
+
+        await registry.accept(binding, binding.generation, {
+            "type": "TRANSCRIPTION_TIMEOUT",
+            "worker_event_id": uuid4().hex,
+            "speech_duration_ms": 250,
+        })
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        state = host.application.snapshot(binding.session_id)
+        assert not state.speech
+        assert binding.provider.physical_action_count == 0
+
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
 def test_late_correction_retains_eleven_and_never_repairs_automatically(monkeypatch: Any) -> None:
     _voice_env(monkeypatch)
 
