@@ -745,15 +745,38 @@ class BrowserVoiceWorkerTransport:
 
 
 def _browser_stt_options() -> dict[str, Any]:
-    """Return conservative browser-demo STT tuning without embedding credentials."""
+    """Return accuracy-first Deepgram tuning for the browser voice demo.
+
+    Nova-3 defaults to very aggressive endpointing.  A longer endpoint keeps
+    mid-thought pauses such as "actually ... book twelve" inside one utterance,
+    while smart formatting/numerals reduce word-vs-digit variation before the
+    deterministic semantic boundary sees the final transcript.
+    """
 
     language = os.environ.get("INTERLOCK_VOICE_STT_LANGUAGE", "en-IN").strip() or "en-IN"
     configured = os.environ.get(
         "INTERLOCK_VOICE_STT_KEYTERMS",
-        "book,appointment,eleven,twelve,noon,actually,reschedule,change,move,book twelve,make it twelve,actually book twelve",
+        "book,appointment,eleven,twelve,noon,midday,actually,reschedule,change,move,"
+        "book twelve,make it twelve,actually book twelve",
     )
     keyterms = [term.strip() for term in configured.split(",") if term.strip()]
-    return {"language": language, "keyterm": keyterms}
+    endpointing_ms = int(os.environ.get("INTERLOCK_VOICE_STT_ENDPOINTING_MS", "500"))
+    utterance_end_ms = int(os.environ.get("INTERLOCK_VOICE_STT_UTTERANCE_END_MS", "1000"))
+    if not 100 <= endpointing_ms <= 2000:
+        raise RuntimeError("INTERLOCK_VOICE_STT_ENDPOINTING_MS must be 100..2000")
+    if not 1000 <= utterance_end_ms <= 5000:
+        raise RuntimeError("INTERLOCK_VOICE_STT_UTTERANCE_END_MS must be 1000..5000")
+    return {
+        "language": language,
+        "keyterm": keyterms,
+        "interim_results": True,
+        "punctuate": True,
+        "smart_format": True,
+        "numerals": True,
+        "filler_words": False,
+        "endpointing_ms": endpointing_ms,
+        "utterance_end_ms": utterance_end_ms,
+    }
 
 
 async def _browser_voice_entrypoint(ctx: Any) -> None:
@@ -771,6 +794,7 @@ async def _browser_voice_entrypoint(ctx: Any) -> None:
         tts=cartesia.TTS(model=tts_model, voice=os.environ["INTERLOCK_VOICE_TTS_VOICE_ID"],
                          api_key=os.environ["CARTESIA_API_KEY"]),
         vad=silero.VAD.load(), llm=None,
+        transcription_timeout=2.5,
         turn_handling=manual_turn_handling,
     )
     transport = BrowserVoiceWorkerTransport(
