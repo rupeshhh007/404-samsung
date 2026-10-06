@@ -11,6 +11,11 @@ export const VOICE_AUDIO_CAPTURE_OPTIONS = {
   echoCancellation: true,
   noiseSuppression: true,
   autoGainControl: true,
+  channelCount: 1,
+  sampleRate: 48_000,
+  // Chromium can apply stronger single-speaker isolation when available.
+  // Unsupported browsers ignore the experimental constraint.
+  voiceIsolation: true,
 } as const;
 
 /** LiveKit has audio transport only; no business projection is read here. */
