@@ -739,6 +739,29 @@ class BrowserVoiceWorkerTransport:
         await self.session.aclose()
 
 
+async def _browser_voice_entrypoint(ctx: Any) -> None:
+    from livekit.plugins import cartesia, deepgram, silero
+
+    stt_model = os.environ.get("INTERLOCK_VOICE_STT_MODEL", "nova-3")
+    tts_model = os.environ.get("INTERLOCK_VOICE_TTS_MODEL", "sonic-3")
+    session = AgentSession(
+        stt=deepgram.STT(model=stt_model, api_key=os.environ["DEEPGRAM_API_KEY"]),
+        tts=cartesia.TTS(model=tts_model, voice=os.environ["INTERLOCK_VOICE_TTS_VOICE_ID"],
+                         api_key=os.environ["CARTESIA_API_KEY"]),
+        vad=silero.VAD.load(), llm=None,
+    )
+    transport = BrowserVoiceWorkerTransport(
+        session, room_name=ctx.room.name,
+        backend_ws_url=os.environ["INTERLOCK_VOICE_BACKEND_WS_URL"],
+        worker_secret=os.environ["INTERLOCK_VOICE_WORKER_SECRET"],
+    )
+    await transport.connect()
+    ctx.add_shutdown_callback(transport.close)
+    await session.start(room=ctx.room, agent=Agent(
+        instructions="INTERLOCK transport only; no model-side actions.", llm=None, tools=[],
+    ))
+
+
 def run_browser_voice_worker() -> None:
     """Run the browser-only transport worker; backend retains all authority."""
 
@@ -751,35 +774,13 @@ def run_browser_voice_worker() -> None:
     if missing:
         raise RuntimeError("browser voice worker requires " + ", ".join(missing))
     from livekit import agents
-    from livekit.plugins import cartesia, deepgram, silero
 
-    stt_model = os.environ.get("INTERLOCK_VOICE_STT_MODEL", "nova-3")
-    tts_model = os.environ.get("INTERLOCK_VOICE_TTS_MODEL", "sonic-3")
     server = AgentServer()
-
-    @server.rtc_session()
-    async def entrypoint(ctx: agents.JobContext) -> None:
-        session = AgentSession(
-            stt=deepgram.STT(model=stt_model, api_key=os.environ["DEEPGRAM_API_KEY"]),
-            tts=cartesia.TTS(model=tts_model, voice=os.environ["INTERLOCK_VOICE_TTS_VOICE_ID"],
-                             api_key=os.environ["CARTESIA_API_KEY"]),
-            vad=silero.VAD.load(), llm=None,
-        )
-        transport = BrowserVoiceWorkerTransport(
-            session, room_name=ctx.room.name,
-            backend_ws_url=os.environ["INTERLOCK_VOICE_BACKEND_WS_URL"],
-            worker_secret=os.environ["INTERLOCK_VOICE_WORKER_SECRET"],
-        )
-        await transport.connect()
-        ctx.add_shutdown_callback(transport.close)
-        await session.start(room=ctx.room, agent=Agent(
-            instructions="INTERLOCK transport only; no model-side actions.", llm=None, tools=[],
-        ))
-
+    server.rtc_session(_browser_voice_entrypoint)
     agents.cli.run_app(server)
 
 
-__all__.extend(["BrowserVoiceWorkerTransport", "run_browser_voice_worker"])
+__all__.extend(["BrowserVoiceWorkerTransport", "run_browser_voice_worker", "_browser_voice_entrypoint"])
 
 
 if __name__ == "__main__":

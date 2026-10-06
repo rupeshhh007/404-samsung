@@ -1751,3 +1751,19 @@ def test_early_successful_playout_without_start_signal_does_not_fail_unheard() -
         await adapter.close()
 
     asyncio.run(case())
+
+
+def test_browser_voice_worker_entrypoint_is_picklable() -> None:
+    import pickle
+    from livekit.agents import AgentServer
+    from interlock.adapters.livekit_agent import _browser_voice_entrypoint
+
+    pickled = pickle.dumps(_browser_voice_entrypoint)
+    unpickled = pickle.loads(pickled)
+    assert unpickled is _browser_voice_entrypoint
+
+    server = AgentServer()
+    server.rtc_session(_browser_voice_entrypoint)
+    server_pickled = pickle.dumps(server)
+    server_unpickled = pickle.loads(server_pickled)
+    assert server_unpickled._entrypoint_fnc is _browser_voice_entrypoint
