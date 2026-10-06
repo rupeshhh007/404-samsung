@@ -25,6 +25,13 @@ def _write(path: Path, text: str, *, executable: bool = False) -> None:
         path.chmod(0o755)
 
 
+def _reproduction_python() -> str:
+    """Prefer an explicitly configured Python 3.11 reproduction interpreter."""
+
+    configured = os.environ.get("FDB_V3_PYTHON", "").strip()
+    return configured or sys.executable
+
+
 @pytest.fixture
 def reproduction(tmp_path: Path) -> dict[str, object]:
     repository = tmp_path / "official-fdb"
@@ -103,7 +110,7 @@ Path(a.output).write_text(json.dumps({'source': 'official evaluator stub'}), enc
         "FDB_V3_DATA_DIR": str(data),
         "FDB_V3_PROVIDER": "gpt_realtime",
         "FDB_V3_BENCHMARK_COMMIT": commit,
-        "FDB_V3_PYTHON": sys.executable,
+        "FDB_V3_PYTHON": _reproduction_python(),
         "FDB_V3_REQUIRED_MODULES": "",
         "FDB_V3_AGENT_COMMAND": str(agent),
         "FDB_V3_AGENT_STARTUP_SECONDS": "0.01",
@@ -156,6 +163,17 @@ def _run(case: dict[str, object], **changes: str | None) -> subprocess.Completed
         capture_output=True,
         timeout=20,
     )
+
+
+def test_reproduction_python_prefers_explicit_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = "/configured/python3.11"
+    monkeypatch.setenv("FDB_V3_PYTHON", configured)
+    assert _reproduction_python() == configured
+
+    monkeypatch.setenv("FDB_V3_PYTHON", "")
+    assert _reproduction_python() == sys.executable
 
 
 def test_rejects_missing_prerequisite(reproduction: dict[str, object]) -> None:
