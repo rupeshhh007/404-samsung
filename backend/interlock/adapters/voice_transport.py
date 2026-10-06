@@ -46,6 +46,11 @@ class UserSpeaking(_TransportFact):
     type: Literal["USER_SPEAKING"]
 
 
+class TranscriptionTimeout(_TransportFact):
+    type: Literal["TRANSCRIPTION_TIMEOUT"]
+    speech_duration_ms: int = Field(..., ge=0, le=120_000)
+
+
 class PlayoutStarted(_TransportFact):
     type: Literal["PLAYOUT_STARTED"]
     speech_id: str = Field(min_length=1, max_length=128)
@@ -67,6 +72,7 @@ class PlayoutFailed(_TransportFact):
 _FACTS = {
     "TRANSCRIPT": Transcript,
     "USER_SPEAKING": UserSpeaking,
+    "TRANSCRIPTION_TIMEOUT": TranscriptionTimeout,
     "PLAYOUT_STARTED": PlayoutStarted,
     "PLAYOUT_FINISHED": PlayoutFinished,
     "PLAYOUT_FAILED": PlayoutFailed,
@@ -316,6 +322,16 @@ class VoiceTransportRegistry:
                 source=EventSource.INPUT_ADAPTER,
                 payload={"evidence_id": f"voice-{identity}", "text": fact.text, "final": fact.final},
                 dedupe_key=f"livekit:transcript:{identity}", correlation_id=session_id,
+            ))
+            return
+        if isinstance(fact, TranscriptionTimeout):
+            await self.application.append(EventCandidate(
+                session_id=session_id,
+                event_type="VoiceTranscriptionTimeoutObserved",
+                source=EventSource.INPUT_ADAPTER,
+                payload={"speech_duration_ms": fact.speech_duration_ms},
+                dedupe_key=f"livekit:transcription-timeout:{fact.worker_event_id}",
+                correlation_id=session_id,
             ))
             return
         if isinstance(fact, UserSpeaking):
