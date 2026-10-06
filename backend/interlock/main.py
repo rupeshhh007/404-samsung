@@ -1079,7 +1079,7 @@ def _demo_root_booking(
 ) -> tuple[dict[str, Any], IntentRevision] | None:
     """Recognize only the documented deterministic demo's root booking phrase."""
     normalized = " ".join(text.strip().lower().split())
-    match = re.fullmatch(r"book\s+(11(?::00)?)(?:\.)?", normalized)
+    match = re.fullmatch(r"book\s+((?:11|12)(?::00)?)(?:\.)?", normalized)
     if match is None:
         return None
     slot = _DEMO_SLOT_ALIASES[match.group(1)]

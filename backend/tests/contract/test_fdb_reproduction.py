@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -129,8 +130,26 @@ def _run(case: dict[str, object], **changes: str | None) -> subprocess.Completed
             env.pop(name, None)
         else:
             env[name] = value
+    command = [str(SCRIPT)]
+    if os.name == "nt":
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.fail("T-FDB-02 requires Git Bash on Windows to execute the shell contract")
+        cygpath = Path(bash).with_name("cygpath.exe")
+        if not cygpath.is_file():
+            pytest.fail("T-FDB-02 requires Git Bash cygpath for Windows fixture paths")
+        for name in (
+            "FDB_V3_REPO", "FDB_V3_DATA_DIR", "FDB_V3_PYTHON",
+            "FDB_V3_AGENT_COMMAND", "FDB_V3_OUTPUT_DIR",
+        ):
+            value = env.get(name)
+            if value and Path(value).drive:
+                env[name] = subprocess.check_output(
+                    [str(cygpath), "-u", value], text=True,
+                ).strip()
+        command = [bash, "scripts/reproduce_fdb_v3.sh"]
     return subprocess.run(
-        [str(SCRIPT)],
+        command,
         cwd=ROOT,
         env=env,
         text=True,
