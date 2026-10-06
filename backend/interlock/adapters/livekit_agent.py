@@ -726,7 +726,11 @@ class BrowserVoiceWorkerTransport:
     def _take_final_transcript(
         self, *, cancel_flush: bool = True,
     ) -> dict[str, Any] | None:
-        if cancel_flush and self._final_flush_task is not None                 and not self._final_flush_task.done():
+        if (
+            cancel_flush
+            and self._final_flush_task is not None
+            and not self._final_flush_task.done()
+        ):
             self._final_flush_task.cancel()
         self._final_flush_task = None
         text = self._final_transcript.strip()
@@ -854,7 +858,7 @@ class BrowserVoiceWorkerTransport:
 
 
 def _normalize_overlap_token(token: str) -> str:
-    return token.strip(" \\t\\r\\n.,!?;:\"'()[]{}").lower()
+    return token.strip(" \t\r\n.,!?;:\"'()[]{}").lower()
 
 
 def _merge_final_transcript_segments(current: str, incoming: str) -> str:
