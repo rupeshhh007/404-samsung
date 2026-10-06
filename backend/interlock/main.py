@@ -1179,10 +1179,10 @@ _DEMO_SLOT_ALIASES = {
 }
 
 _DEMO_SLOT_TOKEN = (
-    r"(?:11(?::00)?(?!:\\d{2})|12(?::00)?(?!:\\d{2})|"
-    r"eleven|twelve|noon|midday|mid\\s+day)"
-    r"(?:\\s*(?:a\\s*\\.?\\s*m\\.?|p\\s*\\.?\\s*m\\.?|"
-    r"o['’]?clock|in\\s+the\\s+morning|in\\s+the\\s+afternoon))?"
+    r"(?:11(?::00)?(?!:\d{2})|12(?::00)?(?!:\d{2})|"
+    r"eleven|twelve|noon|midday|mid\s+day)"
+    r"(?:\s*(?:a\s*\.?\s*m\.?|p\s*\.?\s*m\.?|"
+    r"o['’]?clock|in\s+the\s+morning|in\s+the\s+afternoon))?"
 )
 
 
