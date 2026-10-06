@@ -787,6 +787,96 @@ def test_dispatched_unknown_eleven_never_licenses_blind_twelve(monkeypatch: Any)
     asyncio.run(case())
 
 
+def test_correction_before_parent_operation_creation_executes_latest_revision(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        root = IntentRevision(
+            revision_id="voice-race-root",
+            intent_id="voice-race-intent",
+            values={
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T11:00:00+05:30",
+            },
+            maturity=IntentMaturity.COMMITTED,
+            authorization=Authorization.NOT_REQUESTED,
+            created_by_event_id="voice-race-root-event",
+            dependency_fingerprint="voice-race-root-fingerprint",
+        )
+        child = IntentRevision(
+            revision_id="voice-race-child",
+            intent_id=root.intent_id,
+            parent_revision_id=root.revision_id,
+            values={
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T12:00:00+05:30",
+            },
+            maturity=IntentMaturity.COMMITTED,
+            authorization=Authorization.NOT_REQUESTED,
+            created_by_event_id="voice-race-child-event",
+            dependency_fingerprint="voice-race-child-fingerprint",
+        )
+
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="IntentRevisionCommitted",
+            source=EventSource.MODEL,
+            payload={"revision": root.model_dump(mode="json")},
+        ))
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="IntentRevisionCommitted",
+            source=EventSource.MODEL,
+            payload={"revision": child.model_dump(mode="json")},
+        ))
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="IntentAuthorizationChanged",
+            source=EventSource.USER,
+            payload={
+                "revision_id": child.revision_id,
+                "authorization": Authorization.AUTHORIZED.value,
+                "evidence_id": "voice-race-auth",
+            },
+        ))
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+
+        final = host.application.snapshot(binding.session_id)
+        assert not any(
+            operation.intent_revision_id == root.revision_id
+            for operation in final.operations.values()
+        )
+        child_operations = [
+            operation for operation in final.operations.values()
+            if operation.intent_revision_id == child.revision_id
+            and operation.tool_name == "appointment.book"
+        ]
+        assert len(child_operations) == 1
+        assert binding.provider.physical_action_count == 1
+        assert len(binding.provider.bookings) == 1
+        assert next(iter(binding.provider.bookings.values()))["confirmed_slot"].endswith(
+            "12:00:00+05:30"
+        )
+        assert final.effects
+        assert all(
+            effect.operation_id == child_operations[0].operation_id
+            for effect in final.effects.values()
+        )
+        assert not final.divergences
+
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
 def test_early_correction_replaces_only_locally_cancelled_pre_dispatch_booking(monkeypatch: Any) -> None:
     _voice_env(monkeypatch)
 

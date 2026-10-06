@@ -375,11 +375,9 @@ class _Session:
             return
 
         if event.event_type == "CancellationAcknowledged":
-            parent_operation = state.operations.get(event.payload.get("operation_id"))
             node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
             revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
-            if (parent_operation is not None and revision is not None
-                    and revision.parent_revision_id == parent_operation.intent_revision_id
+            if (revision is not None
                     and revision.authorization == Authorization.AUTHORIZED
                     and revision.values.get("goal_type") == "appointment_booking"
                     and self._demo_replacement_eligible(revision, state)):
@@ -491,25 +489,48 @@ class _Session:
             return False
         if revision.parent_revision_id is None:
             return True
-        parent = state.operations.get(_identity(revision.parent_revision_id, "appointment.book"))
-        if parent is None:
-            return False
-        # Only a local pre-dispatch acknowledgement proves that this old
-        # booking never crossed the provider boundary. An empty effect ledger
-        # after dispatch is not evidence of non-occurrence (I13).
-        if (parent.state not in (OperationState.CANCELLED, OperationState.SUPERSEDED)
-                or parent.cancellation_state != CancellationState.ACKNOWLEDGED
-                or CancellationAckScope.LOCAL_TASK not in parent.cancellation_ack_scopes
-                or parent.dispatch_requested_event_id is not None
-                or parent.provider_request_id is not None
-                or parent.effect_state != EffectState.NOT_STARTED):
-            return False
-        return not any(
-            effect.operation_id == parent.operation_id
-            and effect.authority == EvidenceAuthority.AUTHORITATIVE
-            and effect.state == EffectState.COMMITTED
-            for effect in state.effects.values()
-        )
+
+        ancestor_revision_ids: set[str] = set()
+        parent_revision_id = revision.parent_revision_id
+        while parent_revision_id is not None:
+            if parent_revision_id in ancestor_revision_ids:
+                return False
+            ancestor_revision_ids.add(parent_revision_id)
+            parent_revision = state.revisions.get(parent_revision_id)
+            if parent_revision is None or parent_revision.intent_id != revision.intent_id:
+                return False
+            parent_revision_id = parent_revision.parent_revision_id
+
+        prior_operations = [
+            operation
+            for operation in state.operations.values()
+            if operation.tool_name == "appointment.book"
+            and operation.intent_revision_id in ancestor_revision_ids
+        ]
+        # No ancestor operation means the correction won the race before stale
+        # work was even created, so executing the current revision is safe.
+        if not prior_operations:
+            return True
+
+        for operation in prior_operations:
+            # Only a local pre-dispatch acknowledgement proves that old work
+            # never crossed the provider boundary. An empty effect ledger after
+            # dispatch is not evidence of non-occurrence (I13).
+            if (operation.state not in (OperationState.CANCELLED, OperationState.SUPERSEDED)
+                    or operation.cancellation_state != CancellationState.ACKNOWLEDGED
+                    or CancellationAckScope.LOCAL_TASK not in operation.cancellation_ack_scopes
+                    or operation.dispatch_requested_event_id is not None
+                    or operation.provider_request_id is not None
+                    or operation.effect_state != EffectState.NOT_STARTED):
+                return False
+            if any(
+                effect.operation_id == operation.operation_id
+                and effect.authority == EvidenceAuthority.AUTHORITATIVE
+                and effect.state == EffectState.COMMITTED
+                for effect in state.effects.values()
+            ):
+                return False
+        return True
 
     async def _create_demo_appointment_operation(
         self, revision: IntentRevision, state: SessionState, context: DispatchContext,
