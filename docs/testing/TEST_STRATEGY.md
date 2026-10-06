@@ -26,7 +26,7 @@ All backend tests use pytest; race/scenario tests use the virtual clock. Planned
 | T-IDM-01 — Idempotent write/callback | FR-010, I5; Operations; `backend/tests/unit/test_tools.py` | duplicate retry and duplicate callback | same key/args makes one logical effect; conflicting args rejected |
 | T-SAF-01 — Correction before dispatch | FR-007, I3; SAFEPOINT; `backend/tests/unit/test_safepoint.py` | correction before named safe point | cancellation acknowledged locally; operation CANCELLED/SUPERSEDED; no 11 call/effect |
 | T-SAF-02 — Dispatch revalidation | FR-009, I14; SAFEPOINT; same file | READY operation with stale fingerprint/expired auth | no `ToolDispatchRequested`; hold/cancel reason exact |
-| T-WLD-01 — Late effect retention | FR-011, I4/I10; Effects; `backend/tests/unit/test_effects.py` | stale book11 callback | apt-11 COMMITTED retained; divergence OPEN; no 12 success speech |
+| T-WLD-01 — Late effect retention and projection | FR-011, I4/I9/I10; Effects; `backend/tests/unit/test_effects.py` | stale book11 callback; conflicting authoritative A/B; scoped verification C; compensation success/failure/unknown/conflict; duplicate physical IDs | immutable history retained; unresolved projection until decisive causally scoped verification (supporting either A or B); later ordinary/insufficient/conflicting verification cannot win by arrival; replay same projection with zero commands; each duplicate physical ID individually targetable; no unsupported success speech |
 | T-UNK-01 — Unknown write outcome | FR-007, I13; Operations; `backend/tests/unit/test_operations.py` | timeout after dispatch | operation TIMED_OUT/effect OUTCOME_UNKNOWN; verification scheduled; no blind retry |
 | T-REC-01 — Successful reconciliation | FR-012, I10; Reconciliation; `backend/tests/unit/test_reconciliation.py` | authorized reversible 11 vs desired 12 | verify/cancel/verify/book/verify order; final case RESOLVED and claim confirmed |
 | T-REC-02 — Failed compensation | FR-012, I10; Reconciliation; same file | cancellation terminal failure | plan FAILED, case ESCALATED, world remains 11, uncertainty output, no success |
@@ -58,6 +58,16 @@ All backend tests use pytest; race/scenario tests use the virtual clock. Planned
 | T-UI-04 — Core workflow accessibility | FR-015, FR-018; Frontend; `frontend/src/test/components.test.tsx` | P0 booking/divergence projections | exact controlled text, keyboard/focus/live-region and non-color status assertions |
 | T-UI-05 — P1 demo panels | FR-006, FR-012, NFR-002; Frontend; `frontend/src/test/components.test.tsx` | branch/reconciliation/metrics projections | ANTICIPATE, stepper, and measured/not-measured metrics render accurately |
 
+## Updated Theme 05 acceptance (planned; not currently passing)
+
+| ID — name | Coverage; module; planned file | Initial conditions and input | Expected events/state/output; pass criteria |
+|---|---|---|---|
+| T-VOICE-01 — LiveKit interruption and progress | FR-021, NFR-010; `backend/tests/contract/test_livekit.py` | partial/final speech with filler, false start, barge-in during speech and slow tool | safe spoken progress begins before tool completion; partial text never authorizes write; speech cancels independently; final correction updates active arguments; measured timings reported, not assumed |
+| T-FDB-01 — Generic FDB-v3 mapping | FR-022; `backend/tests/contract/test_fdb_v3.py` | tool descriptions, chained calls, self-correction and malformed arguments without benchmark answer fixtures | names/arguments map through validated descriptors, stale calls fail safely, no duplicate write or scenario-specific logic |
+| T-ISO-01 — Fresh benchmark scenario | FR-022; `backend/tests/contract/test_fdb_isolation.py` | run two conversations with overlapping IDs | second has no first-session operations, callbacks, idempotency, branches, model context, evidence or effects |
+| T-FDB-02 — Reproduction fails loudly | NFR-009, NFR-010; `backend/tests/contract/test_fdb_reproduction.py` | missing data/key, empty input, and valid configured subset | invalid prerequisites/nonempty-output checks fail nonzero; valid run invokes official inference and evaluation with recorded versions/seeds/logs; no score asserted without execution |
+| T-EXT-01 — Working voice extension | FR-023; existing scenario/golden suite and live demo | spoken booking corrected during tool work | extension runs end to end, retains late physical effect, blocks false done claim, and shows authoritative final/uncertain state |
+
 ## Suite execution policy
 
 Ticket ownership is exact:
@@ -66,5 +76,6 @@ Ticket ownership is exact:
 - `TST-004`: `T-REF-01`, `T-BRC-01`, `T-REC-01`, `T-REC-02`, `T-REC-03`, and `T-E2E-02`.
 - `UI-004`: `T-UI-01`, `T-UI-02`, `T-UI-03`, and `T-UI-04`.
 - `UI-005`: `T-UI-05`.
+- `VCE-001`: `T-VOICE-01`; `FDB-001`: `T-FDB-01`, `T-ISO-01`; `FDB-002`: `T-FDB-02`; `EXT-001`: `T-EXT-01`. These are planned acceptance cases, not current test results.
 
 Invariant ticket ownership is exact in `INVARIANT_TESTS.md`: `TST-004` owns `T-INV-I2-P`, `T-INV-I2-N`, `T-INV-I10-P`, and `T-INV-I10-N`; `TST-003` owns the other 24 named invariant cases. These are ticket assignments, not alternative test IDs.

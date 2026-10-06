@@ -35,6 +35,12 @@ flowchart LR
 
 All interfaces are session-scoped. Cancellation is cooperative according to descriptors; idempotency applies to logical action IDs and declared provider support.
 
+For `EffectInterpreter.observe`, `effect_id` is a stable local observation identity, `provider_effect_id` is the provider-qualified physical identity, and `logical_action_id` is the incident group for one intended action. It must not reuse an `effect_id` for changed content. The reducer stores a deep copy of each new observation; exact repeated IDs preserve the original object and conflicting repeated IDs fail closed. Distinct observations of one physical effect are retained; authoritative disagreement makes the derived current-world projection unresolved and requests `VerifyOutcome(operation_id, provider_effect_id=...)`. Distinct physical IDs for one logical action are retained and each receives an individually targeted `VerifyOutcome`. The optional physical target is additive; operation-only verification remains valid for timeouts. Verification adds evidence and a new observation, never mutates history. The verification provenance and projection rule are defined in `WORLD_EFFECTS.md`. `COMPENSATED` links to an existing committed observation of the same physical effect using `supersedes_effect_id`.
+
+The P0 `EffectInterpreter` mapping uses `effect_type="appointment.booking"` for confirmed `appointment.book`, authoritative `appointment.get` booking readback, and confirmed `appointment.cancel` compensation (state `COMPENSATED`). Unknown effect-producing tools fail closed; `appointment.cancellation` is not a separate effect type.
+
+The EXE-005 implementation takes explicit `known_effects` and `known_evidence` snapshots. Its local `VerificationScope` carries the original booking operation/action pair and triggering request ID; an absent physical target with empty coverage is operation-only verification, while a physical target requires complete prior authoritative coverage. Verification and compensation observations retain the booking pair in `EffectRecord`; evidence identifies the separate read/cancel producer. This preserves existing reducer correlation without changing event or command schemas. Compensation selects the projection's resolved current committed observation, including one established by scoped verification. See `WORLD_EFFECTS.md` for producer validation and multi-incident projection semantics.
+
 ## Normative interface details
 
 ### `JournalPort.append(candidate)`
@@ -49,12 +55,12 @@ All interfaces are session-scoped. Cancellation is cooperative according to desc
 
 - Preconditions: envelope session matches state and sequence is exactly `last_sequence + 1` (except `SessionStarted` creating state).
 - Output: a fully new state value, ordered command list, and sanitized projection delta pinned to the sequence.
-- Errors: invalid transition returns unchanged state plus `RecordProtocolViolation`; an unexpected reducer defect halts the session rather than partially committing.
+- Errors: an invalid transition preserves business/entity state, consumes the already accepted envelope by advancing reducer cursor/metrics, and returns `RecordProtocolViolation`; an unexpected reducer defect leaves state uncommitted and halts the session.
 - Replay: `mode=REPLAY` computes state/projection but the loop discards every command.
 
 ### `ToolExecutor.invoke(invocation)`
 
-`invocation` contains `operation_id`, descriptor capability hash, validated arguments, logical action ID, idempotency key, deadline, speculative flag, and cancellation token. It emits `ToolDispatchAccepted`, zero or more acknowledgement `ToolResultObserved` events, and one terminal result/timeout event. It must not emit `WorldEffectObserved`; effect interpretation is reducer policy. Cancellation behavior comes only from the descriptor. Reusing a write idempotency key with different normalized arguments is `IDEMPOTENCY_CONFLICT` and no provider call.
+`invocation` contains `operation_id`, dispatch authorization token (`dispatch_requested_event_id`), descriptor capability hash, validated arguments, logical action ID, idempotency key, deadline, speculative flag, and cancellation token. It emits `ToolDispatchAccepted`, zero or more acknowledgement `ToolResultObserved` events, and one terminal result/timeout event. It must not emit `WorldEffectObserved`; effect interpretation is reducer policy. Cancellation behavior comes only from the descriptor. Reusing a write idempotency key with different normalized arguments is `IDEMPOTENCY_CONFLICT` and no provider call.
 
 ### `Reconciler.plan(snapshot)`
 
@@ -62,4 +68,4 @@ Input is an immutable sequence-pinned desired revision, authoritative effects, o
 
 ### `Truthlock.validate(request)`
 
-Input contains the SpeechAct, claim versions and evidence records at `through_sequence`, plus policy version. Output is `APPROVE(template,text)`, `BLOCK(reason,max_certainty)`, or `RETRY_STALE_SNAPSHOT`. The dispatcher journals the corresponding event; it does not enqueue audio directly. Validation is idempotent for `(speech_id, through_sequence, policy_version)`.
+Input contains the SpeechAct, claim versions and evidence records at `through_sequence`, plus policy version. Output is `APPROVE(template, text, through_sequence, claim_versions)`, `BLOCK(reason, max_certainty)`, or `RETRY_STALE_SNAPSHOT`. The decision forwards `through_sequence` and exact `claim_versions` (mapping each `claim_id` to `ClaimRecord.updated_by_event_id`) into `SpeechActApproved`. Stale sequence pins or claim version mismatches consumed by the reducer retry via `ValidateSpeech` rather than approving. On claim contradiction of emitted heard speech, the reducer emits `RequestSpeechCorrection`. For a correction child, replacement is reducer-owned and requires canonical epistemic invalidation: direct APPROVED claim advancement, pre-queue claim-version staleness, or an active child previously marked `correction_pending=True` that terminalizes unheard. Generic policy blocks, explicit user/barge-in cancellation, and plain `SpeechEmissionFailed` do not automatically re-request the parent. A heard correction satisfies its parent; later claim invalidation creates a distinct correction obligation on that correction. Replay suppresses all commands. Validation is idempotent for `(speech_id, through_sequence, policy_version)`.

@@ -1,0 +1,95 @@
+:root {
+  /* Editorial console */
+  --console-paper: #F2EFE7;
+  --console-ink: #131211;
+  --console-muted: #6A655C;
+  --console-rule: #C9C4B9;
+  --console-red: #C8321F;
+
+  /* Surfaces ("ink") */
+  --ink-950: #0A0908;
+  --ink-900: #100E0D;
+  --ink-850: #151311;
+  --ink-800: #1B1816;
+  --ink-700: #26221F;
+  --ink-600: #38332E;
+  --ink-500: #4A443E;
+
+  /* Text ("bone") */
+  --bone-50: #F4EFE6;
+  --bone-300: #BDB5A7;
+  --bone-500: #8A8377;
+  --bone-600: #6B655B;
+  --paper: #ECE6DA;
+  --paper-ink: #1A1714;
+
+  /* Semantic signals */
+  --sig-active: #4C8DFF;
+  --sig-active-glow: rgba(76, 141, 255, 0.35);
+  --sig-active-wash: rgba(76, 141, 255, 0.10);
+
+  --sig-spec: #A073FF;
+  --sig-spec-glow: rgba(160, 115, 255, 0.35);
+  --sig-spec-wash: rgba(160, 115, 255, 0.10);
+
+  --sig-pending: #FFB020;
+  --sig-pending-glow: rgba(255, 176, 32, 0.35);
+  --sig-pending-wash: rgba(255, 176, 32, 0.10);
+
+  --sig-alarm: #C8321F;
+  --sig-alarm-glow: rgba(200, 50, 31, 0.28);
+  --sig-alarm-wash: rgba(200, 50, 31, 0.08);
+
+  --sig-adapt: #19D3C5;
+  --sig-adapt-glow: rgba(25, 211, 197, 0.35);
+  --sig-adapt-wash: rgba(25, 211, 197, 0.10);
+
+  --sig-verify: #3DDC84;
+  --sig-verify-glow: rgba(61, 220, 132, 0.35);
+  --sig-verify-wash: rgba(61, 220, 132, 0.10);
+
+  /* Geometry & Notches */
+  --notch: 12px;
+  --gap: 0px;
+}
+
+/* Utilities */
+.wdth-75 {
+  font-stretch: 75%;
+}
+.wdth-87 {
+  font-stretch: 87.5%;
+}
+.wdth-100 {
+  font-stretch: 100%;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.notch-tl {
+  clip-path: polygon(var(--notch) 0, 100% 0, 100% 100%, 0 100%, 0 var(--notch));
+}
+
+.notch-tr {
+  clip-path: polygon(0 0, calc(100% - var(--notch)) 0, 100% var(--notch), 100% 100%, 0 100%);
+}
+
+.slab-shadow {
+  box-shadow: 6px 6px 0px 0px var(--ink-950);
+}
+
+.slab-shadow-active:active {
+  transform: translate(3px, 3px);
+  box-shadow: 3px 3px 0px 0px var(--ink-950);
+}
+
+/* Reduced motion global overrides */
+[data-motion="off"] *,
+[data-motion="off"] *::before,
+[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

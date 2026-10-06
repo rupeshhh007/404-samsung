@@ -21,4 +21,13 @@ Trust boundaries exist at user input, model output, tool manifests/results, netw
 
 A modular monolith minimizes deployment and ordering complexity for four hackathon developers while retaining module protocols and tests. The UI can be replaced without altering consistency rules; the deterministic fake provider can replace external integration without altering the tool contract.
 
+For the updated Theme 05 target, LiveKit Agents is the voice transport/session runtime, not the authoritative domain state writer. A thin adapter maps audio/transcript hypotheses, final text, barge-in and speech-cancellation observations to journaled facts; it maps approved output back to LiveKit speech. Model, perception and tool work remain asynchronous around the serialized reducer. The FDB-v3 adapter maps benchmark tool names/arguments/results generically to registered descriptors and starts/tears down a fresh INTERLOCK session for every benchmark conversation. This composition is planned under `VCE-001`, `FDB-001`, and `FDB-002`; no current repository path yet provides a working LiveKit/FDB agent.
+
+```text
+LiveKit audio/session → input observations → journal/reducer → control/SAFEPOINT
+                                              ↓                    ↓
+                                     approved speech ← truth gate ← async tools/models
+FDB-v3 runner → fresh LiveKit conversation and generic tool protocol per scenario
+```
+
 Major responsibilities are detailed in [Interfaces](../contracts/INTERFACES.md) and [component specifications](../INDEX.md#map).

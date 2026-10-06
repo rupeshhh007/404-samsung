@@ -18,8 +18,29 @@
 | `INTERLOCK_SESSION_RETENTION_S` | int `3600`, 60..86400 | optional; registry |
 | `INTERLOCK_EVENT_RETENTION` | int `10000`, 100..100000 | optional; journal |
 | `INTERLOCK_LOG_LEVEL` | `DEBUG|INFO|WARNING|ERROR`, `INFO` | optional; logging |
+| `FDB_V3_REPO` | path to official FDB checkout | required by FDB-002; missing/wrong commit fails before launch |
+| `FDB_V3_DATA_DIR` | path to released FDB-v3 example directories | required by FDB-002; zero/malformed examples fail |
+| `FDB_V3_PROVIDER` | `gpt_realtime|grok|gemini2_5|gemini3_1|ultravox|azure_openai` | required by FDB-002; unsupported provider fails |
+| `FDB_V3_BENCHMARK_COMMIT` | git SHA; default `3e799c45a045256f47d5f1c9cda90157e2d2ec9e` | optional explicit benchmark pin override |
+| `FDB_V3_SEED` | integer-like string `0` | optional; exported as `PYTHONHASHSEED` and recorded in provenance |
+| `FDB_V3_LATENCY_PROFILE` | official MockAPI latency profile, `instant` | optional; FDB provider fixture |
+| `FDB_V3_USE_LLM_JUDGE` | `0|1`, `0` | optional; invalid value fails |
+| `FDB_V3_RUN_ID` | nonempty run label; UTC timestamp | optional; default artifact directory component |
+| `FDB_V3_OUTPUT_DIR` | writable path, `artifacts/fdb-v3/<run id>` | optional; evaluator artifacts and provenance |
+| `LIVEKIT_URL` | secret-bearing service URL | required by VCE-001/FDB-002; missing fails |
+| `LIVEKIT_API_KEY` | secret, no default | required by VCE-001/FDB-002; missing fails |
+| `LIVEKIT_API_SECRET` | secret, no default | required by VCE-001/FDB-002; missing fails |
+| `OPENAI_API_KEY` | secret, no default | required by the official latency evaluator and GPT provider |
+| `XAI_API_KEY` | secret, no default | required only for `grok` |
+| `GOOGLE_API_KEY` | secret, no default | required only for Gemini providers |
+| `ULTRAVOX_API_KEY` | secret, no default | required only for `ultravox` |
+| `AZURE_OPENAI_API_KEY` | secret, no default | required only for `azure_openai` |
+| `AZURE_OPENAI_ENDPOINT` | URL, no default | required only for `azure_openai` |
+| `AZURE_OPENAI_DEPLOYMENT` | string, no default | required only for `azure_openai` |
 
-Planned `.env.example` (not created in Phase 0):
+The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`.
+
+Current `.env.example`:
 
 ```dotenv
 INTERLOCK_HOST=127.0.0.1

@@ -1,6 +1,6 @@
 # Documentation Index
 
-Status: Phase 0 design repaired and audited; implementation not started. External Samsung protocols, credentials, and provider guarantees are unavailable and isolated behind the adapter.
+Status: implementation in progress. Runtime, intelligence, execution, evidence, scenario and frontend foundations exist, but composition, LiveKit/FDB-v3 integration, ClaimGraph/TRUTHLOCK, and end-to-end demonstration are incomplete. External Samsung protocols, credentials, and provider guarantees remain unavailable and isolated behind the planned adapter.
 
 ## Reading order
 

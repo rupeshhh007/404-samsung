@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "scenario_id": "late-committed-effect-retained",
+  "fixture": "samsung-demo-v1",
+  "initial_state": {"session_id": "late-reconcile", "mode": "TEST"},
+  "tools": {
+    "appointment.book": [{
+      "match": {"args.center_id": "ctr-01", "args.requested_slot": "2030-01-15T11:00:00+05:30"},
+      "acknowledge_at_ms": 100,
+      "acknowledgement": {"phase": "ACKNOWLEDGEMENT", "status": "REQUEST_RECEIVED", "provider_request_id": "req-old-book", "center_id": "ctr-01", "requested_slot": "2030-01-15T11:00:00+05:30"},
+      "commit_at_ms": 900,
+      "callback_at_ms": 900,
+      "result": {"phase": "FINAL", "status": "BOOKING_CONFIRMED", "provider_request_id": "req-old-book", "provider_booking_id": "apt-old-11", "center_id": "ctr-01", "requested_slot": "2030-01-15T11:00:00+05:30", "confirmed_slot": "2030-01-15T11:00:00+05:30"}
+    }]
+  },
+  "faults": [
+    {"id": "old-commit-before-cancel", "type": "COMMIT_BEFORE_CANCEL", "match": {"operation_id": "op-book-11"}, "commit_at_ms": 900, "cancel_at_ms": 950},
+    {"id": "old-late-result", "type": "LATE_RESULT", "match": {"operation_id": "op-book-11"}, "delay_ms": 200}
+  ],
+  "steps": [
+    {"input": {"at_ms": 0, "text": "Book 11:00.", "final": true, "authorize": true}},
+    {"input": {"at_ms": 200, "text": "Actually, make it 12:00.", "final": true, "authorize": true}},
+    {"advance_to": 1100},
+    {"assert": {"world": {"contains_booking": "apt-old-11"}, "divergence": "VISIBLE", "reconciliation_success": false}}
+  ],
+  "expect": {"world": {"contains_booking": "apt-old-11"}, "divergence": "VISIBLE", "reconciliation_success": false, "confirmed_new_slot_claim": false}
+}
