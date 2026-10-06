@@ -593,6 +593,12 @@ class BrowserVoiceWorkerTransport:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._handles: dict[str, SpeechHandle] = {}
         self._closed = False
+        self._user_speaking = False
+        self._final_transcript = ""
+        self._final_turn_id: str | None = None
+        self._final_created_at: float | None = None
+        self._final_flush_task: asyncio.Task[Any] | None = None
+        self._final_coalesce_s = _browser_final_coalesce_ms() / 1000
         self._transcript_listener: Callable[[Any], None] = self._on_transcript
         self._transcription_timeout_listener: Callable[[Any], None] = self._on_transcription_timeout
         self._user_state_listener: Callable[[Any], None] = self._on_user_state
@@ -642,13 +648,38 @@ class BrowserVoiceWorkerTransport:
         text = getattr(event, "transcript", None)
         if not isinstance(text, str) or not text.strip():
             return
-        self._spawn(self._send({
-            "type": "TRANSCRIPT", "item_id": getattr(event, "item_id", None),
-            "text": text, "final": bool(event.is_final),
-            "created_at": getattr(event, "created_at", None),
-        }))
+        text = text.strip()
+        if not bool(event.is_final):
+            # Partial hypotheses stay observable but never become the authoritative
+            # semantic turn.  They may change as Deepgram receives more audio.
+            self._spawn(self._send({
+                "type": "TRANSCRIPT", "item_id": getattr(event, "item_id", None),
+                "text": text, "final": False,
+                "created_at": getattr(event, "created_at", None),
+            }))
+            return
+
+        if self._final_turn_id is None:
+            self._final_turn_id = uuid4().hex
+        self._final_transcript = _merge_final_transcript_segments(
+            self._final_transcript, text,
+        )
+        created_at = getattr(event, "created_at", None)
+        if isinstance(created_at, (int, float)):
+            self._final_created_at = float(created_at)
+
+        # Deepgram may emit several is_final=true segments for one utterance.
+        # While VAD says the user is speaking, collect them.  After speech ends,
+        # a short grace window catches trailing final segments before INTERLOCK
+        # receives exactly one authoritative final transcript for the turn.
+        if not self._user_speaking:
+            self._schedule_final_transcript_flush()
 
     def _on_transcription_timeout(self, event: Any) -> None:
+        pending = self._take_final_transcript()
+        if pending is not None:
+            self._spawn(self._send(pending))
+            return
         duration = getattr(event, "speech_duration", 0.0)
         try:
             duration_ms = max(0, min(120_000, int(float(duration) * 1000)))
@@ -660,8 +691,59 @@ class BrowserVoiceWorkerTransport:
         }))
 
     def _on_user_state(self, event: Any) -> None:
-        if getattr(event, "new_state", None) == "speaking":
-            self._spawn(self._send({"type": "USER_SPEAKING"}))
+        new_state = getattr(event, "new_state", None)
+        if new_state == "speaking":
+            pending = self._take_final_transcript()
+            self._user_speaking = True
+            self._spawn(self._send_turn_started(pending))
+        elif new_state == "listening":
+            self._user_speaking = False
+            if self._final_transcript:
+                self._schedule_final_transcript_flush()
+
+    async def _send_turn_started(self, pending: dict[str, Any] | None) -> None:
+        # Preserve turn order: a buffered prior final reaches the backend before
+        # the new turn's barge-in fact.
+        if pending is not None:
+            await self._send(pending)
+        await self._send({"type": "USER_SPEAKING"})
+
+    def _schedule_final_transcript_flush(self) -> None:
+        if self._final_flush_task is not None and not self._final_flush_task.done():
+            self._final_flush_task.cancel()
+
+        async def flush() -> None:
+            await asyncio.sleep(self._final_coalesce_s)
+            pending = self._take_final_transcript(cancel_flush=False)
+            if pending is not None:
+                await self._send(pending)
+
+        task = asyncio.create_task(flush())
+        self._final_flush_task = task
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    def _take_final_transcript(
+        self, *, cancel_flush: bool = True,
+    ) -> dict[str, Any] | None:
+        if cancel_flush and self._final_flush_task is not None                 and not self._final_flush_task.done():
+            self._final_flush_task.cancel()
+        self._final_flush_task = None
+        text = self._final_transcript.strip()
+        if not text:
+            return None
+        item_id = self._final_turn_id or uuid4().hex
+        created_at = self._final_created_at
+        self._final_transcript = ""
+        self._final_turn_id = None
+        self._final_created_at = None
+        return {
+            "type": "TRANSCRIPT",
+            "item_id": f"turn-{item_id}",
+            "text": text,
+            "final": True,
+            "created_at": created_at,
+        }
 
     async def _read(self) -> None:
         async for raw in self._socket:
@@ -753,6 +835,12 @@ class BrowserVoiceWorkerTransport:
             self.session.off("user_state_changed", self._user_state_listener)
         except Exception:
             pass
+        pending = self._take_final_transcript()
+        if pending is not None and self._socket is not None:
+            try:
+                await self._send(pending)
+            except Exception:
+                pass
         self._closed = True
         for handle in tuple(self._handles.values()):
             if not handle.done():
@@ -763,6 +851,45 @@ class BrowserVoiceWorkerTransport:
         if self._socket is not None:
             await self._socket.close()
         await self.session.aclose()
+
+
+def _normalize_overlap_token(token: str) -> str:
+    return token.strip(" \\t\\r\\n.,!?;:\"'()[]{}").lower()
+
+
+def _merge_final_transcript_segments(current: str, incoming: str) -> str:
+    """Join Deepgram final segments without duplicating an overlapping boundary."""
+
+    left = current.strip()
+    right = incoming.strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if left.casefold() == right.casefold():
+        return left
+
+    left_tokens = left.split()
+    right_tokens = right.split()
+    max_overlap = min(len(left_tokens), len(right_tokens), 12)
+    overlap = 0
+    for size in range(max_overlap, 0, -1):
+        left_tail = [_normalize_overlap_token(token) for token in left_tokens[-size:]]
+        right_head = [_normalize_overlap_token(token) for token in right_tokens[:size]]
+        if left_tail == right_head and all(left_tail):
+            overlap = size
+            break
+    merged = " ".join([*left_tokens, *right_tokens[overlap:]])
+    if len(merged) > 16_000:
+        raise RuntimeError("coalesced transcript exceeds transport limit")
+    return merged
+
+
+def _browser_final_coalesce_ms() -> int:
+    value = int(os.environ.get("INTERLOCK_VOICE_FINAL_COALESCE_MS", "700"))
+    if not 100 <= value <= 2000:
+        raise RuntimeError("INTERLOCK_VOICE_FINAL_COALESCE_MS must be 100..2000")
+    return value
 
 
 def _browser_stt_options() -> dict[str, Any]:
