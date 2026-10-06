@@ -37,7 +37,7 @@
 | `INTERLOCK_VOICE_TTS_VOICE_ID` | provider-specific voice ID, no default | required by browser voice worker; select a valid Cartesia voice externally |
 | `INTERLOCK_VOICE_STT_MODEL` | model ID, default `nova-3` | optional browser voice worker override |
 | `INTERLOCK_VOICE_STT_LANGUAGE` | Deepgram language, default `en-IN` | optional browser voice tuning; change for a different speaker locale |
-| `INTERLOCK_VOICE_STT_KEYTERMS` | comma-separated terms, default `book,appointment,eleven,twelve,noon,actually,reschedule,change,move,book twelve,make it twelve,actually book twelve` | optional Nova-3 keyterm bias for demo-critical vocabulary; does not bypass semantic validation |
+| `INTERLOCK_VOICE_STT_KEYTERMS` | comma-separated terms; balanced 11/12 booking and correction phrases by default | optional Nova-3 keyterm bias for demo-critical vocabulary; does not bypass semantic validation |
 | `INTERLOCK_VOICE_STT_ENDPOINTING_MS` | int `500`, 100..2000 | optional Deepgram silence window; longer than provider defaults so a short pause in “actually … book twelve” is less likely to split the utterance |
 | `INTERLOCK_VOICE_STT_UTTERANCE_END_MS` | int `1000`, 1000..5000 | optional Deepgram utterance-end window; requires interim results and complements endpointing |
 | `INTERLOCK_VOICE_FINAL_COALESCE_MS` | int `700`, 100..2000 | optional worker-side grace window that joins multiple Deepgram `is_final=true` segments from one VAD turn before sending one authoritative final transcript to the backend |
