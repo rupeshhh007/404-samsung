@@ -550,7 +550,7 @@ def test_two_browser_rooms_have_private_samsung_worlds_and_narrow_aliases(monkey
         assert a.provider is not b.provider
         assert a.provider.physical_action_count == b.provider.physical_action_count == 0
 
-        for binding, utterance in ((a, "book eleven"), (b, "book 11 am")):
+        for binding, utterance in ((a, "book eleven"), (b, "Book twelve.")):
             await transport.accept(binding, 1, {
                 "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
                 "item_id": uuid4().hex, "text": utterance, "final": True,
@@ -561,6 +561,8 @@ def test_two_browser_rooms_have_private_samsung_worlds_and_narrow_aliases(monkey
             assert any(event.event_type == "ToolDispatchRequested"
                        for event in host.application.events(binding.session_id))
         assert a.provider is not b.provider
+        assert next(iter(a.provider.bookings.values()))["confirmed_slot"].endswith("11:00:00+05:30")
+        assert next(iter(b.provider.bookings.values()))["confirmed_slot"].endswith("12:00:00+05:30")
         assert host.application.snapshot(a.session_id).session_id == a.session_id
         assert host.application.snapshot(b.session_id).session_id == b.session_id
         assert set(host.application.snapshot(a.session_id).effects).isdisjoint(
@@ -679,7 +681,7 @@ def test_late_correction_retains_eleven_and_never_repairs_automatically(monkeypa
         assert original.parameters["confirmed_slot"].endswith("11:00:00+05:30")
         assert original.state == EffectState.COMMITTED
 
-        await _demo_voice_transcript(registry, binding, "actually make it twelve")
+        await _demo_voice_transcript(registry, binding, "Actually, make it twelve.")
         await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
         final = host.application.snapshot(binding.session_id)
         active = final.intents[final.active_intent_id]

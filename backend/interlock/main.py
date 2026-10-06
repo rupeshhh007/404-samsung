@@ -1136,12 +1136,24 @@ _DEMO_SLOT_ALIASES = {
 def _demo_spoken_alias(raw: str) -> str:
     """Interpret only exact demo utterance aliases; never rewrite raw evidence."""
 
-    normalized = " ".join(raw.strip().lower().replace("’", "'").split()).rstrip(".")
-    if normalized in {"book eleven", "book eleven am", "book 11", "book 11 am"}:
+    normalized = " ".join(raw.strip().lower().replace("’", "'").split())
+    normalized = re.sub(r"[,.!?]+", "", normalized)
+    if normalized in {
+        "book eleven", "book eleven am", "book 11", "book 11 am",
+        "book 11:00", "book 11:00 am",
+    }:
         return "book 11"
     if normalized in {
+        "book twelve", "book twelve pm", "book 12", "book 12 pm",
+        "book 12:00", "book 12:00 pm",
+    }:
+        return "book 12"
+    if normalized in {
         "actually make it twelve", "make it twelve",
-        "actually make it 12", "make it 12", "12 pm",
+        "actually make it 12", "make it 12",
+        "actually make it 12:00", "make it 12:00",
+        "actually change it to twelve", "change it to twelve",
+        "12 pm",
     }:
         return "make it 12"
     if normalized in {"don't make it twelve", "do not make it twelve"}:
@@ -1154,7 +1166,7 @@ def _demo_root_booking(
 ) -> tuple[dict[str, Any], IntentRevision] | None:
     """Recognize only the documented deterministic demo's root booking phrase."""
     normalized = " ".join(text.strip().lower().split())
-    match = re.fullmatch(r"book\s+(11(?::00)?)(?:\.)?", normalized)
+    match = re.fullmatch(r"book\s+((?:11|12)(?::00)?)(?:\.)?", normalized)
     if match is None:
         return None
     slot = _DEMO_SLOT_ALIASES[match.group(1)]
