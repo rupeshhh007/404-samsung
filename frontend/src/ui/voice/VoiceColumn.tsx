@@ -91,6 +91,18 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
     ? `${requestedTime} has not been confirmed.`
     : null;
 
+  const latestVoiceTranscript = useMemo(() => {
+    const transcripts = (projection?.evidence ?? []).filter(
+      (item) =>
+        item.source === 'AUDIO' &&
+        item.kind === 'transcript' &&
+        item.authority === 'AUTHORITATIVE' &&
+        typeof item.content_ref === 'string' &&
+        item.content_ref.trim().length > 0,
+    );
+    return transcripts.length > 0 ? transcripts[transcripts.length - 1]?.content_ref ?? null : null;
+  }, [projection?.evidence]);
+
   return (
     <section aria-label="Conversation" className="editorial-console flex min-w-0 flex-1 flex-col select-text">
       <div className="flex-1">
@@ -111,6 +123,18 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
       </div>
 
       <div>
+        {voiceState !== 'idle' && latestVoiceTranscript ? (
+          <div
+            className="mb-2 flex items-baseline gap-2 px-1 text-[11px] text-stone-500 dark:text-stone-400"
+            aria-live="polite"
+            data-testid="voice-heard-line"
+          >
+            <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-stone-400 dark:text-stone-500">
+              Heard
+            </span>
+            <span className="truncate">“{latestVoiceTranscript}”</span>
+          </div>
+        ) : null}
         <Composer
           disabled={actionPending}
           onSend={(text) => onSendText(text)}
