@@ -21,6 +21,7 @@
 | `FDB_V3_REPO` | path to official FDB checkout | required by FDB-002; missing/wrong commit fails before launch |
 | `FDB_V3_DATA_DIR` | path to released FDB-v3 example directories | required by FDB-002; zero/malformed examples fail |
 | `FDB_V3_PROVIDER` | `gpt_realtime|grok|gemini2_5|gemini3_1|ultravox|azure_openai` | required by FDB-002; unsupported provider fails |
+| `FDB_V3_PYTHON` | path to a real Python 3.11 executable; project `.venv/bin/python` fallback in the reproduction script | optional selector; when the pytest process runs under another Python version, set this explicitly so T-FDB-02 delegates to Python 3.11 instead of overwriting the choice |
 | `FDB_V3_BENCHMARK_COMMIT` | git SHA; default `3e799c45a045256f47d5f1c9cda90157e2d2ec9e` | optional explicit benchmark pin override |
 | `FDB_V3_SEED` | integer-like string `0` | optional; exported as `PYTHONHASHSEED` and recorded in provenance |
 | `FDB_V3_LATENCY_PROFILE` | official MockAPI latency profile, `instant` | optional; FDB provider fixture |
@@ -38,7 +39,7 @@
 | `AZURE_OPENAI_ENDPOINT` | URL, no default | required only for `azure_openai` |
 | `AZURE_OPENAI_DEPLOYMENT` | string, no default | required only for `azure_openai` |
 
-The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`.
+The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`. FDB-002 still requires Python 3.11 exactly. If the main test runner is Python 3.12+ (or any non-3.11 interpreter), point `FDB_V3_PYTHON` at an installed Python 3.11 executable or isolated 3.11 environment before running the reproduction contract; the test harness preserves that explicit choice and falls back to the pytest interpreter only when no override is supplied.
 
 Current `.env.example`:
 
