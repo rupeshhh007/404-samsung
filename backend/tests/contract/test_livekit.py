@@ -784,6 +784,71 @@ def test_late_correction_retains_eleven_and_never_repairs_automatically(monkeypa
     asyncio.run(case())
 
 
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Actually book twelve.",
+        "Actually, 12 please.",
+        "No, twelve.",
+        "Sorry, I meant twelve.",
+        "Change from eleven to twelve.",
+        "Move it to noon.",
+        "Twelve instead.",
+        "Book 12.",
+        "At twelve please.",
+    ],
+)
+def test_late_voice_correction_variants_preserve_reality_without_blind_rewrite(
+    monkeypatch: Any,
+    phrase: str,
+) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        await _demo_voice_transcript(registry, binding, "book eleven")
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        before = host.application.snapshot(binding.session_id)
+        assert binding.provider.physical_action_count == 1
+        original = next(iter(before.effects.values()))
+        assert original.parameters["confirmed_slot"].endswith("11:00:00+05:30")
+
+        await _demo_voice_transcript(registry, binding, phrase)
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        final = host.application.snapshot(binding.session_id)
+        active = final.intents[final.active_intent_id]
+        desired = final.revisions[active.active_revision_id]
+
+        assert desired.values["requested_slot"].endswith("12:00:00+05:30")
+        assert binding.provider.physical_action_count == 1
+        assert len(binding.provider.bookings) == 1
+        assert next(iter(binding.provider.bookings.values()))["confirmed_slot"].endswith(
+            "11:00:00+05:30"
+        )
+        assert any(
+            divergence.state == DivergenceState.OPEN
+            and original.effect_id in divergence.observed_effect_ids
+            for divergence in final.divergences.values()
+        )
+        assert not any(
+            operation.intent_revision_id == desired.revision_id
+            and operation.tool_name == "appointment.book"
+            for operation in final.operations.values()
+        )
+
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
 def test_dispatched_unknown_eleven_never_licenses_blind_twelve(monkeypatch: Any) -> None:
     from dataclasses import replace
     import interlock.adapters.voice_transport as voice_transport
