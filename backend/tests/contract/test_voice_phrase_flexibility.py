@@ -26,6 +26,11 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Book an appointment for noon.", "book 12"),
         ("Give me midday please.", "book 12"),
         ("Mid day please.", "book 12"),
+        ("Mid-day please.", "book 12"),
+        ("Twelve o clock please.", "book 12"),
+        ("Go for twelve.", "book 12"),
+        ("Yeah twelve.", "book 12"),
+        ("Twelve works.", "book 12"),
         ("Book eleven in the morning.", "book 11"),
         ("Book twelve in the afternoon.", "book 12"),
         ("Book 12 p m.", "book 12"),
@@ -53,6 +58,9 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Use 12 instead.", "make it 12"),
         ("Go with noon instead.", "make it 12"),
         ("Put it at 12:00.", "make it 12"),
+        ("Cancel eleven and book twelve.", "make it 12"),
+        ("Instead of eleven, book twelve.", "make it 12"),
+        ("Replace eleven with twelve.", "make it 12"),
     ],
 )
 def test_demo_spoken_alias_accepts_common_stt_variants(
@@ -99,6 +107,8 @@ def test_demo_spoken_alias_rejects_inexact_or_unsupported_time_requests(spoken: 
         "Eleven or twelve.",
         "Book eleven or twelve.",
         "Maybe eleven, maybe twelve.",
+        "Book eleven or book twelve.",
+        "Schedule for eleven or at twelve.",
     ],
 )
 def test_demo_spoken_alias_keeps_ambiguous_multi_slot_input_unresolved(spoken: str) -> None:
