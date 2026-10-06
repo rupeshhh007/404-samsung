@@ -672,15 +672,32 @@ class BrowserVoiceWorkerTransport:
             rendered_text, allow_interruptions=True, add_to_chat_ctx=False,
         )
         self._handles[speech_id] = handle
+        started = False
         try:
             await self._wait_for_start(handle)
             await self._send({"type": "PLAYOUT_STARTED", "speech_id": speech_id})
+            started = True
             await handle.wait_for_playout()
-            if not getattr(handle, "interrupted", False) and handle.exception() is None:
+        except Exception:
+            if not started or not getattr(handle, "interrupted", False):
+                # A pre-start interruption, timeout, or transport loss does not
+                # prove that the browser heard nothing.
+                return
+        if getattr(handle, "interrupted", False):
+            try:
+                await self._send({
+                    "type": "PLAYOUT_FAILED", "speech_id": speech_id,
+                    "error_code": "LIVEKIT_INTERRUPTED", "heard": True,
+                })
+            except Exception:
+                # The backend cannot infer delivery from a broken socket.
+                pass
+            return
+        try:
+            if handle.exception() is None:
                 await self._send({"type": "PLAYOUT_FINISHED", "speech_id": speech_id, "heard": True})
         except Exception:
-            # Neither an exception nor disconnect proves audio was unheard.
-            # Leave the backend's speech terminal fact unresolved.
+            # An unrelated failure does not establish a terminal heard value.
             return
 
     async def _wait_for_start(self, handle: SpeechHandle) -> None:

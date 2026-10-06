@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from interlock.config import Settings
 from interlock.domain.enums import (
-    Authorization, CancellationState, ClaimCertainty, ClaimState, ControlKind,
+    Authorization, CancellationAckScope, CancellationState, ClaimCertainty, ClaimState, ControlKind,
     DivergenceState, EffectState, EventSource, EvidenceAuthority, IntentMaturity, OperationState, RuntimeMode,
     SpeechActType, SpeechState,
 )
@@ -358,9 +358,10 @@ class _Session:
     ) -> None:
         """Minimal scripted appointment policy for the credential-free demo.
 
-        It creates only canonical journal facts.  The reducer remains the sole
+        It creates only canonical journal facts. The reducer remains the sole
         state writer and every provider write still crosses SAFEPOINT and
-        ToolRuntime.  A corrected goal is intentionally not auto-repaired.
+        ToolRuntime. A safely cancelled pre-dispatch action may be replaced;
+        an authoritative or uncertain prior effect is never auto-repaired.
         """
         if event.event_type == "IntentAuthorizationChanged":
             revision = state.revisions.get(event.payload["revision_id"])
@@ -369,35 +370,20 @@ class _Session:
             if revision.values.get("goal_type") != "appointment_booking":
                 return
             await self._propose_demo_claim(event, revision, context)
-            if revision.parent_revision_id is not None:
-                return
-            bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
-            known = {
-                item.idempotency_key: item.fingerprint
-                for item in state.operations.values() if item.idempotency_key
-            }
-            operation_id = _identity(revision.revision_id, "appointment.book")
-            if operation_id in state.operations:
-                return
-            operation = self.operations.create_operation(
-                operation_id=operation_id,
-                session_id=self.session_id,
-                intent_goal_id=revision.intent_id,
-                intent_revision=revision,
-                bindings=bindings,
-                tool_name="appointment.book",
-                arguments={
-                    "center_id": revision.values["center_id"],
-                    "requested_slot": revision.values["requested_slot"],
-                },
-                existing_operation_ids=set(state.operations),
-                known_idempotency_digests=known,
-            )
-            await self.journal.append(_candidate(
-                self.session_id, context, "OperationCreated",
-                {"operation": operation.model_dump(mode="json")},
-                identity=operation.operation_id,
-            ))
+            if self._demo_replacement_eligible(revision, state):
+                await self._create_demo_appointment_operation(revision, state, context)
+            return
+
+        if event.event_type == "CancellationAcknowledged":
+            parent_operation = state.operations.get(event.payload.get("operation_id"))
+            node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
+            revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
+            if (parent_operation is not None and revision is not None
+                    and revision.parent_revision_id == parent_operation.intent_revision_id
+                    and revision.authorization == Authorization.AUTHORIZED
+                    and revision.values.get("goal_type") == "appointment_booking"
+                    and self._demo_replacement_eligible(revision, state)):
+                await self._create_demo_appointment_operation(revision, state, context)
             return
 
         if event.event_type == "IntentRevisionCommitted":
@@ -496,6 +482,65 @@ class _Session:
                                     identity=speech.speech_id,
                                 ))
             return
+
+    def _demo_replacement_eligible(
+        self, revision: IntentRevision, state: SessionState,
+    ) -> bool:
+        node = state.intents.get(revision.intent_id)
+        if node is None or node.active_revision_id != revision.revision_id:
+            return False
+        if revision.parent_revision_id is None:
+            return True
+        parent = state.operations.get(_identity(revision.parent_revision_id, "appointment.book"))
+        if parent is None:
+            return False
+        # Only a local pre-dispatch acknowledgement proves that this old
+        # booking never crossed the provider boundary. An empty effect ledger
+        # after dispatch is not evidence of non-occurrence (I13).
+        if (parent.state not in (OperationState.CANCELLED, OperationState.SUPERSEDED)
+                or parent.cancellation_state != CancellationState.ACKNOWLEDGED
+                or CancellationAckScope.LOCAL_TASK not in parent.cancellation_ack_scopes
+                or parent.dispatch_requested_event_id is not None
+                or parent.provider_request_id is not None
+                or parent.effect_state != EffectState.NOT_STARTED):
+            return False
+        return not any(
+            effect.operation_id == parent.operation_id
+            and effect.authority == EvidenceAuthority.AUTHORITATIVE
+            and effect.state == EffectState.COMMITTED
+            for effect in state.effects.values()
+        )
+
+    async def _create_demo_appointment_operation(
+        self, revision: IntentRevision, state: SessionState, context: DispatchContext,
+    ) -> None:
+        operation_id = _identity(revision.revision_id, "appointment.book")
+        if operation_id in state.operations:
+            return
+        bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
+        known = {
+            item.idempotency_key: item.fingerprint
+            for item in state.operations.values() if item.idempotency_key
+        }
+        operation = self.operations.create_operation(
+            operation_id=operation_id,
+            session_id=self.session_id,
+            intent_goal_id=revision.intent_id,
+            intent_revision=revision,
+            bindings=bindings,
+            tool_name="appointment.book",
+            arguments={
+                "center_id": revision.values["center_id"],
+                "requested_slot": revision.values["requested_slot"],
+            },
+            existing_operation_ids=set(state.operations),
+            known_idempotency_digests=known,
+        )
+        await self.journal.append(_candidate(
+            self.session_id, context, "OperationCreated",
+            {"operation": operation.model_dump(mode="json")},
+            identity=operation.operation_id,
+        ))
 
     async def _propose_demo_claim(
         self, event: EventEnvelope, revision: IntentRevision, context: DispatchContext,
