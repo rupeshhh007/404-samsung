@@ -10,6 +10,7 @@ import type {
   ResetResponse,
   SessionCreateRequest,
   SessionCreateResponse,
+  VoiceSessionResponse,
   SessionProjection,
   SessionSnapshotResponse,
   SpeechCancelRequest,
@@ -739,6 +740,17 @@ export class InterlockHttpClient {
         return null;
       }
       return body as unknown as SessionCreateResponse;
+    });
+  }
+
+  createVoiceSession(): Promise<VoiceSessionResponse> {
+    return this.request('voice/sessions', { method: 'POST', body: '{}' }, (body) => {
+      if (!isRecord(body) || !hasExactKeys(body, [
+        'session_id', 'room_name', 'livekit_url', 'participant_token', 'ws_url',
+      ]) || !isString(body.session_id) || !isString(body.room_name) ||
+          !isString(body.livekit_url) || !isString(body.participant_token) ||
+          !isString(body.ws_url)) return null;
+      return body as unknown as VoiceSessionResponse;
     });
   }
 

@@ -637,9 +637,17 @@ class _Session:
         # Media references are not transcript text and are never fetched here.
         if command.modality not in ("text", "transcript"):
             raise RuntimeError("input text resolver is not configured for this modality")
+        semantic_text = (
+            _demo_spoken_alias(evidence.content_ref)
+            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+            and command.modality == "transcript"
+            else evidence.content_ref
+        )
         demo_root = (
-            _demo_root_booking(evidence.content_ref, command.evidence_id, context)
-            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO and state.active_intent_id is None
+            _demo_root_booking(semantic_text, command.evidence_id, context)
+            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+            and state.active_intent_id is None
+            and evidence.provenance.get("final", True) is True
             else None
         )
         if demo_root is not None:
@@ -658,7 +666,7 @@ class _Session:
             ]
         result = await self.control.interpret(InterpretationRequest(
             control_id=_identity(context.origin_event_id or "", command.evidence_id),
-            raw_evidence_id=command.evidence_id, text=evidence.content_ref,
+            raw_evidence_id=command.evidence_id, text=semantic_text,
             final=evidence.provenance.get("final", True),
             correlation_id=context.correlation_id or context.origin_event_id or command.evidence_id,
             active_intent_id=state.active_intent_id,
@@ -868,6 +876,8 @@ class Application:
         *,
         logical_time: int = 0,
         mode: RuntimeMode | str | None = None,
+        dependencies: RuntimeDependencies | None = None,
+        registry: ToolRegistry | None = None,
     ) -> SessionState:
         async with self._lifecycle_lock:
             if not session_id or session_id in self._sessions:
@@ -883,7 +893,11 @@ class Application:
             session_settings = self.settings.model_copy(
                 update={"INTERLOCK_MODE": session_mode.value}, deep=True
             )
-            session = _Session(session_id, session_settings, self.registry, self.dependencies)
+            session = _Session(
+                session_id, session_settings,
+                registry if registry is not None else self.registry,
+                dependencies if dependencies is not None else self.dependencies,
+            )
             self._sessions[session_id] = session
             try:
                 event = await session.journal.append(EventCandidate(
@@ -1074,6 +1088,22 @@ _DEMO_SLOT_ALIASES = {
 }
 
 
+def _demo_spoken_alias(raw: str) -> str:
+    """Interpret only exact demo utterance aliases; never rewrite raw evidence."""
+
+    normalized = " ".join(raw.strip().lower().replace("’", "'").split()).rstrip(".")
+    if normalized in {"book eleven", "book eleven am", "book 11", "book 11 am"}:
+        return "book 11"
+    if normalized in {
+        "actually make it twelve", "make it twelve",
+        "actually make it 12", "make it 12", "12 pm",
+    }:
+        return "make it 12"
+    if normalized in {"don't make it twelve", "do not make it twelve"}:
+        return "please clarify"
+    return raw
+
+
 def _demo_root_booking(
     text: str, evidence_id: str, context: DispatchContext,
 ) -> tuple[dict[str, Any], IntentRevision] | None:
@@ -1222,7 +1252,7 @@ class _DemoASGI:
     def __init__(
         self, http: _ASGIApplication, websocket: _ASGIApplication,
         application: Application, hub: Any, output: DemoTextOutput,
-        provider: Any = None,
+        provider: Any = None, voice_registry: Any = None,
     ) -> None:
         self.http = http
         self.websocket = websocket
@@ -1230,10 +1260,14 @@ class _DemoASGI:
         self.hub = hub
         self.output = output
         self.provider = provider
+        self.voice_registry = voice_registry
 
     async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") == "websocket":
-            await self.websocket(scope, receive, send)
+            if str(scope.get("path", "")).startswith("/api/v1/internal/voice/"):
+                await self.http(scope, receive, send)
+            else:
+                await self.websocket(scope, receive, send)
             return
         if scope.get("type") != "lifespan":
             await self.http(scope, receive, send)
@@ -1250,49 +1284,70 @@ class _DemoASGI:
                 return
 
 
+def create_demo_session_dependencies(
+    settings: Settings, *, output: OutputPort, projection: CommandHandler | None = None,
+) -> tuple[ToolRegistry, RuntimeDependencies, Any]:
+    """Build one fresh Samsung fixture world for a single authoritative session."""
+
+    from interlock.providers.fake_tools import create_fake_tool_transport
+    from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+
+    fixture = load_demo_fixture()
+    if fixture.fixture_id != "samsung-demo-v1":
+        raise RuntimeError("unexpected demo fixture")
+    registry = ToolRegistry(default_timeout_ms=settings.INTERLOCK_TOOL_TIMEOUT_MS)
+    register_tool_manifests(registry)
+    transport, provider = create_fake_tool_transport(fixture)
+    dependencies = RuntimeDependencies(
+        tool_transport=_DelayedDemoTransport(transport, settings.INTERLOCK_FAKE_LATENCY_MS),
+        output=output,
+        bindings=_demo_bindings,
+        input_context=_demo_input_context,
+        projection=projection,
+    )
+    return registry, dependencies, provider
+
+
 def create_demo_asgi_app(settings: Settings | None = None) -> _DemoASGI:
     """Compose the real runtime with SIMULATED provider and SCRIPTED delay."""
     from fastapi.middleware.cors import CORSMiddleware
     from interlock.adapters.http import create_http_app
     from interlock.adapters.websocket import ProjectionHub, WebSocketProjectionASGI
-    from interlock.providers.fake_tools import create_fake_tool_transport
-    from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+    from interlock.adapters.voice_transport import VoiceTransportRegistry
+    from interlock.testing.fixtures import load_demo_fixture
 
     effective = settings or Settings()
     if effective.INTERLOCK_MODE != RuntimeMode.DEMO:
         raise RuntimeError("the EXT-001 local ASGI host requires INTERLOCK_MODE=DEMO")
-    fixture = load_demo_fixture()
-    if fixture.fixture_id != "samsung-demo-v1":
-        raise RuntimeError("unexpected demo fixture")
-    registry = ToolRegistry(default_timeout_ms=effective.INTERLOCK_TOOL_TIMEOUT_MS)
-    register_tool_manifests(registry)
-    transport, provider = create_fake_tool_transport(fixture)
     output = DemoTextOutput()
     hub = ProjectionHub(max_sessions=128)
-    dependencies = RuntimeDependencies(
-        tool_transport=_DelayedDemoTransport(transport, effective.INTERLOCK_FAKE_LATENCY_MS),
-        output=output,
-        bindings=_demo_bindings,
-        input_context=_demo_input_context,
-        projection=hub.handle_publish,
+    registry, dependencies, provider = create_demo_session_dependencies(
+        effective, output=output, projection=hub.handle_publish,
     )
     application = Application(effective, registry=registry, dependencies=dependencies)
     output.bind(application)
     hub.bind(application)
+    voice_registry = VoiceTransportRegistry(
+        application, settings=effective, projection=hub.handle_publish,
+    )
 
     def _reset_demo_provider(fixture_id: str) -> None:
         if fixture_id != "samsung-demo-v1":
             raise ValueError(f"unexpected demo fixture '{fixture_id}'")
         provider.reset(load_demo_fixture())
 
-    http = create_http_app(application, hub=hub, demo_reset_hook=_reset_demo_provider)
+    http = create_http_app(
+        application, hub=hub, voice_registry=voice_registry,
+        demo_reset_hook=_reset_demo_provider,
+    )
     cors = CORSMiddleware(
         http,
         allow_origins=effective.frontend_origins_list,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["content-type"],
     )
-    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output, provider)
+    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output,
+                     provider, voice_registry)
 
 
 class _LazyDemoASGI:

@@ -10,8 +10,11 @@ from typing import Any, Callable
 import pytest
 
 from interlock.adapters.livekit_agent import (
-    LiveKitSessionAdapter, VoiceProviders, compose_voice_room, run_livekit_voice_agent,
+    BrowserVoiceWorkerTransport, LiveKitSessionAdapter, VoiceProviders,
+    compose_voice_room, run_livekit_voice_agent,
 )
+from interlock.adapters.voice_transport import VoiceTransportRegistry
+from interlock.adapters.websocket import ProjectionHub
 from interlock.config import Settings
 from interlock.domain.enums import (
     Authorization,
@@ -25,6 +28,7 @@ from interlock.domain.enums import (
 )
 from interlock.domain.models import ClaimRecord, EventEnvelope, IntentRevision, SessionState, SpeechAct
 from interlock.main import Application, RuntimeDependencies
+from interlock.main import create_demo_asgi_app
 from interlock.runtime.commands import RequestSpeechCorrection
 from interlock.runtime.journal import EventCandidate
 from interlock.runtime.reducer import Reducer
@@ -33,6 +37,387 @@ from interlock.truth.speech import CorrectionPolicy, validate_correction_proposa
 
 def test_verified_livekit_agents_version_is_installed() -> None:
     assert version("livekit-agents") == "1.8.4"
+
+
+def _voice_env(monkeypatch: Any) -> None:
+    monkeypatch.setenv("LIVEKIT_URL", "wss://voice.example.invalid")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "a" * 40)
+    monkeypatch.setenv("INTERLOCK_VOICE_WORKER_SECRET", "b" * 40)
+
+
+def test_browser_voice_token_is_scoped_and_no_client_grants(monkeypatch: Any) -> None:
+    import httpx
+    import jwt
+    from livekit import api
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=host),
+                                     base_url="http://testserver") as client:
+            absent = await client.post("/api/v1/voice/sessions", json={})
+            assert absent.status_code == 503
+            _voice_env(monkeypatch)
+            privileged = await client.post("/api/v1/voice/sessions", json={"room_admin": True})
+            assert privileged.status_code == 422
+            first = await client.post("/api/v1/voice/sessions", json={})
+            second = await client.post("/api/v1/voice/sessions", json={})
+            assert first.status_code == second.status_code == 201
+            one, two = first.json(), second.json()
+            assert set(one) == {"session_id", "room_name", "livekit_url", "participant_token", "ws_url"}
+            assert one["session_id"] != two["session_id"]
+            assert one["room_name"] != two["room_name"]
+            assert one["participant_token"] != two["participant_token"]
+            assert "a" * 40 not in str(one) and "b" * 40 not in str(one)
+            assert one["session_id"] in one["ws_url"]
+            claims = api.TokenVerifier("test-key", "a" * 40).verify(one["participant_token"])
+            assert claims.video.room == one["room_name"]
+            assert claims.video.room_join is True
+            assert claims.video.can_publish is True
+            assert claims.video.can_subscribe is True
+            assert claims.video.can_publish_data is False
+            assert claims.video.can_publish_sources == ["microphone"]
+            assert not claims.video.room_admin and not claims.video.room_create
+            assert not claims.video.room_list and not claims.video.room_record
+            raw_claims = jwt.decode(one["participant_token"], "a" * 40,
+                                    algorithms=["HS256"], issuer="test-key")
+            assert raw_claims["exp"] - raw_claims["nbf"] <= 300
+            assert host.application.snapshot(one["session_id"]).session_id == one["session_id"]
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_worker_transcript_advances_the_same_backend_projection(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    class WorkerSocket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send_json(self, message: dict[str, Any]) -> None:
+            self.messages.append(message)
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        transport: VoiceTransportRegistry = host.voice_registry
+        binding, _, token = await transport.create()
+        assert transport.application is host.application
+        assert transport.authenticate(binding.session_id, binding.room_name, "b" * 40) is binding
+        for wrong_session, wrong_room, secret in (
+            ("wrong", binding.room_name, "b" * 40),
+            (binding.session_id, "wrong", "b" * 40),
+            (binding.session_id, binding.room_name, token),
+        ):
+            with pytest.raises(ValueError):
+                transport.authenticate(wrong_session, wrong_room, secret)
+        socket = WorkerSocket()
+        generation = await transport.connect(binding, socket)  # type: ignore[arg-type]
+        fact = {"type": "TRANSCRIPT", "worker_event_id": "transcript-1",
+                "item_id": "utterance", "text": "book eleven", "final": False,
+                "created_at": None}
+        await transport.accept(binding, generation, fact)
+        await transport.accept(binding, generation, fact)
+        await host.application.drain(binding.session_id)
+        state = host.application.snapshot(binding.session_id)
+        assert [event.event_type for event in host.application.events(binding.session_id)].count(
+            "TranscriptHypothesisObserved") == 1
+        assert not any(event.event_type == "ToolDispatchRequested"
+                       for event in host.application.events(binding.session_id))
+        subscriber = await host.hub.subscribe(binding.session_id)
+        projected = subscriber.queue.get_nowait()
+        assert projected["session_id"] == binding.session_id
+        assert projected["through_sequence"] == state.last_sequence
+        assert projected["projection"]["evidence"]
+        with pytest.raises(ValueError):
+            await transport.accept(binding, generation, {"type": "FAKE_EVENT", "worker_event_id": "bad"})
+        with pytest.raises(ValueError):
+            await transport.accept(binding, generation, {**fact, "worker_event_id": "bad-extra",
+                                                        "event_type": "ToolDispatchRequested"})
+        transport.disconnect(binding, generation)
+        with pytest.raises(ValueError):
+            await transport.accept(binding, generation, {**fact, "worker_event_id": "stale"})
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_remote_voice_output_waits_for_real_start_and_exact_text(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    class WorkerSocket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+            self.speak_sent = asyncio.Event()
+
+        async def send_json(self, message: dict[str, Any]) -> None:
+            self.messages.append(message)
+            if message.get("type") == "SPEAK":
+                self.speak_sent.set()
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        transport: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await transport.create()
+        socket = WorkerSocket()
+        generation = await transport.connect(binding, socket)  # type: ignore[arg-type]
+        speech = SpeechAct(
+            speech_id="voice-progress", act_type=SpeechActType.PROGRESS,
+            template_id="tmpl_checking", requested_certainty=ClaimCertainty.PROGRESS,
+            state=SpeechState.PROPOSED, created_by_event_id="proposal",
+        )
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="SpeechActProposed",
+            source=EventSource.POLICY,
+            payload={"speech_act": speech.model_dump(mode="json")},
+        ))
+        await asyncio.wait_for(socket.speak_sent.wait(), timeout=2)
+        persisted = host.application.snapshot(binding.session_id).speech[speech.speech_id]
+        assert socket.messages == [{
+            "type": "SPEAK", "speech_id": speech.speech_id,
+            "rendered_text": persisted.rendered_text,
+        }]
+        assert not any(event.event_type == "SpeechEmissionStarted"
+                       for event in host.application.events(binding.session_id))
+        with pytest.raises(ValueError, match="lacks start proof"):
+            await transport.accept(binding, generation, {
+                "type": "PLAYOUT_FINISHED", "worker_event_id": "premature-finish",
+                "speech_id": speech.speech_id, "heard": True,
+            })
+        await transport.accept(binding, generation, {
+            "type": "PLAYOUT_STARTED", "worker_event_id": "start-1",
+            "speech_id": speech.speech_id,
+        })
+        async def started() -> None:
+            while not any(event.event_type == "SpeechEmissionStarted"
+                          for event in host.application.events(binding.session_id)):
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(started(), timeout=2)
+        assert any(event.event_type == "SpeechEmissionStarted"
+                   for event in host.application.events(binding.session_id))
+        await transport.accept(binding, generation, {
+            "type": "USER_SPEAKING", "worker_event_id": "barge-1",
+        })
+        await asyncio.sleep(0)
+        assert any(event.event_type == "SpeechCancellationRequested"
+                   for event in host.application.events(binding.session_id))
+        assert not any(event.event_type == "CancellationRequested"
+                       for event in host.application.events(binding.session_id))
+        await transport.accept(binding, generation, {
+            "type": "PLAYOUT_FINISHED", "worker_event_id": "finish-1",
+            "speech_id": speech.speech_id, "heard": True,
+        })
+        await host.application.drain(binding.session_id)
+        assert host.application.snapshot(binding.session_id).speech[speech.speech_id].heard is True
+        transport.disconnect(binding, generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_browser_worker_owns_only_transport_and_emits_playout_proof() -> None:
+    class Handle:
+        def __init__(self) -> None:
+            self.id = "one-handle"
+            self.interrupted = False
+            self.played = asyncio.Event()
+
+        async def wait_for_playout(self) -> None:
+            await self.played.wait()
+
+        def exception(self) -> None:
+            return None
+
+    class Session:
+        agent_state = "speaking"
+
+        def __init__(self) -> None:
+            self.handle = Handle()
+            self.current_speech = self.handle
+            self.text: str | None = None
+
+        def say(self, text: str, *, allow_interruptions: bool,
+                add_to_chat_ctx: bool) -> Handle:
+            assert allow_interruptions is True
+            assert add_to_chat_ctx is False
+            self.text = text
+            return self.handle
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send(self, raw: str) -> None:
+            import json
+            self.messages.append(json.loads(raw))
+
+    async def case() -> None:
+        session = Session()
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            session, room_name="voice-opaque", backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        assert not hasattr(worker, "application")
+        worker._socket = socket
+        exact = "I cannot confirm the new booking yet."
+        task = asyncio.create_task(worker._speak("speech-1", exact))
+        async def started() -> None:
+            while not socket.messages:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(started(), timeout=2)
+        assert session.text == exact
+        assert [(message["type"], message["speech_id"]) for message in socket.messages] == [
+            ("PLAYOUT_STARTED", "speech-1"),
+        ]
+        session.handle.played.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert [(message["type"], message["speech_id"]) for message in socket.messages] == [
+            ("PLAYOUT_STARTED", "speech-1"), ("PLAYOUT_FINISHED", "speech-1"),
+        ]
+        assert socket.messages[-1]["heard"] is True
+
+    asyncio.run(case())
+
+
+def test_voice_binding_expiry_and_ambiguous_disconnect_fail_closed(monkeypatch: Any) -> None:
+    from time import monotonic
+
+    _voice_env(monkeypatch)
+
+    class Socket:
+        async def send_json(self, _message: dict[str, Any]) -> None:
+            return
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        generation = await registry.connect(binding, Socket())  # type: ignore[arg-type]
+        before = len(host.application.events(binding.session_id))
+        registry.disconnect(binding, generation)
+        assert len(host.application.events(binding.session_id)) == before
+        assert not any(event.event_type in {"SpeechEmissionFinished", "SpeechEmissionFailed"}
+                       for event in host.application.events(binding.session_id))
+        binding.expiry = monotonic() - 1
+        with pytest.raises(ValueError, match="expired"):
+            registry.binding(binding.session_id)
+        with pytest.raises(ValueError):
+            registry.authenticate(binding.session_id, binding.room_name, "b" * 40)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_two_browser_rooms_have_private_samsung_worlds_and_narrow_aliases(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        transport: VoiceTransportRegistry = host.voice_registry
+
+        class WorkerSocket:
+            def __init__(self, binding: Any, generation: int) -> None:
+                self.binding = binding
+                self.generation = generation
+                self.tasks: set[asyncio.Task[Any]] = set()
+
+            async def send_json(self, message: dict[str, Any]) -> None:
+                if message.get("type") != "SPEAK":
+                    return
+
+                async def playout() -> None:
+                    await asyncio.sleep(0)
+                    await transport.accept(self.binding, self.generation, {
+                        "type": "PLAYOUT_STARTED", "worker_event_id": uuid4().hex,
+                        "speech_id": message["speech_id"],
+                    })
+                    await asyncio.sleep(0.02)
+                    await transport.accept(self.binding, self.generation, {
+                        "type": "PLAYOUT_FINISHED", "worker_event_id": uuid4().hex,
+                        "speech_id": message["speech_id"], "heard": True,
+                    })
+
+                task = asyncio.create_task(playout())
+                self.tasks.add(task)
+                task.add_done_callback(self.tasks.discard)
+
+        from uuid import uuid4
+
+        bindings = []
+        sockets = []
+        for _ in range(2):
+            binding, _, _ = await transport.create()
+            socket = WorkerSocket(binding, 1)
+            await transport.connect(binding, socket)  # type: ignore[arg-type]
+            bindings.append(binding)
+            sockets.append(socket)
+        a, b = bindings
+        assert a.provider is not b.provider
+        assert a.provider.physical_action_count == b.provider.physical_action_count == 0
+
+        for binding, utterance in ((a, "book eleven"), (b, "book 11 am")):
+            await transport.accept(binding, 1, {
+                "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+                "item_id": uuid4().hex, "text": utterance, "final": True,
+                "created_at": None,
+            })
+            await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+            assert binding.provider.physical_action_count == 1
+            assert any(event.event_type == "ToolDispatchRequested"
+                       for event in host.application.events(binding.session_id))
+        assert a.provider is not b.provider
+        assert host.application.snapshot(a.session_id).session_id == a.session_id
+        assert host.application.snapshot(b.session_id).session_id == b.session_id
+        assert set(host.application.snapshot(a.session_id).effects).isdisjoint(
+            host.application.snapshot(b.session_id).effects)
+        before = sum(event.event_type == "ToolDispatchRequested"
+                     for event in host.application.events(a.session_id))
+        await transport.accept(a, 1, {
+            "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+            "item_id": uuid4().hex, "text": "don't make it twelve", "final": True,
+            "created_at": None,
+        })
+        await asyncio.wait_for(host.application.drain(a.session_id), timeout=5)
+        assert sum(event.event_type == "ToolDispatchRequested"
+                   for event in host.application.events(a.session_id)) == before
+        await transport.accept(a, 1, {
+            "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+            "item_id": uuid4().hex, "text": "actually make it twelve", "final": True,
+            "created_at": None,
+        })
+        await asyncio.wait_for(host.application.drain(a.session_id), timeout=5)
+        active = host.application.snapshot(a.session_id)
+        active_intent = active.intents[active.active_intent_id]
+        assert active.revisions[active_intent.active_revision_id].values["requested_slot"].endswith("12:00:00+05:30")
+        assert a.provider.physical_action_count == 1
+
+        negated, _, _ = await transport.create()
+        negated_socket = WorkerSocket(negated, 1)
+        await transport.connect(negated, negated_socket)  # type: ignore[arg-type]
+        for phrase in ("don't book eleven", "do not book eleven"):
+            await transport.accept(negated, 1, {
+                "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+                "item_id": uuid4().hex, "text": phrase, "final": True,
+                "created_at": None,
+            })
+        await asyncio.wait_for(host.application.drain(negated.session_id), timeout=5)
+        assert negated.provider.physical_action_count == 0
+        assert not any(event.event_type == "ToolDispatchRequested"
+                       for event in host.application.events(negated.session_id))
+        await asyncio.gather(*tuple(negated_socket.tasks))
+        transport.disconnect(negated, 1)
+        for binding, socket in zip(bindings, sockets):
+            await asyncio.gather(*tuple(socket.tasks))
+            transport.disconnect(binding, 1)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
 
 
 def test_normal_voice_composition_is_isolated_and_has_no_livekit_llm_or_tools(monkeypatch: Any) -> None:

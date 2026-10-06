@@ -17,6 +17,11 @@ interface VoiceColumnProps {
   readonly onCancelSpeech?: (speechId: string) => void;
   readonly onOpenBlackBox: () => void;
   readonly actionPending?: boolean;
+  readonly voiceState?: 'idle' | 'connecting' | 'listening' | 'agent_speaking' | 'muted' | 'error';
+  readonly voiceError?: string | null;
+  readonly onStartVoice?: () => void;
+  readonly onStopVoice?: () => void;
+  readonly onToggleVoiceMute?: () => void;
 }
 
 export const VoiceColumn: React.FC<VoiceColumnProps> = ({
@@ -28,6 +33,11 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
   onCancelSpeech,
   onOpenBlackBox,
   actionPending = false,
+  voiceState = 'idle',
+  voiceError = null,
+  onStartVoice,
+  onStopVoice,
+  onToggleVoiceMute,
 }) => {
   const speechList = projection?.speech ?? [];
   const allClaims = projection?.claims ?? [];
@@ -110,6 +120,11 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
               onCancelSpeech(emittingSpeech.speech_id);
             }
           }}
+          voiceState={voiceState}
+          voiceError={voiceError}
+          onStartVoice={onStartVoice}
+          onStopVoice={onStopVoice}
+          onToggleVoiceMute={onToggleVoiceMute}
         />
       </div>
     </section>

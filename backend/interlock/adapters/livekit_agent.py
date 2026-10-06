@@ -8,13 +8,16 @@ text, and delegates every authoritative transition to ``Application``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import sys
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from time import monotonic_ns
 from typing import Any, Protocol, cast
+from uuid import uuid4
 
 from livekit.agents import Agent, AgentServer, AgentSession, UserInputTranscribedEvent, UserStateChangedEvent
 from livekit.agents.voice import SpeechHandle
@@ -571,3 +574,199 @@ class LiveKitSessionAdapter(OutputPort):
 
 
 __all__ = ["LiveKitSessionAdapter", "VoiceProviders", "compose_voice_room", "run_livekit_voice_agent"]
+
+
+class BrowserVoiceWorkerTransport:
+    """LiveKit audio endpoint; never constructs Application or SessionState."""
+
+    def __init__(self, session: AgentSession[Any], *, room_name: str,
+                 backend_ws_url: str, worker_secret: str) -> None:
+        if not room_name.startswith("voice-") or len(room_name) <= len("voice-"):
+            raise ValueError("unbound browser voice room")
+        self.session = session
+        self.room_name = room_name
+        self.session_id = room_name[len("voice-"):]
+        self.backend_ws_url = backend_ws_url.rstrip("/")
+        self.worker_secret = worker_secret
+        self._socket: Any = None
+        self._send_lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._handles: dict[str, SpeechHandle] = {}
+        self._closed = False
+
+    async def connect(self) -> None:
+        import websockets
+
+        url = f"{self.backend_ws_url}/internal/voice/{self.session_id}/transport"
+        self._socket = await websockets.connect(
+            url,
+            additional_headers={
+                "x-interlock-voice-room": self.room_name,
+                "x-interlock-worker-secret": self.worker_secret,
+            },
+            max_size=65_536,
+        )
+        self.session.on("user_input_transcribed", self._on_transcript)
+        self.session.on("user_state_changed", self._on_user_state)
+        self._spawn(self._read())
+
+    def _spawn(self, awaitable: Any) -> None:
+        if self._closed:
+            awaitable.close()
+            return
+        if len(self._tasks) >= 64:
+            awaitable.close()
+            raise RuntimeError("browser voice worker capacity exhausted")
+        task = asyncio.create_task(awaitable)
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None:
+                self._closed = True
+
+    async def _send(self, fact: dict[str, Any]) -> None:
+        if self._socket is None or self._closed:
+            raise RuntimeError("browser voice transport is disconnected")
+        async with self._send_lock:
+            await self._socket.send(json.dumps({"worker_event_id": uuid4().hex, **fact}))
+
+    def _on_transcript(self, event: Any) -> None:
+        text = getattr(event, "transcript", None)
+        if not isinstance(text, str) or not text.strip():
+            return
+        self._spawn(self._send({
+            "type": "TRANSCRIPT", "item_id": getattr(event, "item_id", None),
+            "text": text, "final": bool(event.is_final),
+            "created_at": getattr(event, "created_at", None),
+        }))
+
+    def _on_user_state(self, event: Any) -> None:
+        if getattr(event, "new_state", None) == "speaking":
+            self._spawn(self._send({"type": "USER_SPEAKING"}))
+
+    async def _read(self) -> None:
+        async for raw in self._socket:
+            message = json.loads(raw)
+            if message.get("type") == "ACK":
+                continue
+            if message.get("type") == "SPEAK" and set(message) == {"type", "speech_id", "rendered_text"}:
+                self._spawn(self._speak(message["speech_id"], message["rendered_text"]))
+            elif message.get("type") == "CANCEL_SPEECH" and set(message) == {"type", "speech_id"}:
+                handle = self._handles.get(message["speech_id"])
+                if handle is not None and not handle.done():
+                    handle.interrupt(force=False)
+            else:
+                raise RuntimeError("invalid backend voice command")
+        self._closed = True
+
+    async def _speak(self, speech_id: str, rendered_text: str) -> None:
+        if speech_id in self._handles or not isinstance(rendered_text, str):
+            return
+        # The backend supplies the exact persisted TRUTHLOCK text. No LLM,
+        # rewrite, chat-context insertion, or worker-side business decision.
+        handle = self.session.say(
+            rendered_text, allow_interruptions=True, add_to_chat_ctx=False,
+        )
+        self._handles[speech_id] = handle
+        try:
+            await self._wait_for_start(handle)
+            await self._send({"type": "PLAYOUT_STARTED", "speech_id": speech_id})
+            await handle.wait_for_playout()
+            if not getattr(handle, "interrupted", False) and handle.exception() is None:
+                await self._send({"type": "PLAYOUT_FINISHED", "speech_id": speech_id, "heard": True})
+        except Exception:
+            # Neither an exception nor disconnect proves audio was unheard.
+            # Leave the backend's speech terminal fact unresolved.
+            return
+
+    async def _wait_for_start(self, handle: SpeechHandle) -> None:
+        async def active() -> None:
+            while True:
+                current = getattr(self.session, "current_speech", None)
+                if current is handle or (
+                    current is not None and getattr(current, "id", None) is not None
+                    and getattr(current, "id", None) == getattr(handle, "id", None)
+                ):
+                    if getattr(self.session, "agent_state", None) in ("speaking", None):
+                        return
+                await asyncio.sleep(0.01)
+
+        poll = asyncio.create_task(active())
+        playout = asyncio.create_task(handle.wait_for_playout())
+        try:
+            done, _ = await asyncio.wait({poll, playout}, timeout=5.0,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if poll in done and poll.exception() is None:
+                return
+            if playout in done and playout.exception() is None and not handle.interrupted \
+                    and handle.exception() is None:
+                return  # successful full playout also proves a start
+            raise RuntimeError("voice playout start not established")
+        finally:
+            for task in (poll, playout):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(poll, playout, return_exceptions=True)
+
+    async def close(self, _reason: str = "") -> None:
+        self._closed = True
+        for task in tuple(self._tasks):
+            task.cancel()
+        await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        if self._socket is not None:
+            await self._socket.close()
+        await self.session.aclose()
+
+
+def run_browser_voice_worker() -> None:
+    """Run the browser-only transport worker; backend retains all authority."""
+
+    required = (
+        "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
+        "INTERLOCK_VOICE_WORKER_SECRET", "INTERLOCK_VOICE_BACKEND_WS_URL",
+        "DEEPGRAM_API_KEY", "CARTESIA_API_KEY", "INTERLOCK_VOICE_TTS_VOICE_ID",
+    )
+    missing = [name for name in required if not os.environ.get(name, "").strip()]
+    if missing:
+        raise RuntimeError("browser voice worker requires " + ", ".join(missing))
+    from livekit import agents
+    from livekit.plugins import cartesia, deepgram, silero
+
+    stt_model = os.environ.get("INTERLOCK_VOICE_STT_MODEL", "nova-3")
+    tts_model = os.environ.get("INTERLOCK_VOICE_TTS_MODEL", "sonic-3")
+    server = AgentServer()
+
+    @server.rtc_session()
+    async def entrypoint(ctx: agents.JobContext) -> None:
+        session = AgentSession(
+            stt=deepgram.STT(model=stt_model, api_key=os.environ["DEEPGRAM_API_KEY"]),
+            tts=cartesia.TTS(model=tts_model, voice=os.environ["INTERLOCK_VOICE_TTS_VOICE_ID"],
+                             api_key=os.environ["CARTESIA_API_KEY"]),
+            vad=silero.VAD.load(), llm=None,
+        )
+        transport = BrowserVoiceWorkerTransport(
+            session, room_name=ctx.room.name,
+            backend_ws_url=os.environ["INTERLOCK_VOICE_BACKEND_WS_URL"],
+            worker_secret=os.environ["INTERLOCK_VOICE_WORKER_SECRET"],
+        )
+        await transport.connect()
+        ctx.add_shutdown_callback(transport.close)
+        await session.start(room=ctx.room, agent=Agent(
+            instructions="INTERLOCK transport only; no model-side actions.", llm=None, tools=[],
+        ))
+
+    agents.cli.run_app(server)
+
+
+__all__.extend(["BrowserVoiceWorkerTransport", "run_browser_voice_worker"])
+
+
+if __name__ == "__main__":
+    if not sys.argv[1:] or sys.argv[1] != "browser-worker":
+        raise SystemExit("usage: python -m interlock.adapters.livekit_agent browser-worker start")
+    sys.argv = [sys.argv[0], *sys.argv[2:]]
+    run_browser_voice_worker()

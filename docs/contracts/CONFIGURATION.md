@@ -30,6 +30,14 @@
 | `LIVEKIT_URL` | secret-bearing service URL | required by VCE-001/FDB-002; missing fails |
 | `LIVEKIT_API_KEY` | secret, no default | required by VCE-001/FDB-002; missing fails |
 | `LIVEKIT_API_SECRET` | secret, no default | required by VCE-001/FDB-002; missing fails |
+| `INTERLOCK_VOICE_WORKER_SECRET` | separate random secret, at least 32 characters, no default | required by browser voice backend and worker; never returned or journaled |
+| `INTERLOCK_VOICE_BACKEND_WS_URL` | internal WebSocket base ending `/api/v1`, no default (for example `ws://127.0.0.1:8000/api/v1`) | required by browser voice worker; use `wss://` across hosts; worker appends `/internal/voice/{session_id}/transport` |
+| `DEEPGRAM_API_KEY` | secret, no default | required by browser voice worker for Nova-3 STT |
+| `CARTESIA_API_KEY` | secret, no default | required by browser voice worker for Sonic-3 TTS |
+| `INTERLOCK_VOICE_TTS_VOICE_ID` | provider-specific voice ID, no default | required by browser voice worker; select a valid Cartesia voice externally |
+| `INTERLOCK_VOICE_STT_MODEL` | model ID, default `nova-3` | optional browser voice worker override |
+| `INTERLOCK_VOICE_TTS_MODEL` | model ID, default `sonic-3` | optional browser voice worker override |
+| `VITE_INTERLOCK_API_URL` | browser-visible HTTP base ending `/api/v1`; default `/api/v1` | set to backend URL when running the Vite frontend separately |
 | `OPENAI_API_KEY` | secret, no default | required by the official latency evaluator and GPT provider |
 | `XAI_API_KEY` | secret, no default | required only for `grok` |
 | `GOOGLE_API_KEY` | secret, no default | required only for Gemini providers |

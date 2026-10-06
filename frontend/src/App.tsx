@@ -18,6 +18,7 @@ import type {
   ProjectionEventMessage,
   SessionProjection,
 } from './api/types';
+import { Room } from 'livekit-client';
 import { ProjectionSocketClient } from './api/websocket';
 import { createProjectionStore } from './state/store';
 import { AppShell } from './ui/shell/AppShell';
@@ -25,6 +26,7 @@ import type { ActiveView } from './ui/shell/TopBar';
 import type { ToastMessage } from './ui/shell/Toasts';
 import { IdleScreen } from './ui/idle/IdleScreen';
 import { VoiceColumn } from './ui/voice/VoiceColumn';
+import { connectVoiceRoom, setVoiceMuted, stopVoiceRoom } from './ui/voice/room';
 import { BlackBoxPage } from './ui/blackbox/BlackBoxPage';
 import { KitchenSink } from './ui/primitives/KitchenSink';
 import { deriveStage } from './ui/viewmodel/stage';
@@ -94,6 +96,9 @@ export const App: React.FC = () => {
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
 
   const socketRef = useRef<ProjectionSocketClient | null>(null);
+  const voiceRoomRef = useRef<Room | null>(null);
+  const voiceRunRef = useRef(0);
+  const voiceAudioRef = useRef<Set<HTMLMediaElement>>(new Set());
   const streamUrlRef = useRef<string | null>(null);
   const requestSequence = useRef(0);
   const traceSessionRef = useRef<string | null>(null);
@@ -111,6 +116,8 @@ export const App: React.FC = () => {
   const [traceError, setTraceError] = useState<string | null>(null);
   const [userPrompts, setUserPrompts] = useState<readonly UserPromptEntry[]>([]);
   const [storyboardClient, setStoryboardClient] = useState<StoryboardClient | null>(null);
+  const [voiceState, setVoiceState] = useState<'idle' | 'connecting' | 'listening' | 'agent_speaking' | 'muted' | 'error'>('idle');
+  const [voiceError, setVoiceError] = useState<string | null>(null);
 
   // Derive stage, tension, and layout gap from pure view-model
   const { stage, gapPx, tension } = useMemo(() => {
@@ -129,7 +136,23 @@ export const App: React.FC = () => {
     new URLSearchParams(window.location.search).get('kitchen') === '1';
 
   // Cleanup websocket on unmount
-  useEffect(() => () => socketRef.current?.disconnect(), []);
+  const stopVoice = useCallback(async () => {
+    voiceRunRef.current += 1;
+    const room = voiceRoomRef.current;
+    voiceRoomRef.current = null;
+    setVoiceState('idle');
+    try {
+      await stopVoiceRoom(room, voiceAudioRef.current);
+    } catch {
+      // The microphone has been stopped and the room disconnected in finally.
+      // A failed unpublish must not prevent a new backend session.
+    }
+  }, []);
+
+  useEffect(() => () => {
+    socketRef.current?.disconnect();
+    void stopVoice();
+  }, [stopVoice]);
 
   // Poll trace history from REST endpoint when sequence advances
   useEffect(() => {
@@ -229,6 +252,7 @@ export const App: React.FC = () => {
 
   // E1: startSession returns Promise<boolean> (true on success)
   const startSession = useCallback(async (): Promise<boolean> => {
+    await stopVoice();
     setActionPending(true);
     socketRef.current?.disconnect();
     socketRef.current = null;
@@ -268,7 +292,102 @@ export const App: React.FC = () => {
     } finally {
       setActionPending(false);
     }
-  }, [http, nextRequestId, store, addToast]);
+  }, [http, nextRequestId, store, addToast, stopVoice]);
+
+  const startVoice = useCallback(async () => {
+    await stopVoice();
+    const run = ++voiceRunRef.current;
+    setVoiceState('connecting');
+    setVoiceError(null);
+    setActionPending(true);
+    let room: Room | null = null;
+    try {
+      const created = await http.createVoiceSession();
+      if (run !== voiceRunRef.current) return;
+      const snapshot = await http.getSession(created.session_id);
+      if (run !== voiceRunRef.current) return;
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      store.reset();
+      store.beginConnection();
+      store.applySnapshot({
+        type: 'snapshot', schema_version: 1,
+        session_id: snapshot.session_id,
+        through_sequence: snapshot.through_sequence,
+        projection: snapshot.projection,
+      });
+      const socket = new ProjectionSocketClient({
+        url: created.ws_url, sessionId: created.session_id, store,
+        loadSnapshot: (url) => http.getSnapshotUrl(url),
+      });
+      streamUrlRef.current = created.ws_url;
+      socketRef.current = socket;
+      socket.connect();
+      setUserPrompts([]);
+      setTraceEvents([]);
+
+      room = new Room();
+      const activeRoom = room;
+      voiceRoomRef.current = activeRoom;
+      await connectVoiceRoom(activeRoom, created.livekit_url, created.participant_token,
+        voiceAudioRef.current, {
+        onAgentSpeaking: (speaking) => {
+          if (voiceRoomRef.current !== activeRoom) return;
+          setVoiceState((current) => current === 'muted' ? current :
+            speaking ? 'agent_speaking' : 'listening');
+        },
+        onWorkerDisconnected: () => {
+          if (voiceRoomRef.current !== activeRoom) return;
+          const stopped = stopVoice();
+          const generation = voiceRunRef.current;
+          void stopped.then(() => {
+            if (voiceRunRef.current !== generation) return;
+            setVoiceState('error');
+            setVoiceError('The voice worker disconnected. Try again.');
+          });
+        },
+        onDisconnected: () => {
+          if (voiceRoomRef.current !== activeRoom) return;
+          const stopped = stopVoice();
+          const generation = voiceRunRef.current;
+          void stopped.then(() => {
+            if (voiceRunRef.current !== generation) return;
+            setVoiceState('error');
+            setVoiceError('The voice connection was lost.');
+          });
+        },
+      });
+      if (run !== voiceRunRef.current) { await activeRoom.disconnect(true); return; }
+      setVoiceState('listening');
+    } catch (error) {
+      if (run !== voiceRunRef.current) return;
+      const name = error instanceof Error ? error.name : '';
+      setVoiceError(name === 'NotAllowedError'
+        ? 'Microphone permission was denied.'
+        : name === 'NotFoundError'
+          ? 'No microphone is available.'
+          : error instanceof Error ? error.message : 'Voice connection failed.');
+      setVoiceState('error');
+      voiceRoomRef.current = null;
+      await stopVoiceRoom(room, voiceAudioRef.current);
+    } finally {
+      if (run === voiceRunRef.current) setActionPending(false);
+    }
+  }, [http, store, stopVoice]);
+
+  const toggleVoiceMute = useCallback(async () => {
+    const room = voiceRoomRef.current;
+    if (!room) return;
+    const muted = voiceState === 'muted';
+    try {
+      await setVoiceMuted(room, !muted);
+      setVoiceState(muted ? 'listening' : 'muted');
+    } catch (error) {
+      await stopVoice();
+      setVoiceError(error instanceof Error ? error.message : 'Microphone control failed.');
+      setVoiceState('error');
+    }
+  }, [voiceState, stopVoice]);
 
   const resetSession = useCallback(async () => {
     if (storyboardClient) {
@@ -277,6 +396,7 @@ export const App: React.FC = () => {
     }
 
     if (!state.sessionId || !streamUrlRef.current) return;
+    await stopVoice();
     setActionPending(true);
 
     try {
@@ -314,7 +434,7 @@ export const App: React.FC = () => {
     } finally {
       setActionPending(false);
     }
-  }, [http, nextRequestId, state.sessionId, store, storyboardClient, addToast]);
+  }, [http, nextRequestId, state.sessionId, store, storyboardClient, addToast, stopVoice]);
 
   // E2: submitText records acceptedSequence on userPrompts
   const submitText = useCallback(async (content: string) => {
@@ -458,6 +578,11 @@ export const App: React.FC = () => {
               onCancelSpeech={cancelSpeech}
               onOpenBlackBox={() => setView('blackbox')}
               actionPending={actionPending}
+              voiceState={voiceState}
+              voiceError={voiceError}
+              onStartVoice={() => void startVoice()}
+              onStopVoice={() => void stopVoice()}
+              onToggleVoiceMute={() => void toggleVoiceMute()}
             />
           ) : (
             /* Black Box forensic replay */
