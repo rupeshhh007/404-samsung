@@ -20,6 +20,10 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Can we do twelve?", "book 12"),
         ("Twelve please.", "book 12"),
         ("Book an appointment for noon.", "book 12"),
+        ("Give me midday please.", "book 12"),
+        ("Let's do twelve.", "book 12"),
+        ("Go with 12.", "book 12"),
+        ("At twelve please.", "book 12"),
         ("Actually book twelve.", "make it 12"),
         ("Actually, book 12 please.", "make it 12"),
         ("Actually make it twelve.", "make it 12"),
@@ -36,6 +40,11 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Reschedule for twelve.", "make it 12"),
         ("Twelve instead.", "make it 12"),
         ("Can we do twelve instead?", "make it 12"),
+        ("Wait, make it twelve.", "make it 12"),
+        ("Set it to twelve.", "make it 12"),
+        ("Use 12 instead.", "make it 12"),
+        ("Go with noon instead.", "make it 12"),
+        ("Put it at 12:00.", "make it 12"),
     ],
 )
 def test_demo_spoken_alias_accepts_common_stt_variants(
@@ -66,7 +75,7 @@ def test_demo_spoken_alias_never_turns_negation_into_positive_write(spoken: str)
     ],
 )
 def test_demo_spoken_alias_keeps_ambiguous_multi_slot_input_unresolved(spoken: str) -> None:
-    assert _demo_spoken_alias(spoken) == spoken
+    assert _demo_spoken_alias(spoken) == "please clarify"
 
 
 def test_fallback_correction_accepts_spoken_number_word() -> None:
@@ -88,9 +97,28 @@ def test_fallback_correction_accepts_spoken_number_word() -> None:
     assert result.intent_delta.set_fields == {"requested_slot": slot}
 
 
+def test_fallback_missing_correction_value_requests_slot_specific_clarification() -> None:
+    provider = DeterministicFallbackProvider()
+    result = provider.interpret(
+        "actually change it",
+        FallbackContext(
+            active_intent_id="intent-1",
+            candidate_target_ids=("intent-1",),
+            correction_field="requested_slot",
+            value_aliases={"eleven": "11", "twelve": "12"},
+        ),
+    )
+
+    assert result.kind == ControlKind.CLARIFY
+    assert result.intent_delta is None
+    assert result.clarification == "Which booking time do you want: eleven or twelve?"
+
+
 def test_browser_stt_defaults_are_tuned_for_demo_speech(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("INTERLOCK_VOICE_STT_LANGUAGE", raising=False)
     monkeypatch.delenv("INTERLOCK_VOICE_STT_KEYTERMS", raising=False)
+    monkeypatch.delenv("INTERLOCK_VOICE_STT_ENDPOINTING_MS", raising=False)
+    monkeypatch.delenv("INTERLOCK_VOICE_STT_UTTERANCE_END_MS", raising=False)
 
     options = _browser_stt_options()
 
@@ -98,6 +126,13 @@ def test_browser_stt_defaults_are_tuned_for_demo_speech(monkeypatch: pytest.Monk
     assert {"book", "appointment", "eleven", "twelve", "actually"}.issubset(
         set(options["keyterm"])
     )
+    assert options["endpointing_ms"] == 500
+    assert options["utterance_end_ms"] == 1000
+    assert options["interim_results"] is True
+    assert options["punctuate"] is True
+    assert options["smart_format"] is True
+    assert options["numerals"] is True
+    assert options["filler_words"] is False
 
 
 def test_browser_stt_tuning_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +142,36 @@ def test_browser_stt_tuning_is_configurable(monkeypatch: pytest.MonkeyPatch) -> 
         "eleven,twelve,service center",
     )
 
+    monkeypatch.setenv("INTERLOCK_VOICE_STT_ENDPOINTING_MS", "650")
+    monkeypatch.setenv("INTERLOCK_VOICE_STT_UTTERANCE_END_MS", "1400")
+
     assert _browser_stt_options() == {
         "language": "en-US",
         "keyterm": ["eleven", "twelve", "service center"],
+        "interim_results": True,
+        "punctuate": True,
+        "smart_format": True,
+        "numerals": True,
+        "filler_words": False,
+        "endpointing_ms": 650,
+        "utterance_end_ms": 1400,
     }
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("INTERLOCK_VOICE_STT_ENDPOINTING_MS", "50"),
+        ("INTERLOCK_VOICE_STT_ENDPOINTING_MS", "2501"),
+        ("INTERLOCK_VOICE_STT_UTTERANCE_END_MS", "500"),
+        ("INTERLOCK_VOICE_STT_UTTERANCE_END_MS", "6000"),
+    ],
+)
+def test_browser_stt_rejects_unsafe_timing_values(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeError):
+        _browser_stt_options()
