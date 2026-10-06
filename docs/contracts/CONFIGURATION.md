@@ -36,6 +36,8 @@
 | `CARTESIA_API_KEY` | secret, no default | required by browser voice worker for Sonic-3 TTS |
 | `INTERLOCK_VOICE_TTS_VOICE_ID` | provider-specific voice ID, no default | required by browser voice worker; select a valid Cartesia voice externally |
 | `INTERLOCK_VOICE_STT_MODEL` | model ID, default `nova-3` | optional browser voice worker override |
+| `INTERLOCK_VOICE_STT_LANGUAGE` | Deepgram language, default `en-IN` | optional browser voice tuning; change for a different speaker locale |
+| `INTERLOCK_VOICE_STT_KEYTERMS` | comma-separated terms, default `book,appointment,eleven,twelve,actually,reschedule` | optional Nova-3 keyterm bias for demo-critical vocabulary; does not bypass semantic validation |
 | `INTERLOCK_VOICE_TTS_MODEL` | model ID, default `sonic-3` | optional browser voice worker override |
 | `VITE_INTERLOCK_API_URL` | browser-visible HTTP base ending `/api/v1`; default `/api/v1` | set to backend URL when running the Vite frontend separately |
 | `OPENAI_API_KEY` | secret, no default | required by the official latency evaluator and GPT provider |
