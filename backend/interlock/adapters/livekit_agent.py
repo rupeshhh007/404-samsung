@@ -744,6 +744,18 @@ class BrowserVoiceWorkerTransport:
         await self.session.aclose()
 
 
+def _browser_stt_options() -> dict[str, Any]:
+    """Return conservative browser-demo STT tuning without embedding credentials."""
+
+    language = os.environ.get("INTERLOCK_VOICE_STT_LANGUAGE", "en-IN").strip() or "en-IN"
+    configured = os.environ.get(
+        "INTERLOCK_VOICE_STT_KEYTERMS",
+        "book,appointment,eleven,twelve,actually,reschedule",
+    )
+    keyterms = [term.strip() for term in configured.split(",") if term.strip()]
+    return {"language": language, "keyterm": keyterms}
+
+
 async def _browser_voice_entrypoint(ctx: Any) -> None:
     from livekit.plugins import cartesia, deepgram, silero
 
@@ -751,7 +763,11 @@ async def _browser_voice_entrypoint(ctx: Any) -> None:
     tts_model = os.environ.get("INTERLOCK_VOICE_TTS_MODEL", "sonic-3")
     manual_turn_handling = {"turn_detection": "manual", "interruption": {"enabled": False}}
     session = AgentSession(
-        stt=deepgram.STT(model=stt_model, api_key=os.environ["DEEPGRAM_API_KEY"]),
+        stt=deepgram.STT(
+            model=stt_model,
+            api_key=os.environ["DEEPGRAM_API_KEY"],
+            **_browser_stt_options(),
+        ),
         tts=cartesia.TTS(model=tts_model, voice=os.environ["INTERLOCK_VOICE_TTS_VOICE_ID"],
                          api_key=os.environ["CARTESIA_API_KEY"]),
         vad=silero.VAD.load(), llm=None,
