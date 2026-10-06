@@ -273,7 +273,17 @@ class _Session:
         state = self.snapshot()
         if event.event_type == "TranscriptHypothesisObserved":
             eid = event.payload["evidence_id"]
-            if previous is not None and eid not in previous.evidence and eid in state.evidence:
+            # Preserve interim hypotheses as non-authoritative evidence, but do
+            # semantic work only once the transport has produced a final turn.
+            # This prevents a partial "actually book..." from racing the final
+            # "...twelve" and producing a premature clarification or stale model
+            # result.  Barge-in remains immediate through USER_SPEAKING.
+            if (
+                bool(event.payload.get("final", False))
+                and previous is not None
+                and eid not in previous.evidence
+                and eid in state.evidence
+            ):
                 await self.submit([InterpretInput(
                     session_id=self.session_id, evidence_id=eid, modality="transcript",
                     content_ref=event.payload["text"],
