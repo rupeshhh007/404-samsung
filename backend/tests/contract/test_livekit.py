@@ -289,6 +289,113 @@ def test_browser_worker_owns_only_transport_and_emits_playout_proof() -> None:
     asyncio.run(case())
 
 
+def test_browser_worker_coalesces_segmented_finals_before_backend_semantics() -> None:
+    import json
+
+    class Session:
+        pass
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send(self, raw: str) -> None:
+            self.messages.append(json.loads(raw))
+
+    async def case() -> None:
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            Session(),
+            room_name="voice-coalesce",
+            backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        worker._socket = socket
+        worker._final_coalesce_s = 0.01
+
+        worker._on_user_state(type("State", (), {"new_state": "speaking"})())
+        worker._on_transcript(type("Transcript", (), {
+            "transcript": "Actually book",
+            "is_final": True,
+            "item_id": None,
+            "created_at": 1.0,
+        })())
+        worker._on_transcript(type("Transcript", (), {
+            "transcript": "book twelve",
+            "is_final": True,
+            "item_id": None,
+            "created_at": 1.1,
+        })())
+        await asyncio.sleep(0)
+        assert not any(
+            message["type"] == "TRANSCRIPT" and message["final"]
+            for message in socket.messages
+        )
+
+        worker._on_user_state(type("State", (), {"new_state": "listening"})())
+        await asyncio.sleep(0.05)
+        finals = [
+            message for message in socket.messages
+            if message["type"] == "TRANSCRIPT" and message["final"]
+        ]
+        assert len(finals) == 1
+        assert finals[0]["text"] == "Actually book twelve"
+        assert finals[0]["item_id"].startswith("turn-")
+
+        if worker._tasks:
+            await asyncio.gather(*tuple(worker._tasks), return_exceptions=True)
+
+    asyncio.run(case())
+
+
+def test_new_speaking_turn_flushes_prior_final_before_barge_in_fact() -> None:
+    import json
+
+    class Session:
+        pass
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send(self, raw: str) -> None:
+            self.messages.append(json.loads(raw))
+
+    async def case() -> None:
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            Session(),
+            room_name="voice-turn-order",
+            backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        worker._socket = socket
+        worker._final_coalesce_s = 1.0
+
+        worker._on_transcript(type("Transcript", (), {
+            "transcript": "Book eleven",
+            "is_final": True,
+            "item_id": None,
+            "created_at": 1.0,
+        })())
+        worker._on_user_state(type("State", (), {"new_state": "speaking"})())
+        await asyncio.sleep(0.05)
+
+        semantic = [
+            message["type"] for message in socket.messages
+            if message["type"] in {"TRANSCRIPT", "USER_SPEAKING"}
+        ]
+        assert semantic[:2] == ["TRANSCRIPT", "USER_SPEAKING"]
+        final = next(message for message in socket.messages if message["type"] == "TRANSCRIPT")
+        assert final["text"] == "Book eleven"
+        assert final["final"] is True
+
+        if worker._tasks:
+            await asyncio.gather(*tuple(worker._tasks), return_exceptions=True)
+
+    asyncio.run(case())
+
+
 def test_browser_worker_interruption_after_start_reports_heard_failure() -> None:
     import json
 
