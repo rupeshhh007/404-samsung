@@ -709,6 +709,17 @@ class _Session:
             and command.modality == "transcript"
             else evidence.content_ref
         )
+        # In the one-intent DEMO, a terse second "book 12" voice command is a
+        # correction of the active booking, not permission to create a second
+        # independent booking.  The raw transcript remains immutable evidence.
+        if (
+            self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+            and command.modality == "transcript"
+            and state.active_intent_id is not None
+        ):
+            active_booking = re.fullmatch(r"book\s+(11|12)", semantic_text.strip().lower())
+            if active_booking is not None:
+                semantic_text = f"make it {active_booking.group(1)}"
         demo_root = (
             _demo_root_booking(semantic_text, command.evidence_id, context)
             if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
