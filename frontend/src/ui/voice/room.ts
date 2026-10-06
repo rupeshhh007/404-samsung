@@ -7,6 +7,12 @@ export interface VoiceRoomCallbacks {
   readonly appendAudio?: (element: HTMLMediaElement) => void;
 }
 
+export const VOICE_AUDIO_CAPTURE_OPTIONS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+} as const;
+
 /** LiveKit has audio transport only; no business projection is read here. */
 export async function connectVoiceRoom(
   room: Room, url: string, token: string, elements: Set<HTMLMediaElement>,
@@ -36,11 +42,11 @@ export async function connectVoiceRoom(
   room.on(RoomEvent.Disconnected, callbacks.onDisconnected);
   await room.connect(url, token);
   await room.startAudio();
-  await room.localParticipant.setMicrophoneEnabled(true);
+  await room.localParticipant.setMicrophoneEnabled(true, VOICE_AUDIO_CAPTURE_OPTIONS);
 }
 
 export async function setVoiceMuted(room: Room, muted: boolean): Promise<void> {
-  await room.localParticipant.setMicrophoneEnabled(!muted);
+  await room.localParticipant.setMicrophoneEnabled(!muted, muted ? undefined : VOICE_AUDIO_CAPTURE_OPTIONS);
 }
 
 /** Release every browser audio resource, even if disconnect itself fails. */

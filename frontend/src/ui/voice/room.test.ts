@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Room } from 'livekit-client';
 import { RoomEvent, Track } from 'livekit-client';
-import { connectVoiceRoom, setVoiceMuted, stopVoiceRoom } from './room';
+import { connectVoiceRoom, setVoiceMuted, stopVoiceRoom, VOICE_AUDIO_CAPTURE_OPTIONS } from './room';
 
 function fakeRoom(connect = vi.fn(async () => undefined)) {
   const listeners = new Map<string, (...args: any[]) => void>();
@@ -26,7 +26,7 @@ describe('browser voice connection', () => {
     });
     expect(room.connect).toHaveBeenCalledWith('wss://lk.example', 'browser-token');
     expect(room.startAudio).toHaveBeenCalledOnce();
-    expect(setMicrophoneEnabled).toHaveBeenCalledWith(true);
+    expect(setMicrophoneEnabled).toHaveBeenCalledWith(true, VOICE_AUDIO_CAPTURE_OPTIONS);
     const element = { dataset: {}, remove: vi.fn() } as unknown as HTMLMediaElement;
     const detach = vi.fn(() => [element]);
     const audio = { kind: Track.Kind.Audio, attach: () => element, detach };
@@ -65,7 +65,7 @@ describe('browser voice connection', () => {
     const { room, setMicrophoneEnabled } = fakeRoom();
     await setVoiceMuted(room, true);
     await setVoiceMuted(room, false);
-    expect(setMicrophoneEnabled.mock.calls).toEqual([[false], [true]]);
+    expect(setMicrophoneEnabled.mock.calls).toEqual([[false, undefined], [true, VOICE_AUDIO_CAPTURE_OPTIONS]]);
   });
 });
 

@@ -247,7 +247,7 @@ def test_browser_worker_owns_only_transport_and_emits_playout_proof() -> None:
 
         def say(self, text: str, *, allow_interruptions: bool,
                 add_to_chat_ctx: bool) -> Handle:
-            assert allow_interruptions is True
+            assert allow_interruptions is False
             assert add_to_chat_ctx is False
             self.text = text
             return self.handle
@@ -306,7 +306,7 @@ def test_browser_worker_interruption_after_start_reports_heard_failure() -> None
             return self.played.is_set()
 
         def interrupt(self, *, force: bool) -> None:
-            assert force is False
+            assert force is True
             self.interrupted = True
             self.played.set()
 
@@ -323,7 +323,7 @@ def test_browser_worker_interruption_after_start_reports_heard_failure() -> None
 
         def say(self, text: str, *, allow_interruptions: bool,
                 add_to_chat_ctx: bool) -> Handle:
-            assert allow_interruptions and not add_to_chat_ctx
+            assert not allow_interruptions and not add_to_chat_ctx
             self.text = text
             return self.handle
 
@@ -1767,3 +1767,48 @@ def test_browser_voice_worker_entrypoint_is_picklable() -> None:
     server_pickled = pickle.dumps(server)
     server_unpickled = pickle.loads(server_pickled)
     assert server_unpickled._entrypoint_fnc is _browser_voice_entrypoint
+
+
+def test_browser_voice_worker_entrypoint_configures_manual_turn_handling_and_no_autonomous_interruptions(monkeypatch: Any) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from interlock.adapters import livekit_agent
+
+    captured_session_kwargs: dict[str, Any] = {}
+    captured_agent_kwargs: dict[str, Any] = {}
+
+    class MockAgentSession:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_session_kwargs.update(kwargs)
+
+        def on(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def start(self, *, room: Any, agent: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class MockAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_agent_kwargs.update(kwargs)
+
+    monkeypatch.setattr(livekit_agent, "AgentSession", MockAgentSession)
+    monkeypatch.setattr(livekit_agent, "Agent", MockAgent)
+    monkeypatch.setattr(livekit_agent.BrowserVoiceWorkerTransport, "connect", AsyncMock())
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "fake-dg")
+    monkeypatch.setenv("CARTESIA_API_KEY", "fake-cartesia")
+    monkeypatch.setenv("INTERLOCK_VOICE_TTS_VOICE_ID", "voice-1")
+    monkeypatch.setenv("INTERLOCK_VOICE_BACKEND_WS_URL", "ws://127.0.0.1:8000/api/v1")
+    monkeypatch.setenv("INTERLOCK_VOICE_WORKER_SECRET", "secret-1")
+
+    ctx = MagicMock()
+    ctx.room.name = "voice-test-session"
+    ctx.add_shutdown_callback = MagicMock()
+
+    asyncio.run(livekit_agent._browser_voice_entrypoint(ctx))
+
+    expected_turn_handling = {"turn_detection": "manual", "interruption": {"enabled": False}}
+    assert captured_session_kwargs.get("turn_handling") == expected_turn_handling
+    assert captured_agent_kwargs.get("turn_handling") == expected_turn_handling

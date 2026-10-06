@@ -658,7 +658,7 @@ class BrowserVoiceWorkerTransport:
             elif message.get("type") == "CANCEL_SPEECH" and set(message) == {"type", "speech_id"}:
                 handle = self._handles.get(message["speech_id"])
                 if handle is not None and not handle.done():
-                    handle.interrupt(force=False)
+                    handle.interrupt(force=True)
             else:
                 raise RuntimeError("invalid backend voice command")
         self._closed = True
@@ -668,8 +668,10 @@ class BrowserVoiceWorkerTransport:
             return
         # The backend supplies the exact persisted TRUTHLOCK text. No LLM,
         # rewrite, chat-context insertion, or worker-side business decision.
+        # Interruption is managed authoritatively by INTERLOCK backend cancellation;
+        # disable autonomous LiveKit VAD/audio-activity interruptions to prevent speaker echo cutoffs.
         handle = self.session.say(
-            rendered_text, allow_interruptions=True, add_to_chat_ctx=False,
+            rendered_text, allow_interruptions=False, add_to_chat_ctx=False,
         )
         self._handles[speech_id] = handle
         started = False
@@ -731,6 +733,9 @@ class BrowserVoiceWorkerTransport:
 
     async def close(self, _reason: str = "") -> None:
         self._closed = True
+        for handle in tuple(self._handles.values()):
+            if not handle.done():
+                handle.interrupt(force=True)
         for task in tuple(self._tasks):
             task.cancel()
         await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
@@ -744,11 +749,13 @@ async def _browser_voice_entrypoint(ctx: Any) -> None:
 
     stt_model = os.environ.get("INTERLOCK_VOICE_STT_MODEL", "nova-3")
     tts_model = os.environ.get("INTERLOCK_VOICE_TTS_MODEL", "sonic-3")
+    manual_turn_handling = {"turn_detection": "manual", "interruption": {"enabled": False}}
     session = AgentSession(
         stt=deepgram.STT(model=stt_model, api_key=os.environ["DEEPGRAM_API_KEY"]),
         tts=cartesia.TTS(model=tts_model, voice=os.environ["INTERLOCK_VOICE_TTS_VOICE_ID"],
                          api_key=os.environ["CARTESIA_API_KEY"]),
         vad=silero.VAD.load(), llm=None,
+        turn_handling=manual_turn_handling,
     )
     transport = BrowserVoiceWorkerTransport(
         session, room_name=ctx.room.name,
@@ -759,6 +766,7 @@ async def _browser_voice_entrypoint(ctx: Any) -> None:
     ctx.add_shutdown_callback(transport.close)
     await session.start(room=ctx.room, agent=Agent(
         instructions="INTERLOCK transport only; no model-side actions.", llm=None, tools=[],
+        turn_handling=manual_turn_handling,
     ))
 
 
