@@ -1346,6 +1346,13 @@ def _demo_spoken_alias(raw: str) -> str:
     if contrastive_slot is not None:
         return f"make it {contrastive_slot}"
 
+    if re.search(
+        rf"\b{_DEMO_SLOT_TOKEN}\b.*\bor\b.*\b{_DEMO_SLOT_TOKEN}\b",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return "please clarify"
+
     slot = _demo_spoken_slot(normalized)
     if slot is None:
         mentioned = {
@@ -1364,7 +1371,7 @@ def _demo_spoken_alias(raw: str) -> str:
 
     correction_cue = re.search(
         r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
-        r"make|correct|update|reschedule|cancel|replace|swap|sorry|meant|mean|no|wait)\b",
+        r"make|set|put|correct|update|reschedule|cancel|replace|swap|sorry|meant|mean|no|wait)\b",
         normalized,
     )
     if correction_cue is not None:
@@ -1396,7 +1403,7 @@ def _demo_root_booking(
 ) -> tuple[dict[str, Any], IntentRevision] | None:
     """Recognize only the documented deterministic demo's root booking phrase."""
     normalized = " ".join(text.strip().lower().split())
-    match = re.fullmatch(r"book\s+((?:11|12)(?::00)?)(?:\.)?", normalized)
+    match = re.fullmatch(r"book\s+(?:the\s+)?((?:11|12)(?::00)?)(?:\s+appointment)?(?:\.)?", normalized)
     if match is None:
         return None
     slot = _DEMO_SLOT_ALIASES[match.group(1)]

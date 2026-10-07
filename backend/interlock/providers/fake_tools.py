@@ -96,6 +96,11 @@ class FakeAppointmentProvider:
         self._availability = {
             center_id: tuple(slots) for center_id, slots in seed.availability.items()
         }
+        self._booking_identities = {
+            (center_id, slot): booking_id
+            for center_id, identities in seed.booking_identities.items()
+            for slot, booking_id in identities.items()
+        }
         self._cancelled_at = seed.cancelled_at
         self._scripts = scripts
         self._bookings = {
@@ -328,7 +333,7 @@ class FakeAppointmentProvider:
         )
         if center_id not in self._centers or requested not in self._availability[center_id] or occupied:
             return _wire_failure("BOOKING_FAILED", "SLOT_UNAVAILABLE")
-        booking_id = _stable_id("booking", self._fixture_id, record.idempotency_key)
+        booking_id = self._booking_identities[(center_id, requested)]
         booking = {
             "booking_id": booking_id,
             "center_id": center_id,

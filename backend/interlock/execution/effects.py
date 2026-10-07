@@ -148,7 +148,8 @@ class EffectInterpreter:
                                             EvidenceAuthority.NON_AUTHORITATIVE, "tool_failure"),)
         if observed.outcome != ToolOutcome.SUCCEEDED or not semantics.commit or status != semantics.commit:
             raise EffectInterpretationError("success lacks trusted final confirmation")
-        if any(not _nonempty(result.get(name)) for name in semantics.authoritative_fields):
+        if any(not _present_confirmation_field(result, name)
+               for name in semantics.authoritative_fields):
             raise EffectInterpretationError("authoritative confirmation field is missing")
 
         if operation.tool_name == "appointment.book":
@@ -160,6 +161,12 @@ class EffectInterpreter:
         if operation.tool_name == "appointment.cancel":
             return self._compensation(source, observed, operation, result,
                                       known_effects, known_evidence)
+        if descriptor.action_type == ActionType.READ_ONLY and descriptor.effect_classification == EffectClassification.NONE:
+            return (self._evidence_candidate(
+                source, observed, operation, result,
+                EvidenceAuthority.NON_AUTHORITATIVE,
+                "tool_read_result",
+            ),)
         raise EffectInterpretationError("effect-producing tool has no canonical effect mapping")
 
     def _booking(self, source: EventEnvelope, observed: ToolResultObserved,
@@ -617,7 +624,21 @@ def _booking_identity(observed: ToolResultObserved, result: Mapping[str, Any]) -
 
 
 def _nonempty(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return value is not None
+
+
+def _present_confirmation_field(result: Mapping[str, Any], name: str) -> bool:
+    """Treat schema-valid empty collections as present read observations."""
+
+    if name not in result or result[name] is None:
+        return False
+    if isinstance(result[name], str):
+        return bool(result[name].strip())
+    return True
 
 
 def _digest(value: Any) -> str:

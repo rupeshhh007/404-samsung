@@ -40,7 +40,14 @@ class _AutoPlayout:
         task.add_done_callback(self.tasks.discard)
 
 
-def test_demo_post_dispatch_timeout_stays_unknown_without_protocol_violation() -> None:
+def test_demo_post_dispatch_timeout_stays_unknown_without_protocol_violation(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_URL", "wss://voice.example.invalid")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "a" * 40)
+    monkeypatch.setenv("INTERLOCK_VOICE_WORKER_SECRET", "b" * 40)
+
     async def case() -> None:
         # The fake provider acts before the scripted response delay.  This
         # intentionally creates a post-dispatch timeout with an unknown outcome.
