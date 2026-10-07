@@ -1218,6 +1218,31 @@ def _canonical_demo_slot(raw: str) -> str | None:
     return None
 
 
+def _demo_contrastive_slot(normalized: str) -> str | None:
+    """Resolve explicit self-corrections while keeping ordinary negation fail-closed."""
+
+    patterns: tuple[tuple[str, int], ...] = (
+        # "not eleven, twelve" / "not eleven but twelve"
+        (rf"\bnot\s+({_DEMO_SLOT_TOKEN})\s+(?:but\s+)?({_DEMO_SLOT_TOKEN})\b", 2),
+        # "twelve, not eleven" / "twelve instead of eleven"
+        (rf"\b({_DEMO_SLOT_TOKEN})\s+(?:not|instead\s+of)\s+({_DEMO_SLOT_TOKEN})\b", 1),
+        # "eleven — no/sorry/actually — twelve"
+        (rf"\b({_DEMO_SLOT_TOKEN})\s+(?:no|sorry|actually)\s+({_DEMO_SLOT_TOKEN})\b", 2),
+        # "I said/meant twelve, not eleven"
+        (rf"\b(?:i\s+said|i\s+meant)\s+({_DEMO_SLOT_TOKEN})\s+(?:not|instead\s+of)\s+({_DEMO_SLOT_TOKEN})\b", 1),
+    )
+    for pattern, desired_group in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        first = _canonical_demo_slot(match.group(1))
+        second = _canonical_demo_slot(match.group(2))
+        if first is None or second is None or first == second:
+            return None
+        return first if desired_group == 1 else second
+    return None
+
+
 def _demo_spoken_slot(normalized: str) -> str | None:
     """Extract one intended 11/12 target from common conversational STT text."""
 
@@ -1316,6 +1341,10 @@ def _demo_spoken_alias(raw: str) -> str:
 
     if _demo_time_is_inexact_or_unsupported(normalized):
         return "please clarify"
+
+    contrastive_slot = _demo_contrastive_slot(normalized)
+    if contrastive_slot is not None:
+        return f"make it {contrastive_slot}"
 
     slot = _demo_spoken_slot(normalized)
     if slot is None:
