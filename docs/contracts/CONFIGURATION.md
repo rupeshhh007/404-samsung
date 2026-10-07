@@ -21,6 +21,7 @@
 | `FDB_V3_REPO` | path to official FDB checkout | required by FDB-002; missing/wrong commit fails before launch |
 | `FDB_V3_DATA_DIR` | path to released FDB-v3 example directories | required by FDB-002; zero/malformed examples fail |
 | `FDB_V3_PROVIDER` | `gpt_realtime|grok|gemini2_5|gemini3_1|ultravox|azure_openai` | required by FDB-002; unsupported provider fails |
+| `FDB_V3_PYTHON` | path to a real Python 3.11 executable; project `.venv/bin/python` fallback in the reproduction script | optional selector; when the main pytest process uses another Python version, set this explicitly so T-FDB-02 delegates to Python 3.11 |
 | `FDB_V3_BENCHMARK_COMMIT` | git SHA; default `3e799c45a045256f47d5f1c9cda90157e2d2ec9e` | optional explicit benchmark pin override |
 | `FDB_V3_SEED` | integer-like string `0` | optional; exported as `PYTHONHASHSEED` and recorded in provenance |
 | `FDB_V3_LATENCY_PROFILE` | official MockAPI latency profile, `instant` | optional; FDB provider fixture |
@@ -51,7 +52,7 @@
 | `AZURE_OPENAI_ENDPOINT` | URL, no default | required only for `azure_openai` |
 | `AZURE_OPENAI_DEPLOYMENT` | string, no default | required only for `azure_openai` |
 
-For manual DEMO race testing, keep `INTERLOCK_TOOL_TIMEOUT_MS` comfortably above `INTERLOCK_FAKE_LATENCY_MS` (for example `15000` with a `10000` ms fake delay) so the delayed provider result is observed instead of being converted into a timeout. The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`.
+For manual DEMO race testing, keep `INTERLOCK_TOOL_TIMEOUT_MS` comfortably above `INTERLOCK_FAKE_LATENCY_MS` (for example `15000` with a `10000` ms fake delay) so the delayed provider result is observed instead of being converted into a timeout. FDB-002 still requires Python 3.11 exactly; if the main test runner uses another supported Python version, set `FDB_V3_PYTHON` to an installed real Python 3.11 executable. The test harness preserves that explicit choice and falls back to the pytest interpreter only when no override is supplied. The `.env.example` contains only non-benchmark backend defaults. Benchmark credentials remain external and must never be committed. `scripts/reproduce_fdb_v3.sh` validates the variables above before launch and records non-secret configuration plus resolved dependency versions in `provenance.json`.
 
 Current `.env.example`:
 
