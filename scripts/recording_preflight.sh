@@ -21,6 +21,21 @@ printf 'python: %s\n' "$("$PYTHON" --version 2>&1)"
 printf 'node: %s\n' "$(node --version)"
 printf 'npm: %s\n' "$(npm --version)"
 
+# FDB-002 intentionally requires a real Python 3.11 subprocess even when the
+# main project/test interpreter is newer.
+if [[ -z "${FDB_V3_PYTHON:-}" ]]; then
+  if "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)'; then
+    export FDB_V3_PYTHON="$PYTHON"
+  elif command -v python3.11 >/dev/null 2>&1; then
+    export FDB_V3_PYTHON="$(command -v python3.11)"
+  else
+    fail "FDB-002 needs Python 3.11. Set FDB_V3_PYTHON=/absolute/path/to/python3.11."
+  fi
+fi
+"$FDB_V3_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+  || fail "FDB_V3_PYTHON must point to Python 3.11 exactly."
+printf 'fdb python: %s (%s)\n' "$FDB_V3_PYTHON" "$("$FDB_V3_PYTHON" --version 2>&1)"
+
 printf '\n[1/7] Critical voice + race contracts\n'
 PYTHONPATH=backend "$PYTHON" -m pytest -W error -q \
   backend/tests/contract/test_voice_phrase_flexibility.py \
