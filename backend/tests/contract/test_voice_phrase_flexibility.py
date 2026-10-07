@@ -61,6 +61,11 @@ from interlock.providers.fallback import DeterministicFallbackProvider, Fallback
         ("Cancel eleven and book twelve.", "make it 12"),
         ("Instead of eleven, book twelve.", "make it 12"),
         ("Replace eleven with twelve.", "make it 12"),
+        ("Not eleven, twelve.", "make it 12"),
+        ("Twelve, not eleven.", "make it 12"),
+        ("I said twelve, not eleven.", "make it 12"),
+        ("Eleven, no, twelve.", "make it 12"),
+        ("Eleven, sorry, twelve.", "make it 12"),
     ],
 )
 def test_demo_spoken_alias_accepts_common_stt_variants(
