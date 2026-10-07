@@ -17,3 +17,5 @@ Product readers: [Product](product/PRODUCT.md) → [Requirements](product/REQUIR
 - Demo: [scenario](demo/DEMO_SCENARIO.md), [fixtures](demo/DEMO_FIXTURES.md), [runbook](demo/DEMO_RUNBOOK.md), [UI](demo/UI_SPECIFICATION.md).
 - Delivery: [ownership](delivery/OWNERSHIP.md), [plan](delivery/IMPLEMENTATION_PLAN.md), [backlog](delivery/TASK_BACKLOG.md), [development](delivery/DEVELOPMENT_RUNBOOK.md), [risks](delivery/RISKS_AND_DEPENDENCIES.md), [traceability](delivery/TRACEABILITY.md), [checklist](delivery/COMPLETION_CHECKLIST.md), [handoff audit](delivery/HANDOFF_AUDIT.md).
 - Agents: [operating manual](agents/OPERATING_MANUAL.md), [task template](agents/TASK_TEMPLATE.md), [contract changes](agents/CONTRACT_CHANGE_POLICY.md), [AI use](agents/AI_USAGE.md).
+
+- `docs/demo/RECORDING_DAY.md` — recording-day automated preflight, supported voice phrases, and manual race matrix
