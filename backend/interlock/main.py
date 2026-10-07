@@ -44,7 +44,7 @@ from interlock.runtime.commands import (
     BaseCommand, BuildReconciliationPlan, CancelSpeech, DispatchTool, EmitOutput, InterpretInput,
     PrepareOperation, PublishProjection, RecordProtocolViolation,
     RequestClarification, RequestSpeechCorrection, RequestToolCancellation,
-    ValidateSpeech,
+    ValidateSpeech, VerifyOutcome,
 )
 from interlock.runtime.dispatcher import (
     CommandDispatcher, CommandHandler, DispatchContext, DispatchResult, HandlerResult,
@@ -158,6 +158,11 @@ class _Session:
             # EXE-006 owns repair planning.  EXT-001 only surfaces the canonical
             # divergence and deliberately leaves it unresolved.
             self.dispatcher.register(BuildReconciliationPlan, self._defer_reconciliation)
+        if settings.INTERLOCK_MODE == RuntimeMode.DEMO:
+            # The deterministic demo has no authoritative provider readback worker.
+            # Preserve OUTCOME_UNKNOWN without manufacturing a verification result
+            # or turning the expected absence of EXE-006 into a protocol violation.
+            self.dispatcher.register(VerifyOutcome, self._defer_verification)
         for kind, handler in (dependencies.extra_handlers or {}).items():
             self.dispatcher.register(kind, handler)
         self.task = asyncio.create_task(self._run(), name=f"interlock-reducer:{session_id}")
@@ -643,6 +648,14 @@ class _Session:
         self, command: BaseCommand, context: DispatchContext,
     ) -> None:
         assert isinstance(command, BuildReconciliationPlan)
+        return None
+
+    async def _defer_verification(
+        self, command: BaseCommand, context: DispatchContext,
+    ) -> None:
+        """Leave uncertain DEMO effects unresolved until an explicit verifier exists."""
+
+        assert isinstance(command, VerifyOutcome)
         return None
 
     async def _settled_policies(self, event: EventEnvelope, context: DispatchContext) -> None:
