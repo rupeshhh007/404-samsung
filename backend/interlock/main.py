@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from interlock.config import Settings
 from interlock.domain.enums import (
-    Authorization, CancellationState, ClaimCertainty, ClaimState, ControlKind,
+    Authorization, CancellationAckScope, CancellationState, ClaimCertainty, ClaimState, ControlKind,
     DivergenceState, EffectState, EventSource, EvidenceAuthority, IntentMaturity, OperationState, RuntimeMode,
     SpeechActType, SpeechState,
 )
@@ -44,7 +44,7 @@ from interlock.runtime.commands import (
     BaseCommand, BuildReconciliationPlan, CancelSpeech, DispatchTool, EmitOutput, InterpretInput,
     PrepareOperation, PublishProjection, RecordProtocolViolation,
     RequestClarification, RequestSpeechCorrection, RequestToolCancellation,
-    ValidateSpeech,
+    ValidateSpeech, VerifyOutcome,
 )
 from interlock.runtime.dispatcher import (
     CommandDispatcher, CommandHandler, DispatchContext, DispatchResult, HandlerResult,
@@ -158,6 +158,11 @@ class _Session:
             # EXE-006 owns repair planning.  EXT-001 only surfaces the canonical
             # divergence and deliberately leaves it unresolved.
             self.dispatcher.register(BuildReconciliationPlan, self._defer_reconciliation)
+        if settings.INTERLOCK_MODE == RuntimeMode.DEMO:
+            # The deterministic demo has no authoritative provider readback worker.
+            # Preserve OUTCOME_UNKNOWN without manufacturing a verification result
+            # or turning the expected absence of EXE-006 into a protocol violation.
+            self.dispatcher.register(VerifyOutcome, self._defer_verification)
         for kind, handler in (dependencies.extra_handlers or {}).items():
             self.dispatcher.register(kind, handler)
         self.task = asyncio.create_task(self._run(), name=f"interlock-reducer:{session_id}")
@@ -273,7 +278,17 @@ class _Session:
         state = self.snapshot()
         if event.event_type == "TranscriptHypothesisObserved":
             eid = event.payload["evidence_id"]
-            if previous is not None and eid not in previous.evidence and eid in state.evidence:
+            # Preserve interim hypotheses as non-authoritative evidence, but do
+            # semantic work only once the transport has produced a final turn.
+            # This prevents a partial "actually book..." from racing the final
+            # "...twelve" and producing a premature clarification or stale model
+            # result.  Barge-in remains immediate through USER_SPEAKING.
+            if (
+                bool(event.payload.get("final", False))
+                and previous is not None
+                and eid not in previous.evidence
+                and eid in state.evidence
+            ):
                 await self.submit([InterpretInput(
                     session_id=self.session_id, evidence_id=eid, modality="transcript",
                     content_ref=event.payload["text"],
@@ -358,9 +373,10 @@ class _Session:
     ) -> None:
         """Minimal scripted appointment policy for the credential-free demo.
 
-        It creates only canonical journal facts.  The reducer remains the sole
+        It creates only canonical journal facts. The reducer remains the sole
         state writer and every provider write still crosses SAFEPOINT and
-        ToolRuntime.  A corrected goal is intentionally not auto-repaired.
+        ToolRuntime. A safely cancelled pre-dispatch action may be replaced;
+        an authoritative or uncertain prior effect is never auto-repaired.
         """
         if event.event_type == "IntentAuthorizationChanged":
             revision = state.revisions.get(event.payload["revision_id"])
@@ -369,35 +385,18 @@ class _Session:
             if revision.values.get("goal_type") != "appointment_booking":
                 return
             await self._propose_demo_claim(event, revision, context)
-            if revision.parent_revision_id is not None:
-                return
-            bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
-            known = {
-                item.idempotency_key: item.fingerprint
-                for item in state.operations.values() if item.idempotency_key
-            }
-            operation_id = _identity(revision.revision_id, "appointment.book")
-            if operation_id in state.operations:
-                return
-            operation = self.operations.create_operation(
-                operation_id=operation_id,
-                session_id=self.session_id,
-                intent_goal_id=revision.intent_id,
-                intent_revision=revision,
-                bindings=bindings,
-                tool_name="appointment.book",
-                arguments={
-                    "center_id": revision.values["center_id"],
-                    "requested_slot": revision.values["requested_slot"],
-                },
-                existing_operation_ids=set(state.operations),
-                known_idempotency_digests=known,
-            )
-            await self.journal.append(_candidate(
-                self.session_id, context, "OperationCreated",
-                {"operation": operation.model_dump(mode="json")},
-                identity=operation.operation_id,
-            ))
+            if self._demo_replacement_eligible(revision, state):
+                await self._create_demo_appointment_operation(revision, state, context)
+            return
+
+        if event.event_type == "CancellationAcknowledged":
+            node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
+            revision = state.revisions.get(node.active_revision_id) if node and node.active_revision_id else None
+            if (revision is not None
+                    and revision.authorization == Authorization.AUTHORIZED
+                    and revision.values.get("goal_type") == "appointment_booking"
+                    and self._demo_replacement_eligible(revision, state)):
+                await self._create_demo_appointment_operation(revision, state, context)
             return
 
         if event.event_type == "IntentRevisionCommitted":
@@ -497,6 +496,88 @@ class _Session:
                                 ))
             return
 
+    def _demo_replacement_eligible(
+        self, revision: IntentRevision, state: SessionState,
+    ) -> bool:
+        node = state.intents.get(revision.intent_id)
+        if node is None or node.active_revision_id != revision.revision_id:
+            return False
+        if revision.parent_revision_id is None:
+            return True
+
+        ancestor_revision_ids: set[str] = set()
+        parent_revision_id = revision.parent_revision_id
+        while parent_revision_id is not None:
+            if parent_revision_id in ancestor_revision_ids:
+                return False
+            ancestor_revision_ids.add(parent_revision_id)
+            parent_revision = state.revisions.get(parent_revision_id)
+            if parent_revision is None or parent_revision.intent_id != revision.intent_id:
+                return False
+            parent_revision_id = parent_revision.parent_revision_id
+
+        prior_operations = [
+            operation
+            for operation in state.operations.values()
+            if operation.tool_name == "appointment.book"
+            and operation.intent_revision_id in ancestor_revision_ids
+        ]
+        # No ancestor operation means the correction won the race before stale
+        # work was even created, so executing the current revision is safe.
+        if not prior_operations:
+            return True
+
+        for operation in prior_operations:
+            # Only a local pre-dispatch acknowledgement proves that old work
+            # never crossed the provider boundary. An empty effect ledger after
+            # dispatch is not evidence of non-occurrence (I13).
+            if (operation.state not in (OperationState.CANCELLED, OperationState.SUPERSEDED)
+                    or operation.cancellation_state != CancellationState.ACKNOWLEDGED
+                    or CancellationAckScope.LOCAL_TASK not in operation.cancellation_ack_scopes
+                    or operation.dispatch_requested_event_id is not None
+                    or operation.provider_request_id is not None
+                    or operation.effect_state != EffectState.NOT_STARTED):
+                return False
+            if any(
+                effect.operation_id == operation.operation_id
+                and effect.authority == EvidenceAuthority.AUTHORITATIVE
+                and effect.state == EffectState.COMMITTED
+                for effect in state.effects.values()
+            ):
+                return False
+        return True
+
+    async def _create_demo_appointment_operation(
+        self, revision: IntentRevision, state: SessionState, context: DispatchContext,
+    ) -> None:
+        operation_id = _identity(revision.revision_id, "appointment.book")
+        if operation_id in state.operations:
+            return
+        bindings = bind_dependencies(revision, ("center_id", "requested_slot"))
+        known = {
+            item.idempotency_key: item.fingerprint
+            for item in state.operations.values() if item.idempotency_key
+        }
+        operation = self.operations.create_operation(
+            operation_id=operation_id,
+            session_id=self.session_id,
+            intent_goal_id=revision.intent_id,
+            intent_revision=revision,
+            bindings=bindings,
+            tool_name="appointment.book",
+            arguments={
+                "center_id": revision.values["center_id"],
+                "requested_slot": revision.values["requested_slot"],
+            },
+            existing_operation_ids=set(state.operations),
+            known_idempotency_digests=known,
+        )
+        await self.journal.append(_candidate(
+            self.session_id, context, "OperationCreated",
+            {"operation": operation.model_dump(mode="json")},
+            identity=operation.operation_id,
+        ))
+
     async def _propose_demo_claim(
         self, event: EventEnvelope, revision: IntentRevision, context: DispatchContext,
     ) -> None:
@@ -569,6 +650,14 @@ class _Session:
         assert isinstance(command, BuildReconciliationPlan)
         return None
 
+    async def _defer_verification(
+        self, command: BaseCommand, context: DispatchContext,
+    ) -> None:
+        """Leave uncertain DEMO effects unresolved until an explicit verifier exists."""
+
+        assert isinstance(command, VerifyOutcome)
+        return None
+
     async def _settled_policies(self, event: EventEnvelope, context: DispatchContext) -> None:
         """Evaluate fresh state only after accepted facts have been consumed.
 
@@ -637,9 +726,28 @@ class _Session:
         # Media references are not transcript text and are never fetched here.
         if command.modality not in ("text", "transcript"):
             raise RuntimeError("input text resolver is not configured for this modality")
+        semantic_text = (
+            _demo_spoken_alias(evidence.content_ref)
+            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+            and command.modality == "transcript"
+            else evidence.content_ref
+        )
+        # In the one-intent DEMO, a terse second "book 12" voice command is a
+        # correction of the active booking, not permission to create a second
+        # independent booking.  The raw transcript remains immutable evidence.
+        if (
+            self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+            and command.modality == "transcript"
+            and state.active_intent_id is not None
+        ):
+            active_booking = re.fullmatch(r"book\s+(11|12)", semantic_text.strip().lower())
+            if active_booking is not None:
+                semantic_text = f"make it {active_booking.group(1)}"
         demo_root = (
-            _demo_root_booking(evidence.content_ref, command.evidence_id, context)
-            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO and state.active_intent_id is None
+            _demo_root_booking(semantic_text, command.evidence_id, context)
+            if self.settings.INTERLOCK_MODE == RuntimeMode.DEMO
+            and state.active_intent_id is None
+            and evidence.provenance.get("final", True) is True
             else None
         )
         if demo_root is not None:
@@ -658,7 +766,7 @@ class _Session:
             ]
         result = await self.control.interpret(InterpretationRequest(
             control_id=_identity(context.origin_event_id or "", command.evidence_id),
-            raw_evidence_id=command.evidence_id, text=evidence.content_ref,
+            raw_evidence_id=command.evidence_id, text=semantic_text,
             final=evidence.provenance.get("final", True),
             correlation_id=context.correlation_id or context.origin_event_id or command.evidence_id,
             active_intent_id=state.active_intent_id,
@@ -725,10 +833,14 @@ class _Session:
     async def _clarify(self, command: BaseCommand, context: DispatchContext) -> EventCandidate:
         """Turn a reducer clarification request into truth-gated output."""
         assert isinstance(command, RequestClarification)
+        template_id = {
+            "Which booking time do you want: eleven or twelve?": "tmpl_clarification_slot",
+            "VOICE_TRANSCRIPT_MISSING": "tmpl_clarification_repeat",
+        }.get(command.clarification or "", "tmpl_clarification")
         speech = SpeechAct(
             speech_id=_identity(command.control_id, context.origin_event_id or "", "clarification"),
             act_type=SpeechActType.CLARIFICATION,
-            template_id="tmpl_clarification",
+            template_id=template_id,
             slots={},
             claim_ids=[],
             requested_certainty=ClaimCertainty.PROGRESS,
@@ -868,6 +980,8 @@ class Application:
         *,
         logical_time: int = 0,
         mode: RuntimeMode | str | None = None,
+        dependencies: RuntimeDependencies | None = None,
+        registry: ToolRegistry | None = None,
     ) -> SessionState:
         async with self._lifecycle_lock:
             if not session_id or session_id in self._sessions:
@@ -883,7 +997,11 @@ class Application:
             session_settings = self.settings.model_copy(
                 update={"INTERLOCK_MODE": session_mode.value}, deep=True
             )
-            session = _Session(session_id, session_settings, self.registry, self.dependencies)
+            session = _Session(
+                session_id, session_settings,
+                registry if registry is not None else self.registry,
+                dependencies if dependencies is not None else self.dependencies,
+            )
             self._sessions[session_id] = session
             try:
                 event = await session.journal.append(EventCandidate(
@@ -1069,9 +1187,215 @@ class Application:
 _DEMO_SLOT_ALIASES = {
     "11": "2030-01-15T11:00:00+05:30",
     "11:00": "2030-01-15T11:00:00+05:30",
+    "11am": "2030-01-15T11:00:00+05:30",
+    "11:00am": "2030-01-15T11:00:00+05:30",
+    "eleven": "2030-01-15T11:00:00+05:30",
+    "eleven am": "2030-01-15T11:00:00+05:30",
     "12": "2030-01-15T12:00:00+05:30",
     "12:00": "2030-01-15T12:00:00+05:30",
+    "12pm": "2030-01-15T12:00:00+05:30",
+    "12:00pm": "2030-01-15T12:00:00+05:30",
+    "twelve": "2030-01-15T12:00:00+05:30",
+    "twelve pm": "2030-01-15T12:00:00+05:30",
+    "noon": "2030-01-15T12:00:00+05:30",
+    "midday": "2030-01-15T12:00:00+05:30",
 }
+
+_DEMO_SLOT_TOKEN = (
+    r"(?:11(?::00)?(?!:\d{2})|12(?::00)?(?!:\d{2})|"
+    r"eleven|twelve|noon|midday|mid[-\s]+day)"
+    r"(?:\s*(?:a\s*\.?\s*m\.?|p\s*\.?\s*m\.?|"
+    r"o\s*['’]?\s*clock|in\s+the\s+morning|in\s+the\s+afternoon))?"
+)
+
+
+def _canonical_demo_slot(raw: str) -> str | None:
+    token = " ".join(raw.lower().replace(".", "").replace("’", "'").split())
+    if token in {"noon", "midday", "mid day", "mid-day"} or token.startswith("twelve") or token.startswith("12"):
+        return "12"
+    if token.startswith("eleven") or token.startswith("11"):
+        return "11"
+    return None
+
+
+def _demo_contrastive_slot(normalized: str) -> str | None:
+    """Resolve explicit self-corrections while keeping ordinary negation fail-closed."""
+
+    patterns: tuple[tuple[str, int], ...] = (
+        # "not eleven, twelve" / "not eleven but twelve"
+        (rf"\bnot\s+({_DEMO_SLOT_TOKEN})\s+(?:but\s+)?({_DEMO_SLOT_TOKEN})\b", 2),
+        # "twelve, not eleven" / "twelve instead of eleven"
+        (rf"\b({_DEMO_SLOT_TOKEN})\s+(?:not|instead\s+of)\s+({_DEMO_SLOT_TOKEN})\b", 1),
+        # "eleven — no/sorry/actually — twelve"
+        (rf"\b({_DEMO_SLOT_TOKEN})\s+(?:no|sorry|actually)\s+({_DEMO_SLOT_TOKEN})\b", 2),
+        # "I said/meant twelve, not eleven"
+        (rf"\b(?:i\s+said|i\s+meant)\s+({_DEMO_SLOT_TOKEN})\s+(?:not|instead\s+of)\s+({_DEMO_SLOT_TOKEN})\b", 1),
+    )
+    for pattern, desired_group in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        first = _canonical_demo_slot(match.group(1))
+        second = _canonical_demo_slot(match.group(2))
+        if first is None or second is None or first == second:
+            return None
+        return first if desired_group == 1 else second
+    return None
+
+
+def _demo_spoken_slot(normalized: str) -> str | None:
+    """Extract one intended 11/12 target from common conversational STT text."""
+
+    # Prefer an explicit destination after correction/scheduling prepositions.
+    # This makes "change from eleven to twelve" resolve to 12 while a bare
+    # "eleven or twelve" remains ambiguous and therefore fail-closed.
+    targeted = re.findall(
+        rf"\b(?:"
+        rf"(?:to|for|at|with)\s+|"
+        rf"(?:make|do|use|choose|pick|book|schedule|reserve)\s+(?:it\s+|that\s+)?|"
+        rf"(?:go\s+(?:with|for)|set\s+(?:it\s+)?(?:to|for)|"
+        rf"put\s+(?:it\s+)?(?:at|for))\s+"
+        rf")({_DEMO_SLOT_TOKEN})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if targeted:
+        target_slots = {
+            slot for raw in targeted
+            if (slot := _canonical_demo_slot(raw)) is not None
+        }
+        if len(target_slots) == 1:
+            return next(iter(target_slots))
+        if len(target_slots) > 1:
+            return None
+
+    instead = re.search(
+        rf"\b({_DEMO_SLOT_TOKEN})\s+instead\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if instead is not None:
+        return _canonical_demo_slot(instead.group(1))
+
+    matches = re.findall(
+        rf"\b({_DEMO_SLOT_TOKEN})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    slots = {
+        slot for raw in matches
+        if (slot := _canonical_demo_slot(raw)) is not None
+    }
+    return next(iter(slots)) if len(slots) == 1 else None
+
+
+def _demo_time_is_inexact_or_unsupported(normalized: str) -> bool:
+    """Fail closed when the user did not request exactly 11:00 or 12:00."""
+
+    if re.search(r"\b(?:11|12):(?!(?:00)\b)[0-5]\d\b", normalized):
+        return True
+    if re.search(r"\b(?:11|12)\s+[0-5]\d\b", normalized):
+        return True
+    if re.search(
+        r"\b(?:half|quarter)\s+(?:past|to)\s+(?:11|12|eleven|twelve)\b",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"\b(?:eleven|twelve)\s+(?:oh\s+)?(?:five|ten|fifteen|twenty|"
+        r"twenty[- ]five|thirty|thirty[- ]five|forty|forty[- ]five|fifty|fifty[- ]five)\b",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"\b(?:maybe|perhaps|possibly|around|about|roughly|approximately|"
+        r"before|after|by|either|no later than|no earlier than)\b",
+        normalized,
+    ):
+        return True
+    range_match = re.search(
+        rf"\bfrom\s+({_DEMO_SLOT_TOKEN})\s+to\s+({_DEMO_SLOT_TOKEN})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if range_match is not None and not re.search(
+        r"\b(?:actually|change|changed|move|moved|switch|reschedule|"
+        r"correct|update|make)\b",
+        normalized,
+    ):
+        return True
+    return False
+
+
+def _demo_spoken_alias(raw: str) -> str:
+    """Normalize common voice/STT variants without changing journaled evidence.
+
+    This is intentionally bounded to the deterministic 11/12 demo.  It accepts
+    natural phrasing but still requires one explicit, unambiguous slot and never
+    converts negation into a positive write.
+    """
+
+    normalized = " ".join(raw.strip().lower().replace("’", "'").split())
+    normalized = re.sub(r"[,!?;]+", " ", normalized)
+    normalized = " ".join(normalized.split())
+
+    if _demo_time_is_inexact_or_unsupported(normalized):
+        return "please clarify"
+
+    contrastive_slot = _demo_contrastive_slot(normalized)
+    if contrastive_slot is not None:
+        return f"make it {contrastive_slot}"
+
+    if re.search(
+        rf"\b{_DEMO_SLOT_TOKEN}\b.*\bor\b.*\b{_DEMO_SLOT_TOKEN}\b",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return "please clarify"
+
+    slot = _demo_spoken_slot(normalized)
+    if slot is None:
+        mentioned = {
+            canonical
+            for token in re.findall(rf"\b({_DEMO_SLOT_TOKEN})\b", normalized, flags=re.IGNORECASE)
+            if (canonical := _canonical_demo_slot(token)) is not None
+        }
+        # Multiple distinct candidate times are consequentially ambiguous.
+        if len(mentioned) > 1:
+            return "please clarify"
+        return raw
+
+    if re.search(r"\b(?:don't|dont|do not|never|not)\b", normalized):
+        if re.search(r"\b(?:book|schedule|reserve|make|change|move|switch|reschedule)\b", normalized):
+            return "please clarify"
+
+    correction_cue = re.search(
+        r"\b(?:actually|instead|rather|change|changed|move|moved|switch|"
+        r"make|set|put|correct|update|reschedule|cancel|replace|swap|sorry|meant|mean|no|wait)\b",
+        normalized,
+    )
+    if correction_cue is not None:
+        return f"make it {slot}"
+
+    booking_cue = re.search(
+        r"\b(?:book|schedule|reserve|appointment|slot|time)\b",
+        normalized,
+    )
+    request_cue = re.search(
+        r"\b(?:i want|i'd like|id like|can i have|can we do|please|"
+        r"let's do|lets do|go with|go for|give me|i'll take|ill take|"
+        r"yes|yeah|yep|works|fine|good)\b",
+        normalized,
+    )
+    if booking_cue is not None or request_cue is not None:
+        return f"book {slot}"
+
+    # Terse correction forms are useful only once an intent exists; _interpret
+    # decides whether the resulting "book N" is a root action or active correction.
+    if re.fullmatch(rf"(?:(?:the|at|for)\s+)?{_DEMO_SLOT_TOKEN}(?:\s+please)?", normalized):
+        return f"book {slot}"
+
+    return raw
 
 
 def _demo_root_booking(
@@ -1222,7 +1546,7 @@ class _DemoASGI:
     def __init__(
         self, http: _ASGIApplication, websocket: _ASGIApplication,
         application: Application, hub: Any, output: DemoTextOutput,
-        provider: Any = None,
+        provider: Any = None, voice_registry: Any = None,
     ) -> None:
         self.http = http
         self.websocket = websocket
@@ -1230,10 +1554,14 @@ class _DemoASGI:
         self.hub = hub
         self.output = output
         self.provider = provider
+        self.voice_registry = voice_registry
 
     async def __call__(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") == "websocket":
-            await self.websocket(scope, receive, send)
+            if str(scope.get("path", "")).startswith("/api/v1/internal/voice/"):
+                await self.http(scope, receive, send)
+            else:
+                await self.websocket(scope, receive, send)
             return
         if scope.get("type") != "lifespan":
             await self.http(scope, receive, send)
@@ -1250,49 +1578,72 @@ class _DemoASGI:
                 return
 
 
+def create_demo_session_dependencies(
+    settings: Settings, *, output: OutputPort, projection: CommandHandler | None = None,
+) -> tuple[ToolRegistry, RuntimeDependencies, Any]:
+    """Build one fresh Samsung fixture world for a single authoritative session."""
+
+    from interlock.providers.fake_tools import create_fake_tool_transport
+    from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+
+    fixture = load_demo_fixture()
+    if fixture.fixture_id != "samsung-demo-v1":
+        raise RuntimeError("unexpected demo fixture")
+    registry = ToolRegistry(default_timeout_ms=settings.INTERLOCK_TOOL_TIMEOUT_MS)
+    register_tool_manifests(
+        registry, timeout_ms_override=settings.INTERLOCK_TOOL_TIMEOUT_MS,
+    )
+    transport, provider = create_fake_tool_transport(fixture)
+    dependencies = RuntimeDependencies(
+        tool_transport=_DelayedDemoTransport(transport, settings.INTERLOCK_FAKE_LATENCY_MS),
+        output=output,
+        bindings=_demo_bindings,
+        input_context=_demo_input_context,
+        projection=projection,
+    )
+    return registry, dependencies, provider
+
+
 def create_demo_asgi_app(settings: Settings | None = None) -> _DemoASGI:
     """Compose the real runtime with SIMULATED provider and SCRIPTED delay."""
     from fastapi.middleware.cors import CORSMiddleware
     from interlock.adapters.http import create_http_app
     from interlock.adapters.websocket import ProjectionHub, WebSocketProjectionASGI
-    from interlock.providers.fake_tools import create_fake_tool_transport
-    from interlock.testing.fixtures import load_demo_fixture, register_tool_manifests
+    from interlock.adapters.voice_transport import VoiceTransportRegistry
+    from interlock.testing.fixtures import load_demo_fixture
 
     effective = settings or Settings()
     if effective.INTERLOCK_MODE != RuntimeMode.DEMO:
         raise RuntimeError("the EXT-001 local ASGI host requires INTERLOCK_MODE=DEMO")
-    fixture = load_demo_fixture()
-    if fixture.fixture_id != "samsung-demo-v1":
-        raise RuntimeError("unexpected demo fixture")
-    registry = ToolRegistry(default_timeout_ms=effective.INTERLOCK_TOOL_TIMEOUT_MS)
-    register_tool_manifests(registry)
-    transport, provider = create_fake_tool_transport(fixture)
     output = DemoTextOutput()
     hub = ProjectionHub(max_sessions=128)
-    dependencies = RuntimeDependencies(
-        tool_transport=_DelayedDemoTransport(transport, effective.INTERLOCK_FAKE_LATENCY_MS),
-        output=output,
-        bindings=_demo_bindings,
-        input_context=_demo_input_context,
-        projection=hub.handle_publish,
+    registry, dependencies, provider = create_demo_session_dependencies(
+        effective, output=output, projection=hub.handle_publish,
     )
     application = Application(effective, registry=registry, dependencies=dependencies)
     output.bind(application)
     hub.bind(application)
+    voice_registry = VoiceTransportRegistry(
+        application, settings=effective, projection=hub.handle_publish,
+    )
 
     def _reset_demo_provider(fixture_id: str) -> None:
         if fixture_id != "samsung-demo-v1":
             raise ValueError(f"unexpected demo fixture '{fixture_id}'")
         provider.reset(load_demo_fixture())
 
-    http = create_http_app(application, hub=hub, demo_reset_hook=_reset_demo_provider)
+    http = create_http_app(
+        application, hub=hub, voice_registry=voice_registry,
+        demo_reset_hook=_reset_demo_provider,
+    )
     cors = CORSMiddleware(
         http,
         allow_origins=effective.frontend_origins_list,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["content-type"],
     )
-    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output, provider)
+    return _DemoASGI(cors, WebSocketProjectionASGI(hub), application, hub, output,
+                     provider, voice_registry)
 
 
 class _LazyDemoASGI:

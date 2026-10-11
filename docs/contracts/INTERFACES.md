@@ -19,6 +19,7 @@ Signatures are language-neutral contracts, not executable code.
 | `ClaimEvaluator.evaluate` | Truth; reducer policy | claim + evidence/effects + sequence → state-change events | no I/O; freshness/authority rules; FR-014 |
 | `Truthlock.validate` | Truth; dispatcher | SpeechAct + pinned claims/evidence → decision + controlled text | stale pin retries; unsupported blocks; I6 |
 | `OutputPort.emit/cancel` | Truth adapter; dispatcher | approved text/speech ID → lifecycle events | cancelling output never cancels operation |
+| `VoiceTransportBinding` | Runtime; HTTP and LiveKit worker | opaque room/session binding, authenticated worker observations, exact approved speech commands | transport metadata only; backend journal/reducer remains the single writer; stale worker generations fail closed |
 | `ProjectionHub.publish` | Runtime; reducer loop | sequence + sanitized projection delta → clients | gaps resolved through snapshot endpoint |
 | `Clock.now/schedule` | Testing/runtime; workers | duration/callback → logical schedule handle | virtual in tests, monotonic in live |
 

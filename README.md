@@ -24,7 +24,17 @@ The updated Theme 05 competition target is a **voice-native LiveKit agent evalua
 
 The core runtime foundation is under development. The LiveKit/FDB-v3 adapter and one-command official evaluator path are implemented, but a real run still requires the separately distributed official dataset, LiveKit credentials, and model-provider credentials. No benchmark score is claimed by this repository; only artifacts produced by an actual evaluator run are results.
 
-The normal LiveKit worker composition is available through `run_livekit_voice_agent(provider_factory, settings=...)` in `backend/interlock/adapters/livekit_agent.py`. A deployment must supply fresh STT/TTS providers and INTERLOCK inward ports per room, plus LiveKit credentials; no vendor is selected by the core adapter. Credential-free construction is tested, but a credentialed room-to-audio run has not been verified. The browser voice column remains text-based because the backend has no secure room/token endpoint for microphone access.
+The normal LiveKit worker composition is available through `run_livekit_voice_agent(provider_factory, settings=...)` in `backend/interlock/adapters/livekit_agent.py`. A deployment must supply fresh STT/TTS providers and INTERLOCK inward ports per room, plus LiveKit credentials; no vendor is selected by the core adapter. Browser voice has a separate transport-only worker and backend-owned session/token endpoint. Credential-free contract tests are available, but a credentialed browser-to-audio run has not been verified.
+
+For browser Samsung voice, set `INTERLOCK_MODE=DEMO`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and a separate `INTERLOCK_VOICE_WORKER_SECRET` for the backend. Give the worker those LiveKit variables plus the same worker secret, `INTERLOCK_VOICE_BACKEND_WS_URL` (for example `ws://127.0.0.1:8000/api/v1`), `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, and a valid `INTERLOCK_VOICE_TTS_VOICE_ID`. The worker defaults to Deepgram `nova-3`, Cartesia `sonic-3`, and Silero VAD. Keep secrets in server/worker environments; never put them in Vite variables. In separate terminals, run:
+
+```bash
+PYTHONPATH=backend .venv/bin/python -m uvicorn interlock.main:app --host 127.0.0.1 --port 8000
+PYTHONPATH=backend .venv/bin/python -m interlock.adapters.livekit_agent browser-worker start
+cd frontend && VITE_INTERLOCK_API_URL=http://127.0.0.1:8000/api/v1 npm run dev
+```
+
+The browser first creates a backend voice session from the Composer, then joins the returned LiveKit room with a five-minute microphone-only token. All business state comes from that session's backend projection WebSocket. The worker does not construct an `Application`; it only relays speech observations and exact approved audio. Use `wss://` for the internal worker channel when it crosses hosts. A local build or credential-free test is not evidence that a real browser heard audio.
 
 ### Implemented
 
@@ -149,4 +159,4 @@ Optional reproducibility controls are `FDB_V3_SEED` (default `0`), `FDB_V3_LATEN
 
 ## Current local verification
 
-With the existing `.venv`, run `PYTHONPATH=backend .venv/bin/pytest -q` and `.venv/bin/python -m compileall -q backend/interlock`. For the frontend shell, use Node.js 20.19+ and run `cd frontend && npm ci && npm run build`; `package-lock.json` pins the tested dependency graph. A green local build does not imply that a real FDB-v3 benchmark scenario or the extension demo has run.
+With the existing `.venv`, run `PYTHONPATH=backend .venv/bin/pytest -q` and `.venv/bin/python -m compileall -q backend/interlock`. For the frontend shell, use Node.js 20.19+ and run `cd frontend && npm ci --legacy-peer-deps && npm run build`; the legacy-peer flag is needed by the existing Vite/Vitest peer dependency mix, and `package-lock.json` pins the tested dependency graph. A green local build does not imply that a real FDB-v3 benchmark scenario or the extension demo has run.

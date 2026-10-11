@@ -126,6 +126,20 @@ CONTROLLED_TEMPLATES: Dict[str, ControlledTemplate] = {
         allowed_act_types={SpeechActType.CLARIFICATION},
         max_certainty=ClaimCertainty.PROGRESS,
     ),
+    "tmpl_clarification_slot": ControlledTemplate(
+        template_id="tmpl_clarification_slot",
+        template_pattern="Which booking time do you want: eleven or twelve?",
+        fallback_pattern="Which booking time do you want: eleven or twelve?",
+        allowed_act_types={SpeechActType.CLARIFICATION},
+        max_certainty=ClaimCertainty.PROGRESS,
+    ),
+    "tmpl_clarification_repeat": ControlledTemplate(
+        template_id="tmpl_clarification_repeat",
+        template_pattern="I heard you speaking, but I couldn't get the words clearly. Please say the booking time again.",
+        fallback_pattern="I heard you speaking, but I couldn't get the words clearly. Please say the booking time again.",
+        allowed_act_types={SpeechActType.CLARIFICATION},
+        max_certainty=ClaimCertainty.PROGRESS,
+    ),
     "tmpl_checking": ControlledTemplate(
         template_id="tmpl_checking",
         template_pattern="Checking…",

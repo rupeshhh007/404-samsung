@@ -15,7 +15,7 @@ from hashlib import sha256
 import json
 from typing import Annotated, Any, Literal, TypeVar
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, model_validator
@@ -45,6 +45,7 @@ from interlock.adapters.websocket import (
     project_state,
 )
 from interlock.runtime.session import generate_uuidv7
+from interlock.adapters.voice_transport import VoiceTransportRegistry, serve_worker_transport
 
 
 _CANONICAL_MODALITY: Mapping[str, str] = {
@@ -71,6 +72,10 @@ class _RequestModel(BaseModel):
 class SessionCreateRequest(_RequestModel):
     mode: Literal["DEMO", "LIVE", "TEST"]
     client_request_id: _RequestId
+
+
+class VoiceSessionRequest(_RequestModel):
+    """No browser-selected room, identity, or grants are permitted."""
 
 
 class InputRequest(_RequestModel):
@@ -259,6 +264,7 @@ def create_http_app(
     application: Application,
     *,
     hub: ProjectionHub | None = None,
+    voice_registry: VoiceTransportRegistry | None = None,
     demo_reset_hook: Callable[[str], Any] | None = None,
     max_input_bytes: int = 65_536,
     max_dedupe_entries: int | None = None,
@@ -278,6 +284,7 @@ def create_http_app(
     app = FastAPI(title="INTERLOCK HTTP API", version="1")
     app.state.interlock_application = application
     app.state.interlock_hub = hub
+    app.state.voice_registry = voice_registry
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -296,6 +303,31 @@ def create_http_app(
     @app.get("/api/v1/health")
     async def health() -> dict[str, Any]:
         return {"status": "ok", "mode": application.settings.INTERLOCK_MODE}
+
+    if voice_registry is not None:
+        @app.post("/api/v1/voice/sessions", status_code=status.HTTP_201_CREATED)
+        async def create_voice_session(_request: VoiceSessionRequest, raw_request: Request) -> dict[str, str]:
+            try:
+                binding, livekit_url, token = await voice_registry.create()
+            except RuntimeError as exc:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                    "voice transport unavailable") from exc
+            ws_base = application.settings.INTERLOCK_WS_URL
+            host = raw_request.headers.get("host")
+            if host and ws_base == "ws://localhost:8000/api/v1":
+                scheme = "wss" if raw_request.url.scheme == "https" else "ws"
+                ws_base = f"{scheme}://{host}/api/v1"
+            return {
+                "session_id": binding.session_id,
+                "room_name": binding.room_name,
+                "livekit_url": livekit_url,
+                "participant_token": token,
+                "ws_url": _session_ws_url(ws_base, binding.session_id),
+            }
+
+        @app.websocket("/api/v1/internal/voice/{session_id}/transport")
+        async def voice_worker_transport(socket: WebSocket, session_id: str) -> None:
+            await serve_worker_transport(socket, voice_registry, session_id)
 
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED)
     async def create_session(request: SessionCreateRequest, raw_request: Request) -> dict[str, Any]:

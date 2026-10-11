@@ -56,6 +56,12 @@ class TranscriptHypothesisObserved(DomainBaseModel):
     final: bool
 
 
+class VoiceTranscriptionTimeoutObserved(DomainBaseModel):
+    """Event: voice activity ended without a usable final transcript."""
+
+    speech_duration_ms: int = Field(..., ge=0, le=120_000)
+
+
 class ControlIntentInterpreted(DomainBaseModel):
     """Event: ControlIntentInterpreted. Ingress: model/fallback -> reducer."""
 
@@ -352,6 +358,7 @@ EVENT_PAYLOAD_REGISTRY: Dict[str, type[DomainBaseModel]] = {
     "SessionStarted": SessionStarted,
     "UserInputObserved": UserInputObserved,
     "TranscriptHypothesisObserved": TranscriptHypothesisObserved,
+    "VoiceTranscriptionTimeoutObserved": VoiceTranscriptionTimeoutObserved,
     "ControlIntentInterpreted": ControlIntentInterpreted,
     "IntentRevisionProposed": IntentRevisionProposed,
     "IntentRevisionCommitted": IntentRevisionCommitted,

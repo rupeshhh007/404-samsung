@@ -19,6 +19,7 @@ Payload fields listed are required unless marked `?`.
 | `SessionStarted` | API → reducer | `mode` | new ID; initializes state |
 | `UserInputObserved` | input adapter → reducer | `evidence_id, modality, content_ref` | adds evidence; command `InterpretInput` |
 | `TranscriptHypothesisObserved` | audio adapter → reducer | `evidence_id, text, final` | provisional interpretation only |
+| `VoiceTranscriptionTimeoutObserved` | voice transport → reducer | `speech_duration_ms` | advances the journal; short VAD blips are ignored, sustained speech with no final transcript requests a controlled repeat clarification |
 | `ControlIntentInterpreted` | model/fallback → reducer | `control: ControlIntent` | apply confidence policy; may `RequestClarification` |
 | `IntentRevisionProposed` | interpreter → reducer | `intent_delta` | validate goal target; no write dispatch |
 | `IntentRevisionCommitted` | reducer policy → reducer | `revision` | validates lineage (root parent must be None, child parent must match active revision), initial authorization must be NOT_REQUESTED, and maturity must be PROVISIONAL or COMMITTED; stores revision as COMMITTED, transitions prior active revision in `state.revisions` to SUPERSEDED, invalidates fingerprints, schedules eligible work |

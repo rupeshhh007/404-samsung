@@ -17,6 +17,11 @@ interface VoiceColumnProps {
   readonly onCancelSpeech?: (speechId: string) => void;
   readonly onOpenBlackBox: () => void;
   readonly actionPending?: boolean;
+  readonly voiceState?: 'idle' | 'connecting' | 'listening' | 'agent_speaking' | 'muted' | 'error';
+  readonly voiceError?: string | null;
+  readonly onStartVoice?: () => void;
+  readonly onStopVoice?: () => void;
+  readonly onToggleVoiceMute?: () => void;
 }
 
 export const VoiceColumn: React.FC<VoiceColumnProps> = ({
@@ -28,6 +33,11 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
   onCancelSpeech,
   onOpenBlackBox,
   actionPending = false,
+  voiceState = 'idle',
+  voiceError = null,
+  onStartVoice,
+  onStopVoice,
+  onToggleVoiceMute,
 }) => {
   const speechList = projection?.speech ?? [];
   const allClaims = projection?.claims ?? [];
@@ -81,6 +91,18 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
     ? `${requestedTime} has not been confirmed.`
     : null;
 
+  const latestVoiceTranscript = useMemo(() => {
+    const transcripts = (projection?.evidence ?? []).filter(
+      (item) =>
+        item.source === 'AUDIO' &&
+        item.kind === 'transcript' &&
+        item.authority === 'AUTHORITATIVE' &&
+        typeof item.content_ref === 'string' &&
+        item.content_ref.trim().length > 0,
+    );
+    return transcripts.length > 0 ? transcripts[transcripts.length - 1]?.content_ref ?? null : null;
+  }, [projection?.evidence]);
+
   return (
     <section aria-label="Conversation" className="editorial-console flex min-w-0 flex-1 flex-col select-text">
       <div className="flex-1">
@@ -101,6 +123,18 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
       </div>
 
       <div>
+        {voiceState !== 'idle' && latestVoiceTranscript ? (
+          <div
+            className="mb-2 flex items-baseline gap-2 px-1 text-[11px] text-stone-500 dark:text-stone-400"
+            aria-live="polite"
+            data-testid="voice-heard-line"
+          >
+            <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-stone-400 dark:text-stone-500">
+              Heard
+            </span>
+            <span className="truncate">“{latestVoiceTranscript}”</span>
+          </div>
+        ) : null}
         <Composer
           disabled={actionPending}
           onSend={(text) => onSendText(text)}
@@ -110,6 +144,11 @@ export const VoiceColumn: React.FC<VoiceColumnProps> = ({
               onCancelSpeech(emittingSpeech.speech_id);
             }
           }}
+          voiceState={voiceState}
+          voiceError={voiceError}
+          onStartVoice={onStartVoice}
+          onStopVoice={onStopVoice}
+          onToggleVoiceMute={onToggleVoiceMute}
         />
       </div>
     </section>
