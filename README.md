@@ -4,15 +4,23 @@
 
 ## Visual Overview
 
-| **01. Landing & Consistency Runtime** | **02. Copilot — In-Flight Intent** |
-| :---: | :---: |
-| ![INTERLOCK Landing Page](docs/assets/screenshots/01_landing_page.png) | ![Intent In-Flight](docs/assets/screenshots/03_intent_in_flight.png) |
-| *Editorial Bauhaus landing view showing consistency runtime & live health* | *User requests 11:00 AM booking with SafePoint preparation in flight* |
+Explore INTERLOCK through its actual interface: from a quiet starting point to an interrupted booking and the resulting mismatch between intent and confirmed reality.
 
-| **03. Interruption Race Climax (12:00 vs 11:00)** | **04. Night Instrument Design System** |
+| **01 / First impression** | **02 / Session ready** |
 | :---: | :---: |
-| ![Divergence Climax](docs/assets/screenshots/04_divergence_climax.png) | ![Kitchen Sink Primitives](docs/assets/screenshots/05_kitchen_sink_primitives.png) |
-| *The late commit race: Desired 12:00 PM ≠ Reality 11:00 AM, TRUTHLOCK uncertainty response* | *Component gallery showing tactile switches, LED indicators & status signals* |
+| ![INTERLOCK — editorial landing page](docs/assets/screenshots/01_landing_page.png) | ![INTERLOCK — new session and empty intent reality state](docs/assets/screenshots/02_initial_session.png) |
+| *The consistency runtime* | *An empty session, before any external effects* |
+
+| **03 / Action in flight** | **04 / The interruption race** |
+| :---: | :---: |
+| ![INTERLOCK — booking eleven o'clock pending verification](docs/assets/screenshots/03_intent_in_flight.png) | ![INTERLOCK — desired twelve o'clock diverges from confirmed eleven o'clock](docs/assets/screenshots/04_divergence_climax.png) |
+| *Desired: 11:00 · authoritative outcome still pending* | *Desired: 12:00 · reality: 11:00 · divergence open* |
+
+**05 / Interface primitives**
+
+![INTERLOCK — Night Instrument design system and component gallery](docs/assets/screenshots/05_kitchen_sink_primitives.png)
+
+<sub>Real application screenshots from the deterministic demo. INTERLOCK does not claim a booking has completed until authoritative evidence supports it.</sub>
 
 ---
 
