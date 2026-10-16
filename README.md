@@ -2,6 +2,20 @@
 
 > Anticipate early. Commit safely. Speak only what reality confirms.
 
+## Visual Overview
+
+| **01. Landing & Architectural Pillars** | **02. Live Copilot — In-Flight Intent** |
+| :---: | :---: |
+| ![INTERLOCK Landing Page](docs/assets/screenshots/01_landing_page.png) | ![Intent In-Flight](docs/assets/screenshots/03_intent_in_flight.png) |
+| *Editorial Bauhaus landing view showing consistency pillars & backend health* | *User requests 11:00 AM booking with SafePoint preparation in flight* |
+
+| **03. Interruption Race Climax (12:00 vs 11:00)** | **04. Night Instrument Design System** |
+| :---: | :---: |
+| ![Divergence Climax](docs/assets/screenshots/04_divergence_climax.png) | ![Kitchen Sink Primitives](docs/assets/screenshots/05_kitchen_sink_primitives.png) |
+| *The late commit race: Desired 12:00 PM ≠ Reality 11:00 AM, TRUTHLOCK uncertainty response* | *Component gallery showing tactile switches, LED indicators & status signals* |
+
+---
+
 INTERLOCK is a consistency runtime for interruptible, real-time, multimodal AI agents. It keeps evolving user intent, concurrent execution, external side effects, evidence, and user-visible claims aligned when an interruption arrives at the worst possible moment.
 
 Its three pillars are:

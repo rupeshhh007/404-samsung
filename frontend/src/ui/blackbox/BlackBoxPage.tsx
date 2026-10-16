@@ -40,7 +40,15 @@ export const BlackBoxPage: React.FC<BlackBoxPageProps> = ({
   );
 
   const [selectedSequence, setSelectedSequence] = useState<number>(() => maxSequence || 1);
-  const [activeTab, setActiveTab] = useState<BlackBoxTab>('state');
+  const [activeTab, setActiveTab] = useState<BlackBoxTab>(() => {
+    if (typeof window !== 'undefined') {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      if (t && ['state', 'operations', 'claims', 'reconcile', 'strands', 'metrics'].includes(t)) {
+        return t as BlackBoxTab;
+      }
+    }
+    return 'state';
+  });
 
   // Sync selectedSequence to latest when new events arrive and user is at live
   useEffect(() => {
