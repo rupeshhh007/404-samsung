@@ -2,6 +2,20 @@
 
 > **Interruptible agents should not confuse what the user wants, what the system tried, what the world actually did, and what the agent is allowed to say.**
 
+## Visual Overview
+
+| **01. Landing & Consistency Runtime** | **02. Copilot — In-Flight Intent** |
+| :---: | :---: |
+| ![INTERLOCK Landing Page](docs/assets/screenshots/01_landing_page.png) | ![Intent In-Flight](docs/assets/screenshots/03_intent_in_flight.png) |
+| *Editorial Bauhaus landing view showing consistency runtime & live health* | *User requests 11:00 AM booking with SafePoint preparation in flight* |
+
+| **03. Interruption Race Climax (12:00 vs 11:00)** | **04. Night Instrument Design System** |
+| :---: | :---: |
+| ![Divergence Climax](docs/assets/screenshots/04_divergence_climax.png) | ![Kitchen Sink Primitives](docs/assets/screenshots/05_kitchen_sink_primitives.png) |
+| *The late commit race: Desired 12:00 PM ≠ Reality 11:00 AM, TRUTHLOCK uncertainty response* | *Component gallery showing tactile switches, LED indicators & status signals* |
+
+---
+
 INTERLOCK is a consistency runtime for real-time AI agents that can be interrupted while they are thinking, calling tools, changing external state, and speaking.
 
 It is built around one uncomfortable fact:
