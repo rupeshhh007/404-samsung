@@ -408,3 +408,14 @@ Start here:
 <p align="center">
   <strong>Anticipate early. Adapt safely. Verify before speaking.</strong>
 </p>
+
+---
+
+## Samsung PRISM Hackathon Presentation
+
+**Team:** 404NotFound  
+**Theme ID:** 05  
+**Institution:** Vellore Institute of Technology, Vellore
+
+[**View / Download INTERLOCK Project Presentation (PPTX)**](docs/submission/404NotFound_INTERLOCK_Samsung_PRISM_Theme05.pptx)
+
