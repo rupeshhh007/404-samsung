@@ -14,9 +14,9 @@ export const Seal: React.FC<SealProps> = ({
   receiptOpen,
   onToggleReceipt,
 }) => {
-  const isCancelled = speech.state === 'CANCELLED';
+  const isCancelled = speech.state === 'CANCELLED' || speech.cancellation_pending;
   const isBlocked = speech.state === 'BLOCKED';
-  const isCorrection = speech.state === 'CORRECTION_REQUIRED';
+  const isCorrection = speech.state === 'CORRECTION_REQUIRED' || speech.correction_pending;
 
   let sealVariant: SignalVariant = 'verify';
   let sealIcon: IconName = 'seal';
@@ -54,8 +54,8 @@ export const Seal: React.FC<SealProps> = ({
   // Authoritative seal label (§6.4.3)
   let sealLabel = `TRUTHLOCK APPROVED · ${speech.act_type} · ${speech.requested_certainty}`;
   if (isCancelled) {
-    sealLabel = speech.cancellation_pending
-      ? 'CANCELLED DURING EMISSION'
+    sealLabel = speech.cancellation_pending || speech.state === 'CANCELLED'
+      ? (speech.heard ? 'CANCELLED DURING EMISSION' : 'CANCELLED BEFORE EMISSION')
       : 'CANCELLED BEFORE EMISSION';
   } else if (isBlocked) {
     sealLabel = 'BLOCKED BY TRUTHLOCK';

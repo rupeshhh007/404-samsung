@@ -76,57 +76,82 @@ If reality is **11:00** while current intent is **12:00**, INTERLOCK preserves b
 
 ---
 
-## The core model
+## Current Status
 
-INTERLOCK is built around three ideas:
+**CURRENT PHASE: ACTIVE IMPLEMENTATION**
 
-### ANTICIPATE
+The core runtime foundation is under development. The LiveKit/FDB-v3 adapter and one-command official evaluator path are implemented, but a real run still requires the separately distributed official dataset, LiveKit credentials, and model-provider credentials. No benchmark score is claimed by this repository; only artifacts produced by an actual evaluator run are results.
 
-Prepare safe work early without letting speculative work mutate external state.
+The normal LiveKit worker composition is available through `run_livekit_voice_agent(provider_factory, settings=...)` in `backend/interlock/adapters/livekit_agent.py`. A deployment must supply fresh STT/TTS providers and INTERLOCK inward ports per room, plus LiveKit credentials; no vendor is selected by the core adapter. Browser voice has a separate transport-only worker and backend-owned session/token endpoint. Credential-free contract tests are available, but a credentialed browser-to-audio run has not been verified.
 
-### ADAPT
+For browser Samsung voice, set `INTERLOCK_MODE=DEMO`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and a separate `INTERLOCK_VOICE_WORKER_SECRET` for the backend. Give the worker those LiveKit variables plus the same worker secret, `INTERLOCK_VOICE_BACKEND_WS_URL` (for example `ws://127.0.0.1:8000/api/v1`), `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, and a valid `INTERLOCK_VOICE_TTS_VOICE_ID`. The worker defaults to Deepgram `nova-3`, Cartesia `sonic-3`, and Silero VAD. Keep secrets in server/worker environments; never put them in Vite variables. In separate terminals, run:
 
-Use explicit SAFEPOINT boundaries to decide whether work can still be cancelled, superseded, or must be treated as potentially committed.
-
-### VERIFY
-
-Turn tool results into evidence, evidence into claims, and claims into speech through **ClaimGraph + TRUTHLOCK**.
-
-The result is an agent that can stay responsive without sacrificing consistency.
-
----
-
-## Canonical race
-
-```text
-User intent: 11:00
-      │
-      ▼
-Operation prepared
-      │
-      ▼
-Provider dispatch ───────────────► external world may already change
-      │
-      │     User: "Actually make it 12:00"
-      │                    │
-      │                    ▼
-      │             active intent = 12:00
-      │
-      ▼
-Late provider result: 11:00 committed
-      │
-      ▼
-Authoritative reality = 11:00
-Desired intent        = 12:00
-      │
-      ▼
-OPEN DIVERGENCE
-      │
-      ▼
-TRUTHLOCK refuses a false "12:00 is booked" claim
+```bash
+PYTHONPATH=backend .venv/bin/python -m uvicorn interlock.main:app --host 127.0.0.1 --port 8000
+PYTHONPATH=backend .venv/bin/python -m interlock.adapters.livekit_agent browser-worker start
+cd frontend && VITE_INTERLOCK_API_URL=http://127.0.0.1:8000/api/v1 npm run dev
 ```
 
-This is the central INTERLOCK demo: **the system preserves late truth instead of rewriting history.**
+The browser first creates a backend voice session from the Composer, then joins the returned LiveKit room with a five-minute microphone-only token. All business state comes from that session's backend projection WebSocket. The worker does not construct an `Application`; it only relays speech observations and exact approved audio. Use `wss://` for the internal worker channel when it crosses hosts. A local build or credential-free test is not evidence that a real browser heard audio.
+
+### Implemented
+
+- **RUN-001 — Event Journal / Session Runtime**
+  - Serialized event acceptance
+  - Per-session sequencing
+  - Session lifecycle and retention
+
+- **RUN-002 — Pure Reducer + Command Contracts**
+  - Deterministic state transitions
+  - Typed command boundary
+  - Replay-safe command suppression
+  - Single authoritative state-writer model
+
+- **RUN-003 — Async Command Dispatcher**
+  - Explicit asynchronous command routing
+  - Replay / disabled-dispatch suppression
+  - Journal-only fact ingress
+  - Ordered submission with concurrent worker execution
+  - Correlation / causation propagation
+  - Cross-session protection
+  - Defensive command isolation
+  - Fail-closed handler boundaries
+
+- **INTEL-001 — Semantic Control Boundary**
+  - Model/provider abstraction
+  - Conservative control classification
+  - Consequential-action confidence gating
+  - Clarification fallback
+
+- **EXE-001 — Tool Descriptor Registry**
+  - Tool capability manifests
+  - Conservative execution defaults
+  - Cancellation policy metadata
+  - Idempotency / retry / compensation descriptors
+  - Stable capability hashing
+
+- **INTEL-002, EXE-002, EXE-003, EXE-004, TRU-001, TST-001, UI-001 — Partial P0 foundations**
+  - Intent dependencies, operations/idempotency, SAFEPOINT, generic tool runtime, immutable evidence ingress, deterministic scenario primitives, and an honest disconnected frontend shell
+
+- **VCE-001, FDB-001, FDB-002 — Live benchmark delivery path**
+  - LiveKit voice/session ingress on one authoritative INTERLOCK session
+  - Generic FDB-v3 tool mapping through SAFEPOINT and ToolRuntime
+  - Fresh Application, model, tool, callback, and idempotency state per benchmark room
+  - One-command official inference/evaluation with fail-closed provenance
+
+### In Progress / Upcoming
+
+- Runtime orchestration and composition
+- BranchCache
+- EXE-005 world-effect interpretation, conflict projection, and verification consumer
+- Reconciliation
+- ClaimGraph
+- TRUTHLOCK
+- API / WebSocket integration
+- Frontend integration
+- End-to-end deterministic demo
+- Adversarial and invariant testing
+- One actually working extension, demo video, and slide deck
 
 ---
 

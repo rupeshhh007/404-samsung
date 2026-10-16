@@ -383,6 +383,14 @@ export interface SessionCreateResponse {
   readonly ws_url: string;
 }
 
+export interface VoiceSessionResponse {
+  readonly session_id: string;
+  readonly room_name: string;
+  readonly livekit_url: string;
+  readonly participant_token: string;
+  readonly ws_url: string;
+}
+
 export interface SessionSnapshotResponse {
   readonly session_id: string;
   readonly through_sequence: number;

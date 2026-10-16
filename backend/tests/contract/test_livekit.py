@@ -10,21 +10,31 @@ from typing import Any, Callable
 import pytest
 
 from interlock.adapters.livekit_agent import (
-    LiveKitSessionAdapter, VoiceProviders, compose_voice_room, run_livekit_voice_agent,
+    BrowserVoiceWorkerTransport, LiveKitSessionAdapter, VoiceProviders,
+    compose_voice_room, run_livekit_voice_agent,
 )
+from interlock.adapters.voice_transport import VoiceTransportRegistry
+from interlock.adapters.websocket import ProjectionHub
 from interlock.config import Settings
 from interlock.domain.enums import (
     Authorization,
+    CancellationAckScope,
+    CancellationState,
     ClaimCertainty,
     ClaimState,
+    ControlKind,
+    DivergenceState,
+    EffectState,
     EventSource,
     IntentMaturity,
     SpeechActType,
     SpeechState,
     RuntimeMode,
+    OperationState,
 )
 from interlock.domain.models import ClaimRecord, EventEnvelope, IntentRevision, SessionState, SpeechAct
 from interlock.main import Application, RuntimeDependencies
+from interlock.main import create_demo_asgi_app
 from interlock.runtime.commands import RequestSpeechCorrection
 from interlock.runtime.journal import EventCandidate
 from interlock.runtime.reducer import Reducer
@@ -33,6 +43,1152 @@ from interlock.truth.speech import CorrectionPolicy, validate_correction_proposa
 
 def test_verified_livekit_agents_version_is_installed() -> None:
     assert version("livekit-agents") == "1.8.4"
+
+
+def _voice_env(monkeypatch: Any) -> None:
+    monkeypatch.setenv("LIVEKIT_URL", "wss://voice.example.invalid")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "a" * 40)
+    monkeypatch.setenv("INTERLOCK_VOICE_WORKER_SECRET", "b" * 40)
+
+
+def test_browser_voice_token_is_scoped_and_no_client_grants(monkeypatch: Any) -> None:
+    import httpx
+    import jwt
+    from livekit import api
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=host),
+                                     base_url="http://testserver") as client:
+            absent = await client.post("/api/v1/voice/sessions", json={})
+            assert absent.status_code == 503
+            _voice_env(monkeypatch)
+            privileged = await client.post("/api/v1/voice/sessions", json={"room_admin": True})
+            assert privileged.status_code == 422
+            first = await client.post("/api/v1/voice/sessions", json={})
+            second = await client.post("/api/v1/voice/sessions", json={})
+            assert first.status_code == second.status_code == 201
+            one, two = first.json(), second.json()
+            assert set(one) == {"session_id", "room_name", "livekit_url", "participant_token", "ws_url"}
+            assert one["session_id"] != two["session_id"]
+            assert one["room_name"] != two["room_name"]
+            assert one["participant_token"] != two["participant_token"]
+            assert "a" * 40 not in str(one) and "b" * 40 not in str(one)
+            assert one["session_id"] in one["ws_url"]
+            claims = api.TokenVerifier("test-key", "a" * 40).verify(one["participant_token"])
+            assert claims.video.room == one["room_name"]
+            assert claims.video.room_join is True
+            assert claims.video.can_publish is True
+            assert claims.video.can_subscribe is True
+            assert claims.video.can_publish_data is False
+            assert claims.video.can_publish_sources == ["microphone"]
+            assert not claims.video.room_admin and not claims.video.room_create
+            assert not claims.video.room_list and not claims.video.room_record
+            raw_claims = jwt.decode(one["participant_token"], "a" * 40,
+                                    algorithms=["HS256"], issuer="test-key")
+            assert raw_claims["exp"] - raw_claims["nbf"] <= 300
+            assert host.application.snapshot(one["session_id"]).session_id == one["session_id"]
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_worker_transcript_advances_the_same_backend_projection(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    class WorkerSocket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send_json(self, message: dict[str, Any]) -> None:
+            self.messages.append(message)
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        transport: VoiceTransportRegistry = host.voice_registry
+        binding, _, token = await transport.create()
+        assert transport.application is host.application
+        assert transport.authenticate(binding.session_id, binding.room_name, "b" * 40) is binding
+        for wrong_session, wrong_room, secret in (
+            ("wrong", binding.room_name, "b" * 40),
+            (binding.session_id, "wrong", "b" * 40),
+            (binding.session_id, binding.room_name, token),
+        ):
+            with pytest.raises(ValueError):
+                transport.authenticate(wrong_session, wrong_room, secret)
+        socket = WorkerSocket()
+        generation = await transport.connect(binding, socket)  # type: ignore[arg-type]
+        fact = {"type": "TRANSCRIPT", "worker_event_id": "transcript-1",
+                "item_id": "utterance", "text": "book eleven", "final": False,
+                "created_at": None}
+        await transport.accept(binding, generation, fact)
+        await transport.accept(binding, generation, fact)
+        await host.application.drain(binding.session_id)
+        state = host.application.snapshot(binding.session_id)
+        assert [event.event_type for event in host.application.events(binding.session_id)].count(
+            "TranscriptHypothesisObserved") == 1
+        assert not any(event.event_type == "ToolDispatchRequested"
+                       for event in host.application.events(binding.session_id))
+        subscriber = await host.hub.subscribe(binding.session_id)
+        projected = subscriber.queue.get_nowait()
+        assert projected["session_id"] == binding.session_id
+        assert projected["through_sequence"] == state.last_sequence
+        assert projected["projection"]["evidence"]
+        with pytest.raises(ValueError):
+            await transport.accept(binding, generation, {"type": "FAKE_EVENT", "worker_event_id": "bad"})
+        with pytest.raises(ValueError):
+            await transport.accept(binding, generation, {**fact, "worker_event_id": "bad-extra",
+                                                        "event_type": "ToolDispatchRequested"})
+        transport.disconnect(binding, generation)
+        with pytest.raises(ValueError):
+            await transport.accept(binding, generation, {**fact, "worker_event_id": "stale"})
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_remote_voice_output_waits_for_real_start_and_exact_text(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    class WorkerSocket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+            self.speak_sent = asyncio.Event()
+
+        async def send_json(self, message: dict[str, Any]) -> None:
+            self.messages.append(message)
+            if message.get("type") == "SPEAK":
+                self.speak_sent.set()
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        transport: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await transport.create()
+        socket = WorkerSocket()
+        generation = await transport.connect(binding, socket)  # type: ignore[arg-type]
+        speech = SpeechAct(
+            speech_id="voice-progress", act_type=SpeechActType.PROGRESS,
+            template_id="tmpl_checking", requested_certainty=ClaimCertainty.PROGRESS,
+            state=SpeechState.PROPOSED, created_by_event_id="proposal",
+        )
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="SpeechActProposed",
+            source=EventSource.POLICY,
+            payload={"speech_act": speech.model_dump(mode="json")},
+        ))
+        await asyncio.wait_for(socket.speak_sent.wait(), timeout=2)
+        persisted = host.application.snapshot(binding.session_id).speech[speech.speech_id]
+        assert socket.messages == [{
+            "type": "SPEAK", "speech_id": speech.speech_id,
+            "rendered_text": persisted.rendered_text,
+        }]
+        assert not any(event.event_type == "SpeechEmissionStarted"
+                       for event in host.application.events(binding.session_id))
+        with pytest.raises(ValueError, match="lacks start proof"):
+            await transport.accept(binding, generation, {
+                "type": "PLAYOUT_FINISHED", "worker_event_id": "premature-finish",
+                "speech_id": speech.speech_id, "heard": True,
+            })
+        await transport.accept(binding, generation, {
+            "type": "PLAYOUT_STARTED", "worker_event_id": "start-1",
+            "speech_id": speech.speech_id,
+        })
+        async def started() -> None:
+            while not any(event.event_type == "SpeechEmissionStarted"
+                          for event in host.application.events(binding.session_id)):
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(started(), timeout=2)
+        assert any(event.event_type == "SpeechEmissionStarted"
+                   for event in host.application.events(binding.session_id))
+        await transport.accept(binding, generation, {
+            "type": "USER_SPEAKING", "worker_event_id": "barge-1",
+        })
+        await asyncio.sleep(0)
+        assert any(event.event_type == "SpeechCancellationRequested"
+                   for event in host.application.events(binding.session_id))
+        assert not any(event.event_type == "CancellationRequested"
+                       for event in host.application.events(binding.session_id))
+        await transport.accept(binding, generation, {
+            "type": "PLAYOUT_FINISHED", "worker_event_id": "finish-1",
+            "speech_id": speech.speech_id, "heard": True,
+        })
+        await host.application.drain(binding.session_id)
+        assert host.application.snapshot(binding.session_id).speech[speech.speech_id].heard is True
+        transport.disconnect(binding, generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_browser_worker_owns_only_transport_and_emits_playout_proof() -> None:
+    class Handle:
+        def __init__(self) -> None:
+            self.id = "one-handle"
+            self.interrupted = False
+            self.played = asyncio.Event()
+
+        async def wait_for_playout(self) -> None:
+            await self.played.wait()
+
+        def exception(self) -> None:
+            return None
+
+    class Session:
+        agent_state = "speaking"
+
+        def __init__(self) -> None:
+            self.handle = Handle()
+            self.current_speech = self.handle
+            self.text: str | None = None
+
+        def say(self, text: str, *, allow_interruptions: bool,
+                add_to_chat_ctx: bool) -> Handle:
+            assert allow_interruptions is False
+            assert add_to_chat_ctx is False
+            self.text = text
+            return self.handle
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send(self, raw: str) -> None:
+            import json
+            self.messages.append(json.loads(raw))
+
+    async def case() -> None:
+        session = Session()
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            session, room_name="voice-opaque", backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        assert not hasattr(worker, "application")
+        worker._socket = socket
+        exact = "I cannot confirm the new booking yet."
+        task = asyncio.create_task(worker._speak("speech-1", exact))
+        async def started() -> None:
+            while not socket.messages:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(started(), timeout=2)
+        assert session.text == exact
+        assert [(message["type"], message["speech_id"]) for message in socket.messages] == [
+            ("PLAYOUT_STARTED", "speech-1"),
+        ]
+        session.handle.played.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert [(message["type"], message["speech_id"]) for message in socket.messages] == [
+            ("PLAYOUT_STARTED", "speech-1"), ("PLAYOUT_FINISHED", "speech-1"),
+        ]
+        assert socket.messages[-1]["heard"] is True
+
+    asyncio.run(case())
+
+
+def test_browser_worker_coalesces_segmented_finals_before_backend_semantics() -> None:
+    import json
+
+    class Session:
+        pass
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send(self, raw: str) -> None:
+            self.messages.append(json.loads(raw))
+
+    async def case() -> None:
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            Session(),
+            room_name="voice-coalesce",
+            backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        worker._socket = socket
+        worker._final_coalesce_s = 0.01
+
+        worker._on_user_state(type("State", (), {"new_state": "speaking"})())
+        worker._on_transcript(type("Transcript", (), {
+            "transcript": "Actually book",
+            "is_final": True,
+            "item_id": None,
+            "created_at": 1.0,
+        })())
+        worker._on_transcript(type("Transcript", (), {
+            "transcript": "book twelve",
+            "is_final": True,
+            "item_id": None,
+            "created_at": 1.1,
+        })())
+        await asyncio.sleep(0)
+        assert not any(
+            message["type"] == "TRANSCRIPT" and message["final"]
+            for message in socket.messages
+        )
+
+        worker._on_user_state(type("State", (), {"new_state": "listening"})())
+        await asyncio.sleep(0.05)
+        finals = [
+            message for message in socket.messages
+            if message["type"] == "TRANSCRIPT" and message["final"]
+        ]
+        assert len(finals) == 1
+        assert finals[0]["text"] == "Actually book twelve"
+        assert finals[0]["item_id"].startswith("turn-")
+
+        if worker._tasks:
+            await asyncio.gather(*tuple(worker._tasks), return_exceptions=True)
+
+    asyncio.run(case())
+
+
+def test_new_speaking_turn_flushes_prior_final_before_barge_in_fact() -> None:
+    import json
+
+    class Session:
+        pass
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+
+        async def send(self, raw: str) -> None:
+            self.messages.append(json.loads(raw))
+
+    async def case() -> None:
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            Session(),
+            room_name="voice-turn-order",
+            backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        worker._socket = socket
+        worker._final_coalesce_s = 1.0
+
+        worker._on_transcript(type("Transcript", (), {
+            "transcript": "Book eleven",
+            "is_final": True,
+            "item_id": None,
+            "created_at": 1.0,
+        })())
+        worker._on_user_state(type("State", (), {"new_state": "speaking"})())
+        await asyncio.sleep(0.05)
+
+        semantic = [
+            message["type"] for message in socket.messages
+            if message["type"] in {"TRANSCRIPT", "USER_SPEAKING"}
+        ]
+        assert semantic[:2] == ["TRANSCRIPT", "USER_SPEAKING"]
+        final = next(message for message in socket.messages if message["type"] == "TRANSCRIPT")
+        assert final["text"] == "Book eleven"
+        assert final["final"] is True
+
+        if worker._tasks:
+            await asyncio.gather(*tuple(worker._tasks), return_exceptions=True)
+
+    asyncio.run(case())
+
+
+def test_browser_worker_interruption_after_start_reports_heard_failure() -> None:
+    import json
+
+    class Handle:
+        id = "speech-handle-1"
+
+        def __init__(self) -> None:
+            self.interrupted = False
+            self.played = asyncio.Event()
+
+        async def wait_for_playout(self) -> None:
+            await self.played.wait()
+
+        def done(self) -> bool:
+            return self.played.is_set()
+
+        def interrupt(self, *, force: bool) -> None:
+            assert force is True
+            self.interrupted = True
+            self.played.set()
+
+        def exception(self) -> None:
+            return None
+
+    class Session:
+        agent_state = "speaking"
+
+        def __init__(self) -> None:
+            self.handle = Handle()
+            self.current_speech = self.handle
+            self.text: str | None = None
+
+        def say(self, text: str, *, allow_interruptions: bool,
+                add_to_chat_ctx: bool) -> Handle:
+            assert not allow_interruptions and not add_to_chat_ctx
+            self.text = text
+            return self.handle
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, Any]] = []
+            self.started = asyncio.Event()
+            self.terminal = asyncio.Event()
+            self.inbound: asyncio.Queue[str] = asyncio.Queue()
+
+        async def send(self, raw: str) -> None:
+            message = json.loads(raw)
+            self.messages.append(message)
+            if message["type"] == "PLAYOUT_STARTED":
+                self.started.set()
+            if message["type"] == "PLAYOUT_FAILED":
+                self.terminal.set()
+
+        def __aiter__(self) -> "Socket":
+            return self
+
+        async def __anext__(self) -> str:
+            return await self.inbound.get()
+
+    async def case() -> None:
+        session = Session()
+        socket = Socket()
+        worker = BrowserVoiceWorkerTransport(  # type: ignore[arg-type]
+            session, room_name="voice-opaque", backend_ws_url="ws://localhost/api/v1",
+            worker_secret="worker-only",
+        )
+        worker._socket = socket
+        reader = asyncio.create_task(worker._read())
+        speaker = asyncio.create_task(worker._speak("speech-1", "Exact approved text."))
+        await asyncio.wait_for(socket.started.wait(), timeout=2)
+        await socket.inbound.put(json.dumps({"type": "CANCEL_SPEECH", "speech_id": "speech-1"}))
+        await asyncio.wait_for(socket.terminal.wait(), timeout=2)
+        await asyncio.wait_for(speaker, timeout=2)
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        assert session.text == "Exact approved text."
+        assert [item["type"] for item in socket.messages] == ["PLAYOUT_STARTED", "PLAYOUT_FAILED"]
+        assert socket.messages[-1]["speech_id"] == "speech-1"
+        assert socket.messages[-1]["error_code"] == "LIVEKIT_INTERRUPTED"
+        assert socket.messages[-1]["heard"] is True
+
+    asyncio.run(case())
+
+
+def test_browser_barge_in_terminal_allows_second_speech(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        transport: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await transport.create()
+
+        class WorkerSocket:
+            def __init__(self) -> None:
+                self.messages: list[dict[str, Any]] = []
+                self.first_started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+                self.second_finished = asyncio.Event()
+                self.tasks: set[asyncio.Task[Any]] = set()
+
+            async def send_json(self, message: dict[str, Any]) -> None:
+                self.messages.append(message)
+                if message["type"] == "SPEAK":
+                    speech_id = message["speech_id"]
+
+                    async def playout() -> None:
+                        await transport.accept(binding, 1, {
+                            "type": "PLAYOUT_STARTED", "worker_event_id": f"start-{speech_id}",
+                            "speech_id": speech_id,
+                        })
+                        if speech_id == "speech-1":
+                            self.first_started.set()
+                        else:
+                            await transport.accept(binding, 1, {
+                                "type": "PLAYOUT_FINISHED", "worker_event_id": f"finish-{speech_id}",
+                                "speech_id": speech_id, "heard": True,
+                            })
+                            self.second_finished.set()
+
+                    task = asyncio.create_task(playout())
+                    self.tasks.add(task)
+                    task.add_done_callback(self.tasks.discard)
+                elif message["type"] == "CANCEL_SPEECH":
+                    assert message["speech_id"] == "speech-1"
+                    self.cancelled.set()
+                    task = asyncio.create_task(transport.accept(binding, 1, {
+                        "type": "PLAYOUT_FAILED", "worker_event_id": "interrupted-speech-1",
+                        "speech_id": "speech-1", "error_code": "LIVEKIT_INTERRUPTED", "heard": True,
+                    }))
+                    self.tasks.add(task)
+                    task.add_done_callback(self.tasks.discard)
+
+        socket = WorkerSocket()
+        await transport.connect(binding, socket)  # type: ignore[arg-type]
+
+        async def propose(speech_id: str) -> None:
+            act = SpeechAct(
+                speech_id=speech_id, act_type=SpeechActType.PROGRESS,
+                template_id="tmpl_checking", requested_certainty=ClaimCertainty.PROGRESS,
+                state=SpeechState.PROPOSED, created_by_event_id=f"proposal-{speech_id}",
+            )
+            await host.application.append(EventCandidate(
+                session_id=binding.session_id, event_type="SpeechActProposed",
+                source=EventSource.POLICY, payload={"speech_act": act.model_dump(mode="json")},
+            ))
+
+        await propose("speech-1")
+        await asyncio.wait_for(socket.first_started.wait(), timeout=2)
+        async def emission_started() -> None:
+            while not any(e.event_type == "SpeechEmissionStarted" and e.payload.get("speech_id") == "speech-1"
+                          for e in host.application.events(binding.session_id)):
+                await asyncio.sleep(0)
+        await asyncio.wait_for(emission_started(), timeout=2)
+        await transport.accept(binding, 1, {
+            "type": "USER_SPEAKING", "worker_event_id": "barge-speech-1",
+        })
+        await asyncio.wait_for(socket.cancelled.wait(), timeout=2)
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=2)
+        state = host.application.snapshot(binding.session_id)
+        assert state.speech["speech-1"].heard is True
+        assert state.speech["speech-1"].state == SpeechState.EMITTED
+        assert any(e.event_type == "SpeechCancellationRequested"
+                   for e in host.application.events(binding.session_id))
+        assert any(e.event_type == "SpeechEmissionFailed" and e.payload.get("speech_id") == "speech-1"
+                   for e in host.application.events(binding.session_id))
+        assert not any(e.event_type == "CancellationRequested"
+                       for e in host.application.events(binding.session_id))
+
+        await propose("speech-2")
+        await asyncio.wait_for(socket.second_finished.wait(), timeout=2)
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=2)
+        assert host.application.snapshot(binding.session_id).speech["speech-2"].state == SpeechState.EMITTED
+        assert host.application.snapshot(binding.session_id).speech["speech-2"].heard is True
+        assert [m["speech_id"] for m in socket.messages if m["type"] == "SPEAK"] == [
+            "speech-1", "speech-2",
+        ]
+        await asyncio.gather(*tuple(socket.tasks))
+        transport.disconnect(binding, 1)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_voice_binding_expiry_and_ambiguous_disconnect_fail_closed(monkeypatch: Any) -> None:
+    from time import monotonic
+
+    _voice_env(monkeypatch)
+
+    class Socket:
+        async def send_json(self, _message: dict[str, Any]) -> None:
+            return
+
+    async def case() -> None:
+        host = create_demo_asgi_app()
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        generation = await registry.connect(binding, Socket())  # type: ignore[arg-type]
+        before = len(host.application.events(binding.session_id))
+        registry.disconnect(binding, generation)
+        assert len(host.application.events(binding.session_id)) == before
+        assert not any(event.event_type in {"SpeechEmissionFinished", "SpeechEmissionFailed"}
+                       for event in host.application.events(binding.session_id))
+        binding.expiry = monotonic() - 1
+        with pytest.raises(ValueError, match="expired"):
+            registry.binding(binding.session_id)
+        with pytest.raises(ValueError):
+            registry.authenticate(binding.session_id, binding.room_name, "b" * 40)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_two_browser_rooms_have_private_samsung_worlds_and_narrow_aliases(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        transport: VoiceTransportRegistry = host.voice_registry
+
+        class WorkerSocket:
+            def __init__(self, binding: Any, generation: int) -> None:
+                self.binding = binding
+                self.generation = generation
+                self.tasks: set[asyncio.Task[Any]] = set()
+
+            async def send_json(self, message: dict[str, Any]) -> None:
+                if message.get("type") != "SPEAK":
+                    return
+
+                async def playout() -> None:
+                    await asyncio.sleep(0)
+                    await transport.accept(self.binding, self.generation, {
+                        "type": "PLAYOUT_STARTED", "worker_event_id": uuid4().hex,
+                        "speech_id": message["speech_id"],
+                    })
+                    await asyncio.sleep(0.02)
+                    await transport.accept(self.binding, self.generation, {
+                        "type": "PLAYOUT_FINISHED", "worker_event_id": uuid4().hex,
+                        "speech_id": message["speech_id"], "heard": True,
+                    })
+
+                task = asyncio.create_task(playout())
+                self.tasks.add(task)
+                task.add_done_callback(self.tasks.discard)
+
+        from uuid import uuid4
+
+        bindings = []
+        sockets = []
+        for _ in range(2):
+            binding, _, _ = await transport.create()
+            socket = WorkerSocket(binding, 1)
+            await transport.connect(binding, socket)  # type: ignore[arg-type]
+            bindings.append(binding)
+            sockets.append(socket)
+        a, b = bindings
+        assert a.provider is not b.provider
+        assert a.provider.physical_action_count == b.provider.physical_action_count == 0
+
+        for binding, utterance in ((a, "book eleven"), (b, "Book twelve.")):
+            await transport.accept(binding, 1, {
+                "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+                "item_id": uuid4().hex, "text": utterance, "final": True,
+                "created_at": None,
+            })
+            await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+            assert binding.provider.physical_action_count == 1
+            assert any(event.event_type == "ToolDispatchRequested"
+                       for event in host.application.events(binding.session_id))
+        assert a.provider is not b.provider
+        assert next(iter(a.provider.bookings.values()))["confirmed_slot"].endswith("11:00:00+05:30")
+        assert next(iter(b.provider.bookings.values()))["confirmed_slot"].endswith("12:00:00+05:30")
+        assert host.application.snapshot(a.session_id).session_id == a.session_id
+        assert host.application.snapshot(b.session_id).session_id == b.session_id
+        assert set(host.application.snapshot(a.session_id).effects).isdisjoint(
+            host.application.snapshot(b.session_id).effects)
+        before = sum(event.event_type == "ToolDispatchRequested"
+                     for event in host.application.events(a.session_id))
+        await transport.accept(a, 1, {
+            "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+            "item_id": uuid4().hex, "text": "don't make it twelve", "final": True,
+            "created_at": None,
+        })
+        await asyncio.wait_for(host.application.drain(a.session_id), timeout=5)
+        assert sum(event.event_type == "ToolDispatchRequested"
+                   for event in host.application.events(a.session_id)) == before
+        await transport.accept(a, 1, {
+            "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+            "item_id": uuid4().hex, "text": "actually make it twelve", "final": True,
+            "created_at": None,
+        })
+        await asyncio.wait_for(host.application.drain(a.session_id), timeout=5)
+        active = host.application.snapshot(a.session_id)
+        active_intent = active.intents[active.active_intent_id]
+        assert active.revisions[active_intent.active_revision_id].values["requested_slot"].endswith("12:00:00+05:30")
+        assert a.provider.physical_action_count == 1
+
+        negated, _, _ = await transport.create()
+        negated_socket = WorkerSocket(negated, 1)
+        await transport.connect(negated, negated_socket)  # type: ignore[arg-type]
+        for phrase in ("don't book eleven", "do not book eleven"):
+            await transport.accept(negated, 1, {
+                "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+                "item_id": uuid4().hex, "text": phrase, "final": True,
+                "created_at": None,
+            })
+        await asyncio.wait_for(host.application.drain(negated.session_id), timeout=5)
+        assert negated.provider.physical_action_count == 0
+        assert not any(event.event_type == "ToolDispatchRequested"
+                       for event in host.application.events(negated.session_id))
+        await asyncio.gather(*tuple(negated_socket.tasks))
+        transport.disconnect(negated, 1)
+        for binding, socket in zip(bindings, sockets):
+            await asyncio.gather(*tuple(socket.tasks))
+            transport.disconnect(binding, 1)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+async def _demo_control(application: Application, session_id: str, kind: ControlKind) -> None:
+    from uuid import uuid4
+
+    await application.append(EventCandidate(
+        session_id=session_id, event_type="ControlIntentInterpreted",
+        source=EventSource.MODEL,
+        payload={"control": {
+            "control_id": uuid4().hex, "kind": kind.value, "confidence": 1.0,
+            "consequential": False, "target_refs": [], "raw_evidence_id": "test-control",
+            "clarification": None,
+        }},
+    ))
+
+
+async def _demo_voice_transcript(
+    registry: VoiceTransportRegistry, binding: Any, text: str,
+) -> None:
+    from uuid import uuid4
+
+    await registry.accept(binding, binding.generation, {
+        "type": "TRANSCRIPT", "worker_event_id": uuid4().hex,
+        "item_id": uuid4().hex, "text": text, "final": True, "created_at": None,
+    })
+
+
+class _AutoVoicePlayout:
+    def __init__(self, registry: VoiceTransportRegistry, binding: Any) -> None:
+        self.registry = registry
+        self.binding = binding
+        self.tasks: set[asyncio.Task[Any]] = set()
+
+    async def send_json(self, message: dict[str, Any]) -> None:
+        if message["type"] != "SPEAK":
+            return
+
+        async def complete() -> None:
+            from uuid import uuid4
+            await self.registry.accept(self.binding, self.binding.generation, {
+                "type": "PLAYOUT_STARTED", "worker_event_id": uuid4().hex,
+                "speech_id": message["speech_id"],
+            })
+            await self.registry.accept(self.binding, self.binding.generation, {
+                "type": "PLAYOUT_FINISHED", "worker_event_id": uuid4().hex,
+                "speech_id": message["speech_id"], "heard": True,
+            })
+
+        task = asyncio.create_task(complete())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+
+def test_missing_final_transcript_gets_controlled_repeat_prompt(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        from uuid import uuid4
+
+        await registry.accept(binding, binding.generation, {
+            "type": "TRANSCRIPTION_TIMEOUT",
+            "worker_event_id": uuid4().hex,
+            "speech_duration_ms": 1400,
+        })
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+
+        async def repeat_prompt_emitted() -> None:
+            while True:
+                state = host.application.snapshot(binding.session_id)
+                if any(
+                    speech.template_id == "tmpl_clarification_repeat"
+                    and speech.state == SpeechState.EMITTED
+                    for speech in state.speech.values()
+                ):
+                    return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(repeat_prompt_emitted(), timeout=5)
+        events = host.application.events(binding.session_id)
+        assert any(event.event_type == "VoiceTranscriptionTimeoutObserved" for event in events)
+        assert not any(event.event_type == "ToolDispatchRequested" for event in events)
+        assert binding.provider.physical_action_count == 0
+
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_short_vad_blip_timeout_does_not_prompt_or_write(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        from uuid import uuid4
+
+        await registry.accept(binding, binding.generation, {
+            "type": "TRANSCRIPTION_TIMEOUT",
+            "worker_event_id": uuid4().hex,
+            "speech_duration_ms": 250,
+        })
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        state = host.application.snapshot(binding.session_id)
+        assert not state.speech
+        assert binding.provider.physical_action_count == 0
+
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_late_correction_retains_eleven_and_never_repairs_automatically(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+        await _demo_voice_transcript(registry, binding, "book eleven")
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        committed = host.application.snapshot(binding.session_id)
+        assert binding.provider.physical_action_count == 1
+        assert len(committed.effects) == 1
+        original = next(iter(committed.effects.values()))
+        assert original.parameters["confirmed_slot"].endswith("11:00:00+05:30")
+        assert original.state == EffectState.COMMITTED
+
+        await _demo_voice_transcript(registry, binding, "Actually, make it twelve.")
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        final = host.application.snapshot(binding.session_id)
+        active = final.intents[final.active_intent_id]
+        desired = final.revisions[active.active_revision_id]
+        assert desired.values["requested_slot"].endswith("12:00:00+05:30")
+        assert binding.provider.physical_action_count == 1
+        assert len(final.effects) == 1 and original.effect_id in final.effects
+        assert len([case for case in final.divergences.values()
+                    if case.state == DivergenceState.OPEN and original.effect_id in case.observed_effect_ids]) == 1
+        assert not any(op.intent_revision_id == desired.revision_id and op.tool_name == "appointment.book"
+                       for op in final.operations.values())
+        assert not any(effect.parameters.get("confirmed_slot", "").endswith("12:00:00+05:30")
+                       for effect in final.effects.values())
+        assert not any(claim.intent_revision_id == desired.revision_id and claim.state == ClaimState.CONFIRMED
+                       for claim in final.claims.values())
+        assert not any(speech.act_type == SpeechActType.RESULT and speech.state == SpeechState.EMITTED
+                       and any(final.claims[cid].intent_revision_id == desired.revision_id
+                               for cid in speech.claim_ids) for speech in final.speech.values())
+        assert not final.plans
+        assert not any(event.event_type == "DivergenceResolved"
+                       for event in host.application.events(binding.session_id))
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Actually book twelve.",
+        "Actually, 12 please.",
+        "No, twelve.",
+        "Sorry, I meant twelve.",
+        "Change from eleven to twelve.",
+        "Move it to noon.",
+        "Twelve instead.",
+        "Book 12.",
+        "At twelve please.",
+    ],
+)
+def test_late_voice_correction_variants_preserve_reality_without_blind_rewrite(
+    monkeypatch: Any,
+    phrase: str,
+) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        await _demo_voice_transcript(registry, binding, "book eleven")
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        before = host.application.snapshot(binding.session_id)
+        assert binding.provider.physical_action_count == 1
+        original = next(iter(before.effects.values()))
+        assert original.parameters["confirmed_slot"].endswith("11:00:00+05:30")
+
+        await _demo_voice_transcript(registry, binding, phrase)
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        final = host.application.snapshot(binding.session_id)
+        active = final.intents[final.active_intent_id]
+        desired = final.revisions[active.active_revision_id]
+
+        assert desired.values["requested_slot"].endswith("12:00:00+05:30")
+        assert binding.provider.physical_action_count == 1
+        assert len(binding.provider.bookings) == 1
+        assert next(iter(binding.provider.bookings.values()))["confirmed_slot"].endswith(
+            "11:00:00+05:30"
+        )
+        assert any(
+            divergence.state == DivergenceState.OPEN
+            and original.effect_id in divergence.observed_effect_ids
+            for divergence in final.divergences.values()
+        )
+        assert not any(
+            operation.intent_revision_id == desired.revision_id
+            and operation.tool_name == "appointment.book"
+            for operation in final.operations.values()
+        )
+
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_dispatched_unknown_eleven_never_licenses_blind_twelve(monkeypatch: Any) -> None:
+    from dataclasses import replace
+    import interlock.adapters.voice_transport as voice_transport
+
+    _voice_env(monkeypatch)
+    original_factory = voice_transport.create_demo_session_dependencies
+    provider_acted = asyncio.Event()
+    release_result = asyncio.Event()
+
+    class GateAfterProviderAction:
+        def __init__(self, delegate: Any) -> None:
+            self.delegate = delegate
+
+        async def invoke(self, invocation: Any) -> Any:
+            result = await self.delegate.invoke(invocation)
+            provider_acted.set()
+            await release_result.wait()
+            return result
+
+        async def cancel(self, request: Any) -> Any:
+            return await self.delegate.cancel(request)
+
+    def gated_factory(*args: Any, **kwargs: Any) -> Any:
+        registry, dependencies, provider = original_factory(*args, **kwargs)
+        return registry, replace(
+            dependencies, tool_transport=GateAfterProviderAction(dependencies.tool_transport),
+        ), provider
+
+    monkeypatch.setattr(voice_transport, "create_demo_session_dependencies", gated_factory)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+        await _demo_voice_transcript(registry, binding, "book eleven")
+        await asyncio.wait_for(provider_acted.wait(), timeout=5)
+        in_flight = host.application.snapshot(binding.session_id)
+        old = next(op for op in in_flight.operations.values() if op.tool_name == "appointment.book")
+        assert old.dispatch_requested_event_id is not None
+        assert binding.provider.physical_action_count == 1
+        assert not in_flight.effects
+
+        await _demo_voice_transcript(registry, binding, "actually make it twelve")
+
+        async def child_authorized() -> None:
+            while True:
+                state = host.application.snapshot(binding.session_id)
+                node = state.intents.get(state.active_intent_id) if state.active_intent_id else None
+                revision = state.revisions.get(node.active_revision_id) if node else None
+                if revision and revision.parent_revision_id is not None \
+                        and revision.authorization == Authorization.AUTHORIZED:
+                    return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(child_authorized(), timeout=5)
+        uncertain = host.application.snapshot(binding.session_id)
+        assert not uncertain.effects
+        assert not any(op.intent_revision_id != old.intent_revision_id and op.tool_name == "appointment.book"
+                       for op in uncertain.operations.values())
+        release_result.set()
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        final = host.application.snapshot(binding.session_id)
+        assert binding.provider.physical_action_count == 1
+        assert any(effect.operation_id == old.operation_id for effect in final.effects.values())
+        assert not any(op.intent_revision_id != old.intent_revision_id and op.tool_name == "appointment.book"
+                       for op in final.operations.values())
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_correction_before_parent_operation_creation_executes_latest_revision(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+
+        root = IntentRevision(
+            revision_id="voice-race-root",
+            intent_id="voice-race-intent",
+            values={
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T11:00:00+05:30",
+            },
+            maturity=IntentMaturity.COMMITTED,
+            authorization=Authorization.NOT_REQUESTED,
+            created_by_event_id="voice-race-root-event",
+            dependency_fingerprint="voice-race-root-fingerprint",
+        )
+        child = IntentRevision(
+            revision_id="voice-race-child",
+            intent_id=root.intent_id,
+            parent_revision_id=root.revision_id,
+            values={
+                "goal_type": "appointment_booking",
+                "center_id": "ctr-01",
+                "requested_slot": "2030-01-15T12:00:00+05:30",
+            },
+            maturity=IntentMaturity.COMMITTED,
+            authorization=Authorization.NOT_REQUESTED,
+            created_by_event_id="voice-race-child-event",
+            dependency_fingerprint="voice-race-child-fingerprint",
+        )
+
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="IntentRevisionCommitted",
+            source=EventSource.MODEL,
+            payload={"revision": root.model_dump(mode="json")},
+        ))
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="IntentRevisionCommitted",
+            source=EventSource.MODEL,
+            payload={"revision": child.model_dump(mode="json")},
+        ))
+        await host.application.append(EventCandidate(
+            session_id=binding.session_id, event_type="IntentAuthorizationChanged",
+            source=EventSource.USER,
+            payload={
+                "revision_id": child.revision_id,
+                "authorization": Authorization.AUTHORIZED.value,
+                "evidence_id": "voice-race-auth",
+            },
+        ))
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+
+        final = host.application.snapshot(binding.session_id)
+        assert not any(
+            operation.intent_revision_id == root.revision_id
+            for operation in final.operations.values()
+        )
+        child_operations = [
+            operation for operation in final.operations.values()
+            if operation.intent_revision_id == child.revision_id
+            and operation.tool_name == "appointment.book"
+        ]
+        assert len(child_operations) == 1
+        assert binding.provider.physical_action_count == 1
+        assert len(binding.provider.bookings) == 1
+        assert next(iter(binding.provider.bookings.values()))["confirmed_slot"].endswith(
+            "12:00:00+05:30"
+        )
+        assert final.effects
+        assert all(
+            effect.operation_id == child_operations[0].operation_id
+            for effect in final.effects.values()
+        )
+        assert not final.divergences
+
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
+
+
+def test_early_correction_replaces_only_locally_cancelled_pre_dispatch_booking(monkeypatch: Any) -> None:
+    _voice_env(monkeypatch)
+
+    async def case() -> None:
+        host = create_demo_asgi_app(Settings(INTERLOCK_FAKE_LATENCY_MS=0))
+        registry: VoiceTransportRegistry = host.voice_registry
+        binding, _, _ = await registry.create()
+        socket = _AutoVoicePlayout(registry, binding)
+        await registry.connect(binding, socket)  # type: ignore[arg-type]
+        await _demo_control(host.application, binding.session_id, ControlKind.PAUSE)
+        assert host.application.snapshot(binding.session_id).paused is True
+        await _demo_voice_transcript(registry, binding, "book eleven")
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        before = host.application.snapshot(binding.session_id)
+        parent = next(op for op in before.operations.values() if op.tool_name == "appointment.book")
+        assert parent.state == OperationState.READY
+        assert parent.dispatch_requested_event_id is None
+        assert binding.provider.physical_action_count == 0
+
+        await _demo_voice_transcript(registry, binding, "actually make it twelve")
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        pending = host.application.snapshot(binding.session_id)
+        old = pending.operations[parent.operation_id]
+        assert old.state == OperationState.CANCELLED
+        assert old.cancellation_state == CancellationState.ACKNOWLEDGED
+        assert CancellationAckScope.LOCAL_TASK in old.cancellation_ack_scopes
+        assert old.effect_state == EffectState.NOT_STARTED
+        assert old.dispatch_requested_event_id is None
+        assert binding.provider.physical_action_count == 0
+        child = next(op for op in pending.operations.values() if op.operation_id != old.operation_id)
+        assert child.args["requested_slot"].endswith("12:00:00+05:30")
+        events = host.application.events(binding.session_id)
+        child_auth = next(i for i, event in enumerate(events)
+                          if event.event_type == "IntentAuthorizationChanged"
+                          and event.payload["revision_id"] == child.intent_revision_id)
+        local_ack = next(i for i, event in enumerate(events)
+                         if event.event_type == "CancellationAcknowledged"
+                         and event.payload["operation_id"] == old.operation_id)
+        created = next(i for i, event in enumerate(events)
+                       if event.event_type == "OperationCreated"
+                       and event.payload["operation"]["operation_id"] == child.operation_id)
+        assert child_auth < local_ack < created
+
+        await _demo_control(host.application, binding.session_id, ControlKind.RESUME)
+        await asyncio.wait_for(host.application.drain(binding.session_id), timeout=5)
+        final = host.application.snapshot(binding.session_id)
+        assert binding.provider.physical_action_count == 1
+        assert len(binding.provider.bookings) == 1
+        assert next(iter(binding.provider.bookings.values()))["confirmed_slot"].endswith("12:00:00+05:30")
+        assert len(final.effects) == 1
+        assert next(iter(final.effects.values())).operation_id == child.operation_id
+        assert not any(effect.operation_id == old.operation_id for effect in final.effects.values())
+        assert any(event.event_type == "ToolDispatchRequested"
+                   and event.payload["operation_id"] == child.operation_id for event in host.application.events(binding.session_id))
+        active = final.intents[final.active_intent_id]
+        assert final.revisions[active.active_revision_id].values["requested_slot"].endswith("12:00:00+05:30")
+        assert any(claim.state == ClaimState.CONFIRMED and claim.intent_revision_id == child.intent_revision_id
+                   for claim in final.claims.values())
+        assert not any(speech.act_type == SpeechActType.RESULT
+                       and "11" in speech.rendered_text and speech.state == SpeechState.EMITTED
+                       for speech in final.speech.values())
+        await asyncio.gather(*tuple(socket.tasks))
+        registry.disconnect(binding, binding.generation)
+        await host.application.close()
+        await host.hub.shutdown()
+
+    asyncio.run(case())
 
 
 def test_normal_voice_composition_is_isolated_and_has_no_livekit_llm_or_tools(monkeypatch: Any) -> None:
@@ -840,3 +1996,64 @@ def test_early_successful_playout_without_start_signal_does_not_fail_unheard() -
         await adapter.close()
 
     asyncio.run(case())
+
+
+def test_browser_voice_worker_entrypoint_is_picklable() -> None:
+    import pickle
+    from livekit.agents import AgentServer
+    from interlock.adapters.livekit_agent import _browser_voice_entrypoint
+
+    pickled = pickle.dumps(_browser_voice_entrypoint)
+    unpickled = pickle.loads(pickled)
+    assert unpickled is _browser_voice_entrypoint
+
+    server = AgentServer()
+    server.rtc_session(_browser_voice_entrypoint)
+    server_pickled = pickle.dumps(server)
+    server_unpickled = pickle.loads(server_pickled)
+    assert server_unpickled._entrypoint_fnc is _browser_voice_entrypoint
+
+
+def test_browser_voice_worker_entrypoint_configures_manual_turn_handling_and_no_autonomous_interruptions(monkeypatch: Any) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from interlock.adapters import livekit_agent
+
+    captured_session_kwargs: dict[str, Any] = {}
+    captured_agent_kwargs: dict[str, Any] = {}
+
+    class MockAgentSession:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_session_kwargs.update(kwargs)
+
+        def on(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def start(self, *, room: Any, agent: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class MockAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_agent_kwargs.update(kwargs)
+
+    monkeypatch.setattr(livekit_agent, "AgentSession", MockAgentSession)
+    monkeypatch.setattr(livekit_agent, "Agent", MockAgent)
+    monkeypatch.setattr(livekit_agent.BrowserVoiceWorkerTransport, "connect", AsyncMock())
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "fake-dg")
+    monkeypatch.setenv("CARTESIA_API_KEY", "fake-cartesia")
+    monkeypatch.setenv("INTERLOCK_VOICE_TTS_VOICE_ID", "voice-1")
+    monkeypatch.setenv("INTERLOCK_VOICE_BACKEND_WS_URL", "ws://127.0.0.1:8000/api/v1")
+    monkeypatch.setenv("INTERLOCK_VOICE_WORKER_SECRET", "secret-1")
+
+    ctx = MagicMock()
+    ctx.room.name = "voice-test-session"
+    ctx.add_shutdown_callback = MagicMock()
+
+    asyncio.run(livekit_agent._browser_voice_entrypoint(ctx))
+
+    expected_turn_handling = {"turn_detection": "manual", "interruption": {"enabled": False}}
+    assert captured_session_kwargs.get("turn_handling") == expected_turn_handling
+    assert captured_agent_kwargs.get("turn_handling") == expected_turn_handling

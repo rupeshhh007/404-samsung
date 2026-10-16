@@ -8,6 +8,11 @@ interface ComposerProps {
   readonly onBargeIn?: () => void;
   readonly initialText?: string;
   readonly onTextChange?: (text: string) => void;
+  readonly voiceState?: 'idle' | 'connecting' | 'listening' | 'agent_speaking' | 'muted' | 'error';
+  readonly voiceError?: string | null;
+  readonly onStartVoice?: () => void;
+  readonly onStopVoice?: () => void;
+  readonly onToggleVoiceMute?: () => void;
 }
 
 export const Composer: React.FC<ComposerProps> = ({
@@ -17,6 +22,11 @@ export const Composer: React.FC<ComposerProps> = ({
   onBargeIn,
   initialText = '',
   onTextChange,
+  voiceState = 'idle',
+  voiceError = null,
+  onStartVoice,
+  onStopVoice,
+  onToggleVoiceMute,
 }) => {
   const [content, setContent] = useState(initialText);
   const [sending, setSending] = useState(false);
@@ -73,6 +83,29 @@ export const Composer: React.FC<ComposerProps> = ({
 
   return (
     <div className="editorial-composer relative">
+      <div className="mb-2 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wider" aria-live="polite">
+        {voiceState === 'idle' || voiceState === 'error' ? (
+          <button type="button" onClick={onStartVoice} disabled={disabled || !onStartVoice}
+            aria-label="Start microphone voice session" className="border border-[var(--console-ink)] px-3 py-1.5 disabled:opacity-40">
+            Start voice
+          </button>
+        ) : (
+          <>
+            <button type="button" onClick={onToggleVoiceMute}
+              disabled={voiceState === 'connecting' || !onToggleVoiceMute}
+              aria-label={voiceState === 'muted' ? 'Unmute microphone' : 'Mute microphone'}
+              className="border border-[var(--console-ink)] px-3 py-1.5 disabled:opacity-40">
+              {voiceState === 'muted' ? 'Unmute' : 'Mute'}
+            </button>
+            <button type="button" onClick={onStopVoice} disabled={!onStopVoice}
+              aria-label="Stop voice session" className="border border-[var(--console-ink)] px-3 py-1.5">
+              Stop voice
+            </button>
+          </>
+        )}
+        <span role="status">{voiceState.replace('_', ' ')}</span>
+        {voiceError && <span role="alert" className="text-red-700">{voiceError}</span>}
+      </div>
       <div className="flex w-full min-w-0 items-end gap-3">
         {/* Left Mono Prompt */}
         <span className="select-none pb-2 pl-1 font-mono text-base font-bold text-[var(--console-muted)]">

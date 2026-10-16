@@ -389,6 +389,36 @@ def _handle_transcript_hypothesis(
     return new_state, cmds
 
 
+def _handle_voice_transcription_timeout(
+    state: SessionState, env: EventEnvelope
+) -> Tuple[SessionState, List[Command]]:
+    """Recover from real user speech that produced no usable final transcript."""
+
+    duration_ms = int(env.payload["speech_duration_ms"])
+    new_state = state.model_copy(
+        update={
+            "last_sequence": env.sequence,
+            "metrics": state.metrics.model_copy(
+                update={"through_sequence": env.sequence}
+            ),
+        }
+    )
+    commands: List[Command] = [
+        PublishProjection(session_id=state.session_id, sequence=env.sequence)
+    ]
+    # Ignore tiny VAD blips/coughs; real speech gets a controlled repeat prompt.
+    if duration_ms >= 700:
+        commands.insert(
+            0,
+            RequestClarification(
+                session_id=state.session_id,
+                control_id=env.event_id,
+                clarification="VOICE_TRANSCRIPT_MISSING",
+            ),
+        )
+    return new_state, commands
+
+
 def _handle_control_intent(
     state: SessionState, env: EventEnvelope
 ) -> Tuple[SessionState, List[Command]]:
@@ -3734,6 +3764,7 @@ def _handle_protocol_violation(
 _HANDLERS = {
     "UserInputObserved": _handle_user_input,
     "TranscriptHypothesisObserved": _handle_transcript_hypothesis,
+    "VoiceTranscriptionTimeoutObserved": _handle_voice_transcription_timeout,
     "ControlIntentInterpreted": _handle_control_intent,
     "IntentRevisionProposed": _handle_intent_revision_proposed,
     "IntentRevisionCommitted": _handle_intent_revision_committed,

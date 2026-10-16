@@ -13,9 +13,11 @@ export const AssistantLine: React.FC<AssistantLineProps> = ({
   speech,
   supportingLine,
 }) => {
-  const isCancelled = speech.state === 'CANCELLED';
+  const isCancelled = speech.state === 'CANCELLED' || speech.cancellation_pending;
   const isBlocked = speech.state === 'BLOCKED';
+  const isCorrection = speech.state === 'CORRECTION_REQUIRED' || speech.correction_pending;
   const isUncertain = speech.act_type === 'UNCERTAINTY' || speech.requested_certainty !== 'CONFIRMED';
+  const isEmitting = speech.state === 'EMITTING' || speech.state === 'QUEUED';
   const text = speech.rendered_text ?? '';
 
   return (
@@ -54,8 +56,14 @@ export const AssistantLine: React.FC<AssistantLineProps> = ({
       <div className="editorial-truthlock">
         {isBlocked ? null : isCancelled ? (
           <span>Cancelled mid-speech</span>
+        ) : isCorrection ? (
+          <span>TRUTHLOCK · Correction required</span>
         ) : isUncertain ? (
           <span>TRUTHLOCK · Evidence incomplete</span>
+        ) : isEmitting ? (
+          <span>TRUTHLOCK · Playing...</span>
+        ) : speech.heard === false ? (
+          <span>TRUTHLOCK · Not heard</span>
         ) : (
           <span>TRUTHLOCK · Verified</span>
         )}
