@@ -1,22 +1,40 @@
 # INTERLOCK
 
+## Samsung PRISM Hackathon Presentation
+
+**Team:** 404NotFound  
+**Theme ID:** 05  
+**Institution:** Vellore Institute of Technology, Vellore
+
+[**View / Download INTERLOCK Project Presentation (PPTX)**](docs/submission/404NotFound_INTERLOCK_Samsung_PRISM_Theme05.pptx)
+
+---
+
 > **Interruptible agents should not confuse what the user wants, what the system tried, what the world actually did, and what the agent is allowed to say.**
 
 ## Visual Overview
 
-| **01. Landing & Architectural Pillars** | **02. Live Copilot — In-Flight Intent** |
-| :---: | :---: |
-| ![INTERLOCK Landing Page](docs/assets/screenshots/01_landing_page.png) | ![Intent In-Flight](docs/assets/screenshots/03_intent_in_flight.png) |
-| *Editorial Bauhaus landing view showing consistency pillars & backend health* | *User requests 11:00 AM booking with SafePoint preparation in flight* |
+Explore INTERLOCK through its actual interface: from a quiet starting point to an interrupted booking and the resulting mismatch between intent and confirmed reality.
 
-| **03. Interruption Race Climax (12:00 vs 11:00)** | **04. Night Instrument Design System** |
+| **01 / First impression** | **02 / Session ready** |
 | :---: | :---: |
-| ![Divergence Climax](docs/assets/screenshots/04_divergence_climax.png) | ![Kitchen Sink Primitives](docs/assets/screenshots/05_kitchen_sink_primitives.png) |
-| *The late commit race: Desired 12:00 PM ≠ Reality 11:00 AM, TRUTHLOCK uncertainty response* | *Component gallery showing tactile switches, LED indicators & status signals* |
+| ![INTERLOCK — editorial landing page](docs/assets/screenshots/01_landing_page.png) | ![INTERLOCK — new session and empty intent reality state](docs/assets/screenshots/02_initial_session.png) |
+| *The consistency runtime* | *An empty session, before any external effects* |
+
+| **03 / Action in flight** | **04 / The interruption race** |
+| :---: | :---: |
+| ![INTERLOCK — booking eleven o'clock pending verification](docs/assets/screenshots/03_intent_in_flight.png) | ![INTERLOCK — desired twelve o'clock diverges from confirmed eleven o'clock](docs/assets/screenshots/04_divergence_climax.png) |
+| *Desired: 11:00 · authoritative outcome still pending* | *Desired: 12:00 · reality: 11:00 · divergence open* |
+
+**05 / Interface primitives**
+
+![INTERLOCK — Night Instrument design system and component gallery](docs/assets/screenshots/05_kitchen_sink_primitives.png)
+
+<sub>Real application screenshots from the deterministic demo. INTERLOCK does not claim a booking has completed until authoritative evidence supports it.</sub>
 
 ---
 
-INTERLOCK is a consistency runtime for interruptible, real-time, multimodal AI agents. It keeps evolving user intent, concurrent execution, external side effects, evidence, and user-visible claims aligned when an interruption arrives at the worst possible moment.
+INTERLOCK is a consistency runtime for real-time AI agents that can be interrupted while they are thinking, calling tools, changing external state, and speaking.
 
 It is built around one uncomfortable fact:
 
@@ -422,4 +440,7 @@ Start here:
 
 ---
 
-With the existing `.venv`, run `PYTHONPATH=backend .venv/bin/pytest -q` and `.venv/bin/python -m compileall -q backend/interlock`. For the frontend shell, use Node.js 20.19+ and run `cd frontend && npm ci --legacy-peer-deps && npm run build`; the legacy-peer flag is needed by the existing Vite/Vitest peer dependency mix, and `package-lock.json` pins the tested dependency graph. A green local build does not imply that a real FDB-v3 benchmark scenario or the extension demo has run.
+<p align="center">
+  <strong>Anticipate early. Adapt safely. Verify before speaking.</strong>
+</p>
+
